@@ -62,6 +62,10 @@ using toml_utils::reject_nonfinite_floats;
         path == "input.fast_median" || path == "input.fast_median_min_points") {
         return "moved to the [preprocessing] table";
     }
+    if (path == "performance.bseg_ffa") {
+        return "loki search ffa always folds the whole series; for EP set "
+               "ep.nsegments (the number of segments EP starts from)";
+    }
     if (path == "performance.use_cuda") {
         return "use performance.backend = \"cuda\"";
     }
@@ -259,8 +263,6 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    [](auto& c) -> auto& { return c.nbins_min_lossy_bf; }),
         field<Cfg>("performance", "bseg_brute",
                    [](auto& c) -> auto& { return c.bseg_brute; }),
-        field<Cfg>("performance", "bseg_ffa",
-                   [](auto& c) -> auto& { return c.bseg_ffa; }),
         field<Cfg>("performance", "max_passing_candidates",
                    [](auto& c) -> auto& { return c.max_passing_candidates; }),
         // [output]
@@ -344,6 +346,8 @@ const toml_utils::Schema<EPTomlConfig>& ep_schema() {
             field<E>("ep", "n_runs", [](auto& c) -> auto& { return c.n_runs; }),
             field<E>("ep", "ref_segs",
                      [](auto& c) -> auto& { return c.ref_segs; }),
+            field<E>("ep", "nsegments",
+                     [](auto& c) -> auto& { return c.nsegments; }),
             orbit_prior(field<E>("ep", "p_orb_min",
                                  [](auto& c) -> auto& { return c.p_orb_min; })),
             orbit_prior(field<E>("ep", "m_c_max",
@@ -545,9 +549,10 @@ backend = "cpu"
 # GPU device ordinal, used when backend = "cuda"
 device = 0
 
-# Segment lengths in samples, powers of 2 (default: chosen by the planner)
-# bseg_brute = 1024     # brute-force fold segment
-# bseg_ffa = 2097152    # FFA segment (default: nsamps)
+# Minimum brute-force fold segment in samples (default: chosen by the
+# planner). The series is split into 2^L segments of equal length
+# ceil(nsamps / 2^L) >= bseg_brute, zero-filling fewer than 2^L samples.
+# bseg_brute = 1024
 
 [output]
 # Directory where candidate HDF5 file will be saved
@@ -803,7 +808,7 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
             nbins_max,
             nbins_min_lossy_bf,
             bseg_brute,
-            bseg_ffa,
+            std::nullopt, // one segment: the FFA folds the whole series
             snr_min,
             max_passing_candidates,
             use_boxcar_kadane};
@@ -861,10 +866,11 @@ public:
          SizeType nbins_max,
          SizeType nbins_min_lossy_bf,
          std::optional<SizeType> bseg_brute,
-         std::optional<SizeType> bseg_ffa,
+         std::optional<SizeType> nsegments,
          double snr_min,
          SizeType max_passing_candidates,
-         bool use_boxcar_kadane)
+         bool use_boxcar_kadane,
+         std::optional<SizeType> bseg_ffa_lock = std::nullopt)
         : m_nsamps(nsamps),
           m_tsamp(tsamp),
           m_nbins(nbins),
@@ -882,26 +888,49 @@ public:
           m_max_passing_candidates(max_passing_candidates),
           m_use_boxcar_kadane(use_boxcar_kadane),
           m_bseg_brute_explicit(bseg_brute),
-          m_bseg_ffa_explicit(bseg_ffa) {
+          m_nsegments_explicit(nsegments),
+          m_bseg_ffa_lock(bseg_brute.has_value() ? std::nullopt
+                                                 : bseg_ffa_lock) {
         if (m_param_limits.empty()) {
             throw std::runtime_error("coord_limits must be non-empty");
         }
-        // Before the defaults below, which depend on nbins.
+        // Before the defaults below, which depend on nbins and divide by
+        // nsamps (an integer divide by zero traps on x86).
+        error_check::check_greater_equal(m_nsamps, 4, "nsamps must be >= 4");
+        error_check::check_greater(m_tsamp, 0, "tsamp must be positive");
         error_check::check_greater_equal(m_nbins, 2, "nbins must be >= 2");
         m_nbins_f = (m_nbins / 2) + 1;
         m_nparams = m_param_limits.size();
         m_param_names.assign(kParamNames.end() - m_nparams, kParamNames.end());
-        m_f_min      = m_param_limits[m_nparams - 1].min;
-        m_f_max      = m_param_limits[m_nparams - 1].max;
-        m_bseg_brute = bseg_brute.value_or(get_bseg_brute_default());
-        m_bseg_ffa   = bseg_ffa.value_or(get_bseg_ffa_default());
+        m_f_min = m_param_limits[m_nparams - 1].min;
+        m_f_max = m_param_limits[m_nparams - 1].max;
+        // Before the brute length, whose default needs at least this many
+        // brute segments.
+        m_nsegments = nsegments.value_or(1);
+        error_check::check_greater_equal(m_nsegments, 1,
+                                         "nsegments must be >= 1");
+        error_check::check_power_of_2(m_nsegments, "nsegments");
+        m_nsamps_input = m_nsamps;
+        m_bseg_brute = bseg_brute.has_value() ? resolve_bseg_brute(*bseg_brute)
+                                              : get_bseg_brute_default();
+        if (truncating()) {
+            truncate_to_whole_segments();
+        }
+        m_nsegments_brute = nsegments_init_for(m_bseg_brute);
 
         m_nthreads = std::max(m_nthreads, 1);
         validate();
+        m_niters_ffa = static_cast<SizeType>(
+            std::countr_zero(m_nsegments_brute / m_nsegments));
+        m_bseg_ffa = m_bseg_brute << m_niters_ffa;
+        if (m_bseg_ffa_lock.has_value() && m_bseg_ffa != *m_bseg_ffa_lock) {
+            throw std::invalid_argument(fmt::format(
+                "no brute segment length gives {} segments of {} samples for "
+                "this chunk (got {})",
+                m_nsegments, *m_bseg_ffa_lock, m_bseg_ffa));
+        }
         m_tseg_brute = static_cast<double>(m_bseg_brute) * m_tsamp;
         m_tseg_ffa   = static_cast<double>(m_bseg_ffa) * m_tsamp;
-        m_niters_ffa =
-            static_cast<SizeType>(std::countr_zero(m_bseg_ffa / m_bseg_brute));
         m_scoring_widths =
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
         m_boxcar_kadane_biases = {1.42F, 0.76F, 0.41F};
@@ -909,13 +938,15 @@ public:
         spdlog::trace(
             "FFASearchConfig: nsamps={}, tsamp={}, nbins={}, eta={}, "
             "ducy_max={}, wtsp={}, use_fourier={}, nthreads={}, snr_min={}, "
-            "bseg_brute={}, bseg_ffa={}",
+            "bseg_brute={}, nsegments={}, bseg_ffa={}",
             m_nsamps, m_tsamp, m_nbins, m_eta, m_ducy_max, m_wtsp,
-            m_use_fourier, m_nthreads, m_snr_min, m_bseg_brute, m_bseg_ffa);
+            m_use_fourier, m_nthreads, m_snr_min, m_bseg_brute, m_nsegments,
+            m_bseg_ffa);
     }
 
     // Getters
     SizeType get_nsamps() const { return m_nsamps; }
+    SizeType get_nsamps_input() const { return m_nsamps_input; }
     double get_tsamp() const { return m_tsamp; }
     double get_tobs() const { return static_cast<double>(m_nsamps) * m_tsamp; }
     SizeType get_nbins() const { return m_nbins; }
@@ -934,6 +965,10 @@ public:
     SizeType get_nbins_min_lossy_bf() const { return m_nbins_min_lossy_bf; }
     SizeType get_bseg_brute() const { return m_bseg_brute; }
     SizeType get_bseg_ffa() const { return m_bseg_ffa; }
+    SizeType get_nsegments() const { return m_nsegments; }
+    bool has_explicit_nsegments() const noexcept {
+        return m_nsegments_explicit.has_value();
+    }
     double get_snr_min() const { return m_snr_min; }
     SizeType get_max_passing_candidates() const {
         return m_max_passing_candidates;
@@ -1002,24 +1037,13 @@ public:
     get_updated_config(SizeType nbins,
                        double eta,
                        std::span<const ParamLimit> param_limits) const {
-        return {m_nsamps,
-                m_tsamp,
-                nbins,
-                eta,
-                param_limits,
-                m_ducy_max,
-                m_wtsp,
-                m_use_fourier,
-                m_nthreads,
-                m_max_process_memory_gb,
-                m_octave_scale,
-                m_nbins_max,
-                m_nbins_min_lossy_bf,
-                m_bseg_brute_explicit,
-                m_bseg_ffa_explicit,
-                m_snr_min,
-                m_max_passing_candidates,
-                m_use_boxcar_kadane};
+        // EP chunks keep the segments of this config, so a segment index
+        // covers the same samples in every chunk; only the brute length
+        // (bseg_ffa >> k) is chosen per chunk.
+        return make_config(nbins, eta, param_limits, m_nsegments_explicit,
+                           m_nsegments_explicit.has_value()
+                               ? std::optional<SizeType>(m_bseg_ffa)
+                               : std::nullopt);
     }
 
     FFASearchConfig get_updated_config(SizeType nbins,
@@ -1033,8 +1057,44 @@ public:
         return get_updated_config(nbins, eta, param_limits);
     }
 
+    FFASearchConfig with_nsegments(SizeType nsegments) const {
+        return make_config(m_nbins, m_eta, m_param_limits, nsegments);
+    }
+
+    FFASearchConfig with_ep_default_nsegments(SizeType target_n_segs) const {
+        if (m_nsegments_explicit.has_value()) {
+            return make_config(m_nbins, m_eta, m_param_limits,
+                               m_nsegments_explicit);
+        }
+        // An explicit brute length fixes the brute segments; otherwise the
+        // default brute length is chosen to give at least `target` of them
+        // (segments of >= 2 samples).
+        SizeType target = std::bit_floor(std::max<SizeType>(1, target_n_segs));
+        target          = std::min(target, m_bseg_brute_explicit.has_value()
+                                               ? m_nsegments_brute
+                                               : std::bit_floor(m_nsamps / 2));
+        return make_config(m_nbins, m_eta, m_param_limits, target);
+    }
+
 private:
+    FFASearchConfig
+    make_config(SizeType nbins,
+                double eta,
+                std::span<const ParamLimit> param_limits,
+                std::optional<SizeType> nsegments,
+                std::optional<SizeType> bseg_ffa_lock = std::nullopt) const {
+        return FFASearchConfig(std::make_unique<Impl>(
+            m_nsamps_input, m_tsamp, nbins, eta, param_limits, m_ducy_max,
+            m_wtsp, m_use_fourier, m_nthreads, m_max_process_memory_gb,
+            m_octave_scale, m_nbins_max, m_nbins_min_lossy_bf,
+            m_bseg_brute_explicit, nsegments, m_snr_min,
+            m_max_passing_candidates, m_use_boxcar_kadane, bseg_ffa_lock));
+    }
+
+    /// Samples analysed: the input, or its leading whole segments when
+    /// truncating (see truncate_to_whole_segments).
     SizeType m_nsamps;
+    SizeType m_nsamps_input{};
     double m_tsamp;
     SizeType m_nbins;
     SizeType m_nbins_f;
@@ -1052,9 +1112,13 @@ private:
     SizeType m_max_passing_candidates;
     bool m_use_boxcar_kadane;
     std::optional<SizeType> m_bseg_brute_explicit;
-    std::optional<SizeType> m_bseg_ffa_explicit;
+    std::optional<SizeType> m_nsegments_explicit;
+    /// Segment length a chunk config must keep (default bseg_brute only).
+    std::optional<SizeType> m_bseg_ffa_lock;
 
     SizeType m_bseg_brute{};
+    SizeType m_nsegments{};
+    SizeType m_nsegments_brute{};
     SizeType m_bseg_ffa{};
     double m_tseg_brute{};
     double m_tseg_ffa{};
@@ -1085,19 +1149,14 @@ private:
                                          "bseg_brute must be >= 2");
         error_check::check_less(m_bseg_brute, m_nsamps,
                                 "bseg_brute must be less than nsamps");
-        const SizeType nsegments_init = nsegments_init_for(m_bseg_brute);
-        error_check::check_power_of_2(nsegments_init,
+        error_check::check_power_of_2(m_nsegments_brute,
                                       "bit_ceil(ceil(nsamps / bseg_brute))");
-        error_check::check_greater_equal(
-            m_bseg_ffa, m_bseg_brute,
-            "bseg_ffa must be greater than or equal to bseg_brute");
-        error_check::check_less_equal(
-            m_bseg_ffa, nsegments_init * m_bseg_brute,
-            "bseg_ffa must be <= nsegments_init * bseg_brute");
-        error_check::check_equal(m_bseg_ffa % m_bseg_brute, 0,
-                                 "bseg_ffa must be a multiple of bseg_brute");
-        error_check::check_power_of_2(m_bseg_ffa / m_bseg_brute,
-                                      "bseg_ffa / bseg_brute");
+        if (m_nsegments > m_nsegments_brute) {
+            throw std::invalid_argument(fmt::format(
+                "nsegments ({}) must be <= the number of brute-fold segments "
+                "({} of {} samples); lower bseg_brute or nsegments",
+                m_nsegments, m_nsegments_brute, m_bseg_brute));
+        }
         error_check::check_greater_equal(m_nparams, 1,
                                          "nparams must be at least 1");
         error_check::check_greater(m_f_min, 0.0,
@@ -1141,32 +1200,31 @@ private:
 
     /**
      * @brief Ascending list of valid brute segment lengths B such that
-     * bit_ceil(ceil(nsamps / B)) is a power of two >= 2 (and respects any
-     * explicit bseg_ffa cap). When nsamps is a power of two, these are the
-     * exact powers of two 2^1, 2^2, ..., nsamps / 2.
+     * B = ceil(nsamps / 2^m) and bit_ceil(ceil(nsamps / B)) = 2^m, with
+     * 2^m >= max(2, nsegments). These pad the series by fewer than 2^m
+     * samples. When nsamps is a power of two, these are the exact powers of
+     * two 2^1, 2^2, ..., nsamps / 2.
      */
     [[nodiscard]] std::vector<SizeType> candidate_bseg_brute() const {
         if (m_nsamps < 4) {
             return {};
         }
         std::vector<SizeType> cands;
-        if (m_bseg_ffa_explicit.has_value()) {
-            const SizeType cap = *m_bseg_ffa_explicit;
-            if (cap < 2) {
-                return {};
-            }
-            const auto max_shift = static_cast<SizeType>(std::countr_zero(cap));
+        if (m_bseg_ffa_lock.has_value()) {
+            // Brute lengths lock >> k that tile nsegments segments of the
+            // locked length, ascending.
+            const SizeType lock = *m_bseg_ffa_lock;
+            const auto max_shift =
+                static_cast<SizeType>(std::countr_zero(lock));
             for (SizeType s = max_shift + 1; s > 0; --s) {
                 const SizeType shift  = s - 1;
-                const SizeType bseg_k = cap >> shift;
+                const SizeType bseg_k = lock >> shift;
                 if (bseg_k < 2 || bseg_k >= m_nsamps) {
                     continue;
                 }
-                const SizeType nseg = nsegments_init_for(bseg_k);
-                if (nseg < 2 || cap < bseg_k || cap > nseg * bseg_k) {
-                    continue;
-                }
-                if (cands.empty() || cands.back() != bseg_k) {
+                const SizeType nseg = m_nsegments << shift;
+                if (truncating() ? nseg * bseg_k <= m_nsamps
+                                 : nsegments_init_for(bseg_k) == nseg) {
                     cands.push_back(bseg_k);
                 }
             }
@@ -1175,12 +1233,14 @@ private:
         const auto max_m =
             static_cast<SizeType>(std::bit_width(m_nsamps / 2)) - 1;
         for (SizeType m = max_m; m >= 1; --m) {
-            const SizeType nseg   = SizeType{1} << m;
-            const SizeType bseg_k = (m_nsamps + nseg - 1) / nseg;
-            if (bseg_k < 2 || bseg_k >= m_nsamps) {
+            const SizeType nseg = SizeType{1} << m;
+            // Truncating: whole segments of floor(nsamps / 2^m).
+            const SizeType bseg_k =
+                truncating() ? m_nsamps / nseg : (m_nsamps + nseg - 1) / nseg;
+            if (nseg < m_nsegments || bseg_k < 2 || bseg_k >= m_nsamps) {
                 continue;
             }
-            if (nsegments_init_for(bseg_k) != nseg) {
+            if (!truncating() && nsegments_init_for(bseg_k) != nseg) {
                 continue;
             }
             if (cands.empty() || cands.back() != bseg_k) {
@@ -1411,11 +1471,80 @@ private:
         return best;
     }
 
-    SizeType get_bseg_ffa_default() const {
-        if (m_bseg_brute == 0) {
-            return m_nsamps;
+    /**
+     * @brief Brute segment length for an explicit `bseg_brute`, which is a
+     * minimum.
+     *
+     * The FFA tree has 2^L brute segments of equal length ceil(nsamps / 2^L),
+     * L the largest with that length >= `bseg_brute`. Only the tail of the
+     * last segments is zero-filled: fewer than 2^L samples, a fraction below
+     * 1 / bseg_brute of the series. Zero-filled samples have zero weight in
+     * the variance channel, so they cost no S/N. When truncating (EP), the
+     * length is floor(nsamps / 2^L) and the tail is dropped instead. The
+     * result maps to itself, so a config built from its own effective
+     * length is the same config.
+     */
+    /// EP (nsegments > 1) analyses whole segments only: every EP segment
+    /// then holds the same number of samples, which the pruning thresholds
+    /// assume. A pure FFA search (one segment) zero-fills the tail instead,
+    /// which costs no S/N.
+    [[nodiscard]] bool truncating() const noexcept { return m_nsegments > 1; }
+
+    /**
+     * @brief Keep the leading 2^L * bseg_brute samples, bseg_brute =
+     * floor(nsamps / 2^L), dropping fewer than 2^L samples (a fraction
+     * below 1 / bseg_brute). An EP chunk keeps the segments of its sweep:
+     * nsegments * bseg_ffa samples.
+     */
+    void truncate_to_whole_segments() {
+        SizeType nseg_brute = 1;
+        if (m_bseg_ffa_lock.has_value()) {
+            if (*m_bseg_ffa_lock % m_bseg_brute != 0) {
+                throw std::invalid_argument(fmt::format(
+                    "no brute segment length gives {} segments of {} samples "
+                    "for this chunk (got bseg_brute {})",
+                    m_nsegments, *m_bseg_ffa_lock, m_bseg_brute));
+            }
+            nseg_brute = m_nsegments * (*m_bseg_ffa_lock / m_bseg_brute);
+        } else {
+            while (m_nsamps / (nseg_brute * 2) >= m_bseg_brute) {
+                nseg_brute *= 2;
+            }
+            m_bseg_brute = m_nsamps / nseg_brute;
         }
-        return nsegments_init_for(m_bseg_brute) * m_bseg_brute;
+        if (nseg_brute * m_bseg_brute > m_nsamps) {
+            throw std::invalid_argument(
+                fmt::format("{} segments of {} samples exceed nsamps ({})",
+                            nseg_brute, m_bseg_brute, m_nsamps));
+        }
+        m_nsamps = nseg_brute * m_bseg_brute;
+        if (m_nsamps != m_nsamps_input) {
+            spdlog::debug("FFASearchConfig: EP analyses the first {} of {} "
+                          "samples ({} brute segments of {})",
+                          m_nsamps, m_nsamps_input, nseg_brute, m_bseg_brute);
+        }
+    }
+
+    [[nodiscard]] SizeType resolve_bseg_brute(SizeType bseg_min) const {
+        error_check::check_greater_equal(bseg_min, 2,
+                                         "bseg_brute must be >= 2");
+        std::optional<SizeType> best;
+        for (SizeType nseg = 2; nseg <= m_nsamps / 2; nseg *= 2) {
+            const SizeType bseg_k =
+                truncating() ? m_nsamps / nseg : (m_nsamps + nseg - 1) / nseg;
+            if (bseg_k < bseg_min) {
+                break;
+            }
+            if (truncating() || nsegments_init_for(bseg_k) == nseg) {
+                best = bseg_k;
+            }
+        }
+        if (!best.has_value()) {
+            throw std::invalid_argument(
+                fmt::format("bseg_brute ({}) must be at most nsamps / 2 ({})",
+                            bseg_min, m_nsamps / 2));
+        }
+        return *best;
     }
 };
 
@@ -1437,7 +1566,7 @@ FFASearchConfig::FFASearchConfig(SizeType nsamps,
                                  SizeType nbins_max,
                                  SizeType nbins_min_lossy_bf,
                                  std::optional<SizeType> bseg_brute,
-                                 std::optional<SizeType> bseg_ffa,
+                                 std::optional<SizeType> nsegments,
                                  double snr_min,
                                  SizeType max_passing_candidates,
                                  bool use_boxcar_kadane)
@@ -1455,10 +1584,13 @@ FFASearchConfig::FFASearchConfig(SizeType nsamps,
                                     nbins_max,
                                     nbins_min_lossy_bf,
                                     bseg_brute,
-                                    bseg_ffa,
+                                    nsegments,
                                     snr_min,
                                     max_passing_candidates,
                                     use_boxcar_kadane)) {}
+
+FFASearchConfig::FFASearchConfig(std::unique_ptr<Impl> impl)
+    : m_impl(std::move(impl)) {}
 
 FFASearchConfig::~FFASearchConfig()                          = default;
 FFASearchConfig::FFASearchConfig(FFASearchConfig&&) noexcept = default;
@@ -1476,6 +1608,9 @@ FFASearchConfig& FFASearchConfig::operator=(const FFASearchConfig& other) {
 
 SizeType FFASearchConfig::get_nsamps() const noexcept {
     return m_impl->get_nsamps();
+}
+SizeType FFASearchConfig::get_nsamps_input() const noexcept {
+    return m_impl->get_nsamps_input();
 }
 double FFASearchConfig::get_tsamp() const noexcept {
     return m_impl->get_tsamp();
@@ -1518,6 +1653,12 @@ SizeType FFASearchConfig::get_bseg_brute() const noexcept {
 }
 SizeType FFASearchConfig::get_bseg_ffa() const noexcept {
     return m_impl->get_bseg_ffa();
+}
+SizeType FFASearchConfig::get_nsegments() const noexcept {
+    return m_impl->get_nsegments();
+}
+bool FFASearchConfig::has_explicit_nsegments() const noexcept {
+    return m_impl->has_explicit_nsegments();
 }
 double FFASearchConfig::get_snr_min() const noexcept {
     return m_impl->get_snr_min();
@@ -1590,6 +1731,15 @@ FFASearchConfig FFASearchConfig::get_updated_config(SizeType nbins,
                                                     double f_min,
                                                     double f_max) const {
     return m_impl->get_updated_config(nbins, eta, f_min, f_max);
+}
+
+FFASearchConfig
+FFASearchConfig::with_ep_default_nsegments(SizeType target_n_segs) const {
+    return m_impl->with_ep_default_nsegments(target_n_segs);
+}
+
+FFASearchConfig FFASearchConfig::with_nsegments(SizeType nsegments) const {
+    return m_impl->with_nsegments(nsegments);
 }
 
 FFASearchConfig FFASearchConfig::from_toml(const std::filesystem::path& path,
@@ -1683,7 +1833,7 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                                SizeType nbins_max,
                                SizeType nbins_min_lossy_bf,
                                std::optional<SizeType> bseg_brute,
-                               std::optional<SizeType> bseg_ffa,
+                               std::optional<SizeType> nsegments,
                                double snr_min,
                                SizeType max_passing_candidates,
                                SizeType prune_poly_order,
@@ -1709,7 +1859,7 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                       nbins_max,
                       nbins_min_lossy_bf,
                       bseg_brute,
-                      bseg_ffa,
+                      nsegments,
                       snr_min,
                       max_passing_candidates,
                       use_boxcar_kadane),
@@ -1812,6 +1962,39 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override);
 }
 
+EPSearchConfig
+EPSearchConfig::with_ep_default_nsegments(SizeType target_n_segs) const {
+    auto ffa = FFASearchConfig::with_ep_default_nsegments(target_n_segs);
+    return EPSearchConfig(
+        std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
+        m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
+        m_ep_impl->m_propagator_significance,
+        m_ep_impl->m_validation_significance,
+        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override);
+}
+
+EPSearchConfig EPSearchConfig::from_toml(const std::filesystem::path& path,
+                                         std::optional<SizeType> nsamps,
+                                         std::optional<double> tsamp) {
+    const auto toml_cfg = EPTomlConfig::load(path);
+    return toml_cfg.to_ep_search_config(nsamps, tsamp);
+}
+
+EPSearchConfig EPSearchConfig::from_toml_string(std::string_view toml_content,
+                                                std::optional<SizeType> nsamps,
+                                                std::optional<double> tsamp) {
+    const auto toml_cfg = EPTomlConfig::from_string(toml_content);
+    return toml_cfg.to_ep_search_config(nsamps, tsamp);
+}
+
+void EPSearchConfig::write_default_toml(const std::filesystem::path& path) {
+    EPTomlConfig::write_default(path);
+}
+
+std::string_view EPSearchConfig::default_toml_string() {
+    return EPTomlConfig::default_toml_string();
+}
+
 // ==============================================================================
 // EPTomlConfig Implementation
 // ==============================================================================
@@ -1850,6 +2033,11 @@ void validate_ep_config(const EPTomlConfig& cfg) {
     if (cfg.prune_poly_order < 1) {
         throw std::invalid_argument(fmt::format(
             "ep.prune_poly_order must be >= 1 (got {})", cfg.prune_poly_order));
+    }
+    if (cfg.nsegments.has_value() &&
+        (*cfg.nsegments < 2 || !std::has_single_bit(*cfg.nsegments))) {
+        throw std::invalid_argument(fmt::format(
+            "ep.nsegments must be a power of 2 >= 2 (got {})", *cfg.nsegments));
     }
     if (cfg.n_runs.has_value() && *cfg.n_runs < 1) {
         throw std::invalid_argument("ep.n_runs must be >= 1");
@@ -2002,11 +2190,16 @@ ref_ducy = 0.1
 prune_poly_order = 3
 
 # Number of runs (reference segments) to prune. Set either n_runs or ref_segs,
-# not both: the pruning needs the runs it prunes.
+# not both. If neither is set, loki search ep prunes 16 runs (fewer on a
+# short series).
 n_runs = 16
 
 # Explicit reference segments, instead of n_runs (exclusive with n_runs)
 # ref_segs = [0, 1]
+
+# Number of segments the pruning starts from: the FFA stops when it has merged
+# the brute-fold segments down to this many. A power of 2 (default 128).
+# nsegments = 128
 
 # Orbit and mass priors of the circular (crackle) pruning. A [search.orbit]
 # table sets them instead.
@@ -2059,10 +2252,9 @@ backend = "cpu"
 # GPU device ordinal, used when backend = "cuda"
 device = 0
 
-# FFA segment length in samples: a power of 2 below nsamps, since the pruning
-# needs at least one FFA level. Use nsamps / 128 for a long series.
-bseg_ffa = 16384
-# Brute-force fold segment in samples, a power of 2 (default: the planner's)
+# Minimum brute-force fold segment in samples (default: chosen by the
+# planner). The series is split into 2^L segments of equal length
+# ceil(nsamps / 2^L) >= bseg_brute, zero-filling fewer than 2^L samples.
 # bseg_brute = 1024
 
 [candidates]
@@ -2154,12 +2346,13 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
         throw std::invalid_argument(
             "ep.n_runs and ep.ref_segs are exclusive: set one of them");
     }
-    if (!n_runs.has_value() && !ref_segs.has_value()) {
-        throw std::invalid_argument(
-            "ep.n_runs or ep.ref_segs must be set: the pruning needs the runs "
-            "it prunes");
-    }
+    // With neither set, the CLI defaults to 16 runs (clamped to the
+    // reference-segment pool); the library prunes every pool segment.
     auto ffa = to_search_config(override_nsamps, override_tsamp);
+    ffa =
+        nsegments.has_value()
+            ? ffa.with_nsegments(*nsegments)
+            : ffa.with_ep_default_nsegments(EPSearchConfig::kDefaultEPSegments);
     if (ffa.get_nparams() < 2) {
         throw std::invalid_argument(
             "frequency-only EP is unsupported: set a search range in "
@@ -2167,13 +2360,12 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
             "[search.orbit] table; use 'loki search ffa' for a frequency-only "
             "search");
     }
-    // The pruning needs at least one FFA level above the brute-force segment,
-    // so the FFA segment must be shorter than the series.
-    if (ffa.get_bseg_ffa() >= ffa.get_nsamps()) {
+    // The pruning needs at least two segments, each shorter than the series.
+    if (ffa.get_nsegments() < 2 || ffa.get_bseg_ffa() >= ffa.get_nsamps()) {
         throw std::invalid_argument(fmt::format(
-            "performance.bseg_ffa ({}) must be below nsamps ({}): the EP "
-            "pruning needs at least one FFA level",
-            ffa.get_bseg_ffa(), ffa.get_nsamps()));
+            "the EP pruning needs at least two segments shorter than the "
+            "series (nsegments {}, segments of {} samples, nsamps {})",
+            ffa.get_nsegments(), ffa.get_bseg_ffa(), ffa.get_nsamps()));
     }
     // The pruning checks its leaves against the orbit of [search.orbit].
     double orbit_p_min = p_orb_min;

@@ -651,7 +651,7 @@ transform_taylor_accel(double* __restrict__ leaves_tree,
     if (tid >= n_leaves) {
         return;
     }
-    if (validation_mask[tid] == 0) {
+    if (validation_mask != nullptr && validation_mask[tid] == 0) {
         return;
     }
 
@@ -700,7 +700,7 @@ transform_taylor_jerk(double* __restrict__ leaves_tree,
     if (tid >= n_leaves) {
         return;
     }
-    if (validation_mask[tid] == 0) {
+    if (validation_mask != nullptr && validation_mask[tid] == 0) {
         return;
     }
 
@@ -759,7 +759,7 @@ transform_taylor_snap(double* __restrict__ leaves_tree,
     if (tid >= n_leaves) {
         return;
     }
-    if (validation_mask[tid] == 0) {
+    if (validation_mask != nullptr && validation_mask[tid] == 0) {
         return;
     }
 
@@ -1100,26 +1100,6 @@ __global__ void kernel_poly_taylor_resolve_transform_batch(
     }
 }
 
-// Branching fast path (every leaf has one child): copy the leaves, the
-// identity origins and an all-valid mask in one pass.
-__global__ void kernel_copy_unbranched(const double* __restrict__ leaves_tree,
-                                       double* __restrict__ leaves_branch,
-                                       uint32_t* __restrict__ leaves_origins,
-                                       uint8_t* __restrict__ validation_mask,
-                                       uint32_t n_leaves,
-                                       uint32_t leaves_stride) {
-    const uint32_t tid    = (blockIdx.x * blockDim.x) + threadIdx.x;
-    const size_t n_values = static_cast<size_t>(n_leaves) * leaves_stride;
-    for (size_t i = tid; i < n_values;
-         i += static_cast<size_t>(gridDim.x) * blockDim.x) {
-        leaves_branch[i] = leaves_tree[i];
-    }
-    if (tid < n_leaves) {
-        leaves_origins[tid]  = tid;
-        validation_mask[tid] = 1;
-    }
-}
-
 __global__ void kernel_poly_taylor_report_batch(
     double* __restrict__ leaves_tree, uint32_t n_leaves, uint32_t n_params) {
     const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -1179,15 +1159,18 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
-    // Per-batch flag word (kBranchFlagOverflow), read back with the counts.
+    // Pack [n_leaves_branched, branch_flags] into the 8-byte d_minmax_out
+    // scratch slot (unused during branch) for a single 8-byte D2H copy.
+    auto* const d_branch_out =
+        reinterpret_cast<uint32_t*>(scratch_ws.d_minmax_out);
     cuda_utils::check_cuda_call(
-        cudaMemsetAsync(scratch_ws.d_reduce_out, 0, sizeof(uint32_t), stream),
+        cudaMemsetAsync(d_branch_out + 1, 0, sizeof(uint32_t), stream),
         "cudaMemsetAsync failed");
     if constexpr (NPARAMS == 2) {
         kernel_analyze_and_branch_accel<<<grid_dim, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
             static_cast<double>(nbins), eta, branch_max, branch_ws,
-            scratch_ws.d_reduce_out);
+            d_branch_out + 1);
     } else if constexpr (NPARAMS == 3) {
         const dim3 grid_lanes(
             ((n_leaves * kJerkBranchLanes) + kThreadsPerBlock - 1) /
@@ -1196,49 +1179,36 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
         kernel_analyze_and_branch_jerk<<<grid_lanes, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
             static_cast<double>(nbins), eta, branch_max, branch_ws,
-            scratch_ws.d_reduce_out);
+            d_branch_out + 1);
     } else {
         kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
             static_cast<double>(nbins), eta, branch_max, branch_ws,
-            scratch_ws.d_reduce_out);
+            d_branch_out + 1);
     }
     cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
 
     // compute output size and offsets (leaf_output_offset)
+    const utils::BranchOffsetOutIter offset_out{
+        branch_ws.leaf_output_offset, branch_ws.leaf_branch_count, d_branch_out,
+        0U, static_cast<uint32_t>(n_leaves - 1)};
     cuda_utils::check_cuda_call(
         cub::DeviceScan::ExclusiveSum(
             scratch_ws.cub_temp_storage, scratch_ws.cub_temp_bytes,
-            branch_ws.leaf_branch_count, branch_ws.leaf_output_offset, n_leaves,
-            stream),
+            branch_ws.leaf_branch_count, offset_out, n_leaves, stream),
         "cub::DeviceScan::ExclusiveSum failed");
-    uint32_t* const last_offset =
-        scratch_ws.h_scalars + memory::CUBScratchArena::kBranchLastOffset;
-    uint32_t* const last_count =
-        scratch_ws.h_scalars + memory::CUBScratchArena::kBranchLastCount;
-    uint32_t* const branch_flags =
-        scratch_ws.h_scalars + memory::CUBScratchArena::kReduceOut;
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(last_offset,
-                        branch_ws.leaf_output_offset + (n_leaves - 1),
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(last_count,
-                        branch_ws.leaf_branch_count + (n_leaves - 1),
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(branch_flags, scratch_ws.d_reduce_out, sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost, stream),
+        cudaMemcpyAsync(scratch_ws.h_scalars, d_branch_out,
+                        2 * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
     // Unavoidable sync
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize branch kernel failed");
-    const SizeType n_leaves_branched = *last_offset + *last_count;
+    const SizeType n_leaves_branched = scratch_ws.h_scalars[0];
+    const uint32_t branch_flags      = scratch_ws.h_scalars[1];
     // Nothing below writes a child past the workspace: reject the batch here.
     utils::check_branch_fits(
-        *branch_flags, n_leaves_branched,
+        branch_flags, n_leaves_branched,
         utils::branch_capacity(leaves_branch, leaves_origins, validation_mask,
                                kLeavesStride),
         branch_max);
@@ -1253,10 +1223,11 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
              kThreadsPerBlock - 1) /
             kThreadsPerBlock);
         cuda_utils::check_kernel_launch_params(grid_copy, block_dim);
-        kernel_copy_unbranched<<<grid_copy, block_dim, 0, stream>>>(
-            leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
-            validation_mask.data(), static_cast<uint32_t>(n_leaves),
-            static_cast<uint32_t>(kLeavesStride));
+        utils::kernel_copy_unbranched<double>
+            <<<grid_copy, block_dim, 0, stream>>>(
+                leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+                validation_mask.data(), static_cast<uint32_t>(n_leaves),
+                static_cast<uint32_t>(kLeavesStride));
         cuda_utils::check_last_cuda_error("kernel_copy_unbranched failed");
         return n_leaves_branched;
     }

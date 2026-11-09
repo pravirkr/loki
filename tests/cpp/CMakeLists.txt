@@ -62,8 +62,9 @@ foreach(kind api internal)
 endforeach()
 
 target_link_libraries(
-  ${LOKI_INTERNAL_TEST_TARGET} PRIVATE ${PROJECT_NAME}::internal Boost::math
-                                       $<BUILD_INTERFACE:tomlplusplus> pocketfft
+  ${LOKI_INTERNAL_TEST_TARGET}
+  PRIVATE ${PROJECT_NAME}::internal Boost::math $<BUILD_INTERFACE:tomlplusplus>
+          $<BUILD_INTERFACE:xsimd> pocketfft
 )
 
 # These internal tests use Thrust device vectors, so nvcc must compile them, with the
@@ -220,10 +221,10 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
     "n_runs = 1\n"
     "min_pd = 0.1\n"
     "prune_poly_order = 2\n"
+    "nsegments = 8\n"
     "[performance]\n"
     "nthreads = 1\n"
     "max_process_memory_gb = 4.0\n"
-    "bseg_ffa = 4096\n"
     "[output]\n"
     "outdir = \"${LOKI_EP_CLI_DIR}/out\"\n"
     "prefix = \"cli\"\n"

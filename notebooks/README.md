@@ -18,8 +18,35 @@ the scores against the expected null distribution.
 | [08_ep_jerk](08_ep_jerk.ipynb) | EP search over jerk, acceleration and frequency | 3 min |
 | [09_ep_circular](09_ep_circular.ipynb) | EP search over five parameters for a 20-minute circular orbit | 7 min |
 
-Runtimes are on an Apple M5 with 4 threads (`NTHREADS` in each notebook), CPU only.
+Runtimes in the table are on an Apple M5 with 4 threads (`NTHREADS` in each
+notebook), CPU only. The search times printed inside the notebooks are from
+the x86 machine that produced the saved outputs (next section).
 The EP notebooks (7–9) need up to about 11 GB of memory, the others at most 6 GB.
+
+## Reading the saved outputs
+
+The saved outputs come from one machine: an AMD EPYC 9334 (x86-64, GCC 12,
+`-march=native`) with 4 threads, CPU only. Every random draw is seeded
+(`SEED`: the simulated pulsar and noise, the threshold design and its
+evaluation), so a rerun on the same machine, build and `NTHREADS`
+reproduces them exactly.
+
+On another CPU or compiler, expect small differences. Release builds use
+`-ffast-math` and SIMD, so floating-point results can differ in the last
+bits between platforms (see "Numerics" in `docs/architecture.md`):
+
+- FFA notebooks (1–5): best-fit parameters and S/N can differ in the last
+  printed digits.
+- EP notebooks (6–9): the threshold design and the trimming at `max_sugg`
+  amplify those last bits. Expect slightly different P_d and cost figures
+  in notebook 6, and in notebook 9 a different best run and a different
+  count of runs that kept the pulsar (3 of 16 on an Apple M5, 2 of 16
+  here).
+
+Compare such results by what they show (the pulsar recovered near the
+injected parameters, the score distribution against the null model), not
+digit for digit. Search times printed in the notebooks are wall time on
+the machine that ran them.
 
 ## Running
 

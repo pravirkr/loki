@@ -400,8 +400,8 @@ none of YAML's implicit typing (`no`, `1e3`, `1:30`). The configs are flat
 - Results files record how they were produced, as root attributes written by
   `search::write_run_provenance` after the run: `config_effective` (the
   config after defaults and command-line overrides), `command_line` and
-  `loki_version`. The CLI writes them for FFA and EP searches. The FFA search
-  also keeps the raw config file text in `config_toml`.
+  `loki_version`. The CLI writes them for FFA and EP searches, and both
+  also keep the raw config file text in `config_toml`.
 
 ## Memory planning
 

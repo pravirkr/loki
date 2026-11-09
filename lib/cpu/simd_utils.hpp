@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+
 #include <xsimd/xsimd.hpp>
 #ifdef __x86_64__
 #include <immintrin.h> // For AVX-512 intrinsics
@@ -10,6 +12,97 @@
 #include "loki/common/types.hpp"
 
 namespace loki::simd_utils {
+
+// Block transposes. Rows come as pointers (they need not be evenly spaced,
+// and a caller may point unused rows at a dummy), and each primitive reads
+// and writes exactly one block, so callers handle the tail columns.
+
+#if defined(__AVX2__)
+/// dst[c][r] = src[r][c] for an 8 x 8 block of floats.
+[[gnu::always_inline]] inline void transpose8x8(const float* const* src,
+                                                float* const* dst) noexcept {
+    const __m256 t0 =
+        _mm256_unpacklo_ps(_mm256_loadu_ps(src[0]), _mm256_loadu_ps(src[1]));
+    const __m256 t1 =
+        _mm256_unpackhi_ps(_mm256_loadu_ps(src[0]), _mm256_loadu_ps(src[1]));
+    const __m256 t2 =
+        _mm256_unpacklo_ps(_mm256_loadu_ps(src[2]), _mm256_loadu_ps(src[3]));
+    const __m256 t3 =
+        _mm256_unpackhi_ps(_mm256_loadu_ps(src[2]), _mm256_loadu_ps(src[3]));
+    const __m256 t4 =
+        _mm256_unpacklo_ps(_mm256_loadu_ps(src[4]), _mm256_loadu_ps(src[5]));
+    const __m256 t5 =
+        _mm256_unpackhi_ps(_mm256_loadu_ps(src[4]), _mm256_loadu_ps(src[5]));
+    const __m256 t6 =
+        _mm256_unpacklo_ps(_mm256_loadu_ps(src[6]), _mm256_loadu_ps(src[7]));
+    const __m256 t7 =
+        _mm256_unpackhi_ps(_mm256_loadu_ps(src[6]), _mm256_loadu_ps(src[7]));
+    const __m256 u0 = _mm256_shuffle_ps(t0, t2, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 u1 = _mm256_shuffle_ps(t0, t2, _MM_SHUFFLE(3, 2, 3, 2));
+    const __m256 u2 = _mm256_shuffle_ps(t1, t3, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 u3 = _mm256_shuffle_ps(t1, t3, _MM_SHUFFLE(3, 2, 3, 2));
+    const __m256 u4 = _mm256_shuffle_ps(t4, t6, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 u5 = _mm256_shuffle_ps(t4, t6, _MM_SHUFFLE(3, 2, 3, 2));
+    const __m256 u6 = _mm256_shuffle_ps(t5, t7, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 u7 = _mm256_shuffle_ps(t5, t7, _MM_SHUFFLE(3, 2, 3, 2));
+    _mm256_storeu_ps(dst[0], _mm256_permute2f128_ps(u0, u4, 0x20));
+    _mm256_storeu_ps(dst[1], _mm256_permute2f128_ps(u1, u5, 0x20));
+    _mm256_storeu_ps(dst[2], _mm256_permute2f128_ps(u2, u6, 0x20));
+    _mm256_storeu_ps(dst[3], _mm256_permute2f128_ps(u3, u7, 0x20));
+    _mm256_storeu_ps(dst[4], _mm256_permute2f128_ps(u0, u4, 0x31));
+    _mm256_storeu_ps(dst[5], _mm256_permute2f128_ps(u1, u5, 0x31));
+    _mm256_storeu_ps(dst[6], _mm256_permute2f128_ps(u2, u6, 0x31));
+    _mm256_storeu_ps(dst[7], _mm256_permute2f128_ps(u3, u7, 0x31));
+}
+#endif
+
+#if defined(__AVX512F__)
+/// dst[c * dst_stride + r] = src[r][c] for a 16 x 16 block of floats.
+[[gnu::always_inline]] inline void
+transpose16x16(const float* const* src,
+               float* __restrict__ dst,
+               SizeType dst_stride) noexcept {
+    // NOLINTBEGIN(modernize-avoid-c-arrays): std::array drops the vector alignment attribute
+    __m512 r[16];
+    __m512 t[16];
+    // NOLINTEND(modernize-avoid-c-arrays)
+    for (SizeType i = 0; i < 16; ++i) {
+        r[i] = _mm512_loadu_ps(src[i]);
+    }
+    // 32-bit interleave within 128-bit lanes, then 64-bit.
+    for (SizeType i = 0; i < 16; i += 2) {
+        t[i]     = _mm512_unpacklo_ps(r[i], r[i + 1]);
+        t[i + 1] = _mm512_unpackhi_ps(r[i], r[i + 1]);
+    }
+    for (SizeType i = 0; i < 16; i += 4) {
+        r[i] = _mm512_castpd_ps(_mm512_unpacklo_pd(_mm512_castps_pd(t[i]),
+                                                   _mm512_castps_pd(t[i + 2])));
+        r[i + 1] = _mm512_castpd_ps(_mm512_unpackhi_pd(
+            _mm512_castps_pd(t[i]), _mm512_castps_pd(t[i + 2])));
+        r[i + 2] = _mm512_castpd_ps(_mm512_unpacklo_pd(
+            _mm512_castps_pd(t[i + 1]), _mm512_castps_pd(t[i + 3])));
+        r[i + 3] = _mm512_castpd_ps(_mm512_unpackhi_pd(
+            _mm512_castps_pd(t[i + 1]), _mm512_castps_pd(t[i + 3])));
+    }
+    // r[4 g + j] holds column (4 l + j) of rows 4 g .. 4 g + 3 in 128-bit
+    // lane l. Gather the four row groups of each column: 128-bit shuffles.
+    for (SizeType j = 0; j < 4; ++j) {
+        const __m512 a = _mm512_shuffle_f32x4(r[j], r[4 + j], 0x44);
+        const __m512 b = _mm512_shuffle_f32x4(r[j], r[4 + j], 0xEE);
+        const __m512 c = _mm512_shuffle_f32x4(r[8 + j], r[12 + j], 0x44);
+        const __m512 d = _mm512_shuffle_f32x4(r[8 + j], r[12 + j], 0xEE);
+        // a = [g0 l0, g0 l1, g1 l0, g1 l1], c likewise for g2, g3.
+        _mm512_storeu_ps(dst + ((0 + j) * dst_stride),
+                         _mm512_shuffle_f32x4(a, c, 0x88));
+        _mm512_storeu_ps(dst + ((4 + j) * dst_stride),
+                         _mm512_shuffle_f32x4(a, c, 0xDD));
+        _mm512_storeu_ps(dst + ((8 + j) * dst_stride),
+                         _mm512_shuffle_f32x4(b, d, 0x88));
+        _mm512_storeu_ps(dst + ((12 + j) * dst_stride),
+                         _mm512_shuffle_f32x4(b, d, 0xDD));
+    }
+}
+#endif
 
 namespace detail {
 
@@ -45,51 +138,14 @@ inline void transpose_avx2(const float* __restrict__ src,
                            SizeType nbins,
                            SizeType row_stride) noexcept {
     const SizeType nbins_rounded = ((nbins + 7) / 8) * 8;
+    std::array<const float*, 8> in{};
+    std::array<float*, 8> out{};
     for (SizeType jb = 0; jb < nbins_rounded; jb += 8) {
-        __m256 r0 = _mm256_loadu_ps(&src[0 * row_stride + jb]);
-        __m256 r1 = _mm256_loadu_ps(&src[1 * row_stride + jb]);
-        __m256 r2 = _mm256_loadu_ps(&src[2 * row_stride + jb]);
-        __m256 r3 = _mm256_loadu_ps(&src[3 * row_stride + jb]);
-        __m256 r4 = _mm256_loadu_ps(&src[4 * row_stride + jb]);
-        __m256 r5 = _mm256_loadu_ps(&src[5 * row_stride + jb]);
-        __m256 r6 = _mm256_loadu_ps(&src[6 * row_stride + jb]);
-        __m256 r7 = _mm256_loadu_ps(&src[7 * row_stride + jb]);
-
-        __m256 tmp0 = _mm256_unpacklo_ps(r0, r1);
-        __m256 tmp1 = _mm256_unpackhi_ps(r0, r1);
-        __m256 tmp2 = _mm256_unpacklo_ps(r2, r3);
-        __m256 tmp3 = _mm256_unpackhi_ps(r2, r3);
-        __m256 tmp4 = _mm256_unpacklo_ps(r4, r5);
-        __m256 tmp5 = _mm256_unpackhi_ps(r4, r5);
-        __m256 tmp6 = _mm256_unpacklo_ps(r6, r7);
-        __m256 tmp7 = _mm256_unpackhi_ps(r6, r7);
-
-        __m256 tmp8 = _mm256_shuffle_ps(tmp0, tmp2, _MM_SHUFFLE(1, 0, 1, 0));
-        __m256 tmp9 = _mm256_shuffle_ps(tmp0, tmp2, _MM_SHUFFLE(3, 2, 3, 2));
-        __m256 tmpa = _mm256_shuffle_ps(tmp1, tmp3, _MM_SHUFFLE(1, 0, 1, 0));
-        __m256 tmpb = _mm256_shuffle_ps(tmp1, tmp3, _MM_SHUFFLE(3, 2, 3, 2));
-        __m256 tmpc = _mm256_shuffle_ps(tmp4, tmp6, _MM_SHUFFLE(1, 0, 1, 0));
-        __m256 tmpd = _mm256_shuffle_ps(tmp4, tmp6, _MM_SHUFFLE(3, 2, 3, 2));
-        __m256 tmpe = _mm256_shuffle_ps(tmp5, tmp7, _MM_SHUFFLE(1, 0, 1, 0));
-        __m256 tmpf = _mm256_shuffle_ps(tmp5, tmp7, _MM_SHUFFLE(3, 2, 3, 2));
-
-        r0 = _mm256_permute2f128_ps(tmp8, tmpc, 0x20);
-        r1 = _mm256_permute2f128_ps(tmp9, tmpd, 0x20);
-        r2 = _mm256_permute2f128_ps(tmpa, tmpe, 0x20);
-        r3 = _mm256_permute2f128_ps(tmpb, tmpf, 0x20);
-        r4 = _mm256_permute2f128_ps(tmp8, tmpc, 0x31);
-        r5 = _mm256_permute2f128_ps(tmp9, tmpd, 0x31);
-        r6 = _mm256_permute2f128_ps(tmpa, tmpe, 0x31);
-        r7 = _mm256_permute2f128_ps(tmpb, tmpf, 0x31);
-
-        _mm256_storeu_ps(&dst[(jb + 0) * 8], r0);
-        _mm256_storeu_ps(&dst[(jb + 1) * 8], r1);
-        _mm256_storeu_ps(&dst[(jb + 2) * 8], r2);
-        _mm256_storeu_ps(&dst[(jb + 3) * 8], r3);
-        _mm256_storeu_ps(&dst[(jb + 4) * 8], r4);
-        _mm256_storeu_ps(&dst[(jb + 5) * 8], r5);
-        _mm256_storeu_ps(&dst[(jb + 6) * 8], r6);
-        _mm256_storeu_ps(&dst[(jb + 7) * 8], r7);
+        for (SizeType r = 0; r < 8; ++r) {
+            in[r]  = src + (r * row_stride) + jb;
+            out[r] = dst + ((jb + r) * 8);
+        }
+        transpose8x8(in.data(), out.data());
     }
 }
 #endif
@@ -100,108 +156,12 @@ inline void transpose_avx512(const float* __restrict__ src,
                              SizeType nbins,
                              SizeType row_stride) noexcept {
     const SizeType nbins_rounded = ((nbins + 15) / 16) * 16;
+    std::array<const float*, 16> in{};
     for (SizeType jb = 0; jb < nbins_rounded; jb += 16) {
-        __m512 r0 = _mm512_loadu_ps(&src[0 * row_stride + jb]);
-        __m512 r1 = _mm512_loadu_ps(&src[1 * row_stride + jb]);
-        __m512 r2 = _mm512_loadu_ps(&src[2 * row_stride + jb]);
-        __m512 r3 = _mm512_loadu_ps(&src[3 * row_stride + jb]);
-        __m512 r4 = _mm512_loadu_ps(&src[4 * row_stride + jb]);
-        __m512 r5 = _mm512_loadu_ps(&src[5 * row_stride + jb]);
-        __m512 r6 = _mm512_loadu_ps(&src[6 * row_stride + jb]);
-        __m512 r7 = _mm512_loadu_ps(&src[7 * row_stride + jb]);
-        __m512 r8 = _mm512_loadu_ps(&src[8 * row_stride + jb]);
-        __m512 r9 = _mm512_loadu_ps(&src[9 * row_stride + jb]);
-        __m512 ra = _mm512_loadu_ps(&src[10 * row_stride + jb]);
-        __m512 rb = _mm512_loadu_ps(&src[11 * row_stride + jb]);
-        __m512 rc = _mm512_loadu_ps(&src[12 * row_stride + jb]);
-        __m512 rd = _mm512_loadu_ps(&src[13 * row_stride + jb]);
-        __m512 re = _mm512_loadu_ps(&src[14 * row_stride + jb]);
-        __m512 rf = _mm512_loadu_ps(&src[15 * row_stride + jb]);
-
-        __m512 tmp0 = _mm512_unpacklo_ps(r0, r1);
-        __m512 tmp1 = _mm512_unpackhi_ps(r0, r1);
-        __m512 tmp2 = _mm512_unpacklo_ps(r2, r3);
-        __m512 tmp3 = _mm512_unpackhi_ps(r2, r3);
-        __m512 tmp4 = _mm512_unpacklo_ps(r4, r5);
-        __m512 tmp5 = _mm512_unpackhi_ps(r4, r5);
-        __m512 tmp6 = _mm512_unpacklo_ps(r6, r7);
-        __m512 tmp7 = _mm512_unpackhi_ps(r6, r7);
-        __m512 tmp8 = _mm512_unpacklo_ps(r8, r9);
-        __m512 tmp9 = _mm512_unpackhi_ps(r8, r9);
-        __m512 tmpa = _mm512_unpacklo_ps(ra, rb);
-        __m512 tmpb = _mm512_unpackhi_ps(ra, rb);
-        __m512 tmpc = _mm512_unpacklo_ps(rc, rd);
-        __m512 tmpd = _mm512_unpackhi_ps(rc, rd);
-        __m512 tmpe = _mm512_unpacklo_ps(re, rf);
-        __m512 tmpf = _mm512_unpackhi_ps(re, rf);
-
-        __m512 tmpg = _mm512_shuffle_ps(tmp0, tmp2, _MM_SHUFFLE(1, 0, 1, 0));
-        __m512 tmph = _mm512_shuffle_ps(tmp0, tmp2, _MM_SHUFFLE(3, 2, 3, 2));
-        __m512 tmpi = _mm512_shuffle_ps(tmp1, tmp3, _MM_SHUFFLE(1, 0, 1, 0));
-        __m512 tmpj = _mm512_shuffle_ps(tmp1, tmp3, _MM_SHUFFLE(3, 2, 3, 2));
-        __m512 tmpk = _mm512_shuffle_ps(tmp4, tmp6, _MM_SHUFFLE(1, 0, 1, 0));
-        __m512 tmpl = _mm512_shuffle_ps(tmp4, tmp6, _MM_SHUFFLE(3, 2, 3, 2));
-        __m512 tmpm = _mm512_shuffle_ps(tmp5, tmp7, _MM_SHUFFLE(1, 0, 1, 0));
-        __m512 tmpn = _mm512_shuffle_ps(tmp5, tmp7, _MM_SHUFFLE(3, 2, 3, 2));
-        __m512 tmpo = _mm512_shuffle_ps(tmp8, tmpa, _MM_SHUFFLE(1, 0, 1, 0));
-        __m512 tmpp = _mm512_shuffle_ps(tmp8, tmpa, _MM_SHUFFLE(3, 2, 3, 2));
-        __m512 tmpq = _mm512_shuffle_ps(tmp9, tmpb, _MM_SHUFFLE(1, 0, 1, 0));
-        __m512 tmpr = _mm512_shuffle_ps(tmp9, tmpb, _MM_SHUFFLE(3, 2, 3, 2));
-        __m512 tmps = _mm512_shuffle_ps(tmpc, tmpe, _MM_SHUFFLE(1, 0, 1, 0));
-        __m512 tmpt = _mm512_shuffle_ps(tmpc, tmpe, _MM_SHUFFLE(3, 2, 3, 2));
-        __m512 tmpu = _mm512_shuffle_ps(tmpd, tmpf, _MM_SHUFFLE(1, 0, 1, 0));
-        __m512 tmpv = _mm512_shuffle_ps(tmpd, tmpf, _MM_SHUFFLE(3, 2, 3, 2));
-
-        tmp0 = _mm512_shuffle_f32x4(tmpg, tmpk, _MM_SHUFFLE(2, 0, 2, 0));
-        tmp1 = _mm512_shuffle_f32x4(tmpo, tmps, _MM_SHUFFLE(2, 0, 2, 0));
-        tmp2 = _mm512_shuffle_f32x4(tmph, tmpl, _MM_SHUFFLE(2, 0, 2, 0));
-        tmp3 = _mm512_shuffle_f32x4(tmpp, tmpt, _MM_SHUFFLE(2, 0, 2, 0));
-        tmp4 = _mm512_shuffle_f32x4(tmpi, tmpm, _MM_SHUFFLE(2, 0, 2, 0));
-        tmp5 = _mm512_shuffle_f32x4(tmpq, tmpu, _MM_SHUFFLE(2, 0, 2, 0));
-        tmp6 = _mm512_shuffle_f32x4(tmpj, tmpn, _MM_SHUFFLE(2, 0, 2, 0));
-        tmp7 = _mm512_shuffle_f32x4(tmpr, tmpv, _MM_SHUFFLE(2, 0, 2, 0));
-        tmp8 = _mm512_shuffle_f32x4(tmpg, tmpk, _MM_SHUFFLE(3, 1, 3, 1));
-        tmp9 = _mm512_shuffle_f32x4(tmpo, tmps, _MM_SHUFFLE(3, 1, 3, 1));
-        tmpa = _mm512_shuffle_f32x4(tmph, tmpl, _MM_SHUFFLE(3, 1, 3, 1));
-        tmpb = _mm512_shuffle_f32x4(tmpp, tmpt, _MM_SHUFFLE(3, 1, 3, 1));
-        tmpc = _mm512_shuffle_f32x4(tmpi, tmpm, _MM_SHUFFLE(3, 1, 3, 1));
-        tmpd = _mm512_shuffle_f32x4(tmpq, tmpu, _MM_SHUFFLE(3, 1, 3, 1));
-        tmpe = _mm512_shuffle_f32x4(tmpj, tmpn, _MM_SHUFFLE(3, 1, 3, 1));
-        tmpf = _mm512_shuffle_f32x4(tmpr, tmpv, _MM_SHUFFLE(3, 1, 3, 1));
-
-        r0 = _mm512_shuffle_f32x4(tmp0, tmp1, _MM_SHUFFLE(2, 0, 2, 0));
-        r1 = _mm512_shuffle_f32x4(tmp2, tmp3, _MM_SHUFFLE(2, 0, 2, 0));
-        r2 = _mm512_shuffle_f32x4(tmp4, tmp5, _MM_SHUFFLE(2, 0, 2, 0));
-        r3 = _mm512_shuffle_f32x4(tmp6, tmp7, _MM_SHUFFLE(2, 0, 2, 0));
-        r4 = _mm512_shuffle_f32x4(tmp8, tmp9, _MM_SHUFFLE(2, 0, 2, 0));
-        r5 = _mm512_shuffle_f32x4(tmpa, tmpb, _MM_SHUFFLE(2, 0, 2, 0));
-        r6 = _mm512_shuffle_f32x4(tmpc, tmpd, _MM_SHUFFLE(2, 0, 2, 0));
-        r7 = _mm512_shuffle_f32x4(tmpe, tmpf, _MM_SHUFFLE(2, 0, 2, 0));
-        r8 = _mm512_shuffle_f32x4(tmp0, tmp1, _MM_SHUFFLE(3, 1, 3, 1));
-        r9 = _mm512_shuffle_f32x4(tmp2, tmp3, _MM_SHUFFLE(3, 1, 3, 1));
-        ra = _mm512_shuffle_f32x4(tmp4, tmp5, _MM_SHUFFLE(3, 1, 3, 1));
-        rb = _mm512_shuffle_f32x4(tmp6, tmp7, _MM_SHUFFLE(3, 1, 3, 1));
-        rc = _mm512_shuffle_f32x4(tmp8, tmp9, _MM_SHUFFLE(3, 1, 3, 1));
-        rd = _mm512_shuffle_f32x4(tmpa, tmpb, _MM_SHUFFLE(3, 1, 3, 1));
-        re = _mm512_shuffle_f32x4(tmpc, tmpd, _MM_SHUFFLE(3, 1, 3, 1));
-        rf = _mm512_shuffle_f32x4(tmpe, tmpf, _MM_SHUFFLE(3, 1, 3, 1));
-
-        _mm512_storeu_ps(&dst[(jb + 0) * 16], r0);
-        _mm512_storeu_ps(&dst[(jb + 1) * 16], r1);
-        _mm512_storeu_ps(&dst[(jb + 2) * 16], r2);
-        _mm512_storeu_ps(&dst[(jb + 3) * 16], r3);
-        _mm512_storeu_ps(&dst[(jb + 4) * 16], r4);
-        _mm512_storeu_ps(&dst[(jb + 5) * 16], r5);
-        _mm512_storeu_ps(&dst[(jb + 6) * 16], r6);
-        _mm512_storeu_ps(&dst[(jb + 7) * 16], r7);
-        _mm512_storeu_ps(&dst[(jb + 8) * 16], r8);
-        _mm512_storeu_ps(&dst[(jb + 9) * 16], r9);
-        _mm512_storeu_ps(&dst[(jb + 10) * 16], ra);
-        _mm512_storeu_ps(&dst[(jb + 11) * 16], rb);
-        _mm512_storeu_ps(&dst[(jb + 12) * 16], rc);
-        _mm512_storeu_ps(&dst[(jb + 13) * 16], rd);
-        _mm512_storeu_ps(&dst[(jb + 14) * 16], re);
-        _mm512_storeu_ps(&dst[(jb + 15) * 16], rf);
+        for (SizeType r = 0; r < 16; ++r) {
+            in[r] = src + (r * row_stride) + jb;
+        }
+        transpose16x16(in.data(), dst + (jb * 16), 16);
     }
 }
 #endif

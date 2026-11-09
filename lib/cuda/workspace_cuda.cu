@@ -13,6 +13,7 @@
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/ffa_score_cuda.cuh"
+#include "lib/cuda/kernel_utils.cuh"
 #include "lib/cuda/kernels_cuda.cuh"
 #include "lib/cuda/taylor_ffa_cuda.cuh"
 #include "lib/detail/error_check.hpp"
@@ -110,6 +111,24 @@ SizeType FFAWorkspaceCUDA<FoldTypeCUDA>::get_buffers_bytes() const noexcept {
            (coords_d.shift_head.size() * sizeof(float)) +
            (coords_freq_d.idx.size() * sizeof(uint32_t)) +
            (coords_freq_d.shift.size() * sizeof(float));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFAWorkspaceCUDA<FoldTypeCUDA>::reserve_brute_tables(
+    SizeType nfreqs, SizeType phase_map_entries) {
+    if (bf_freqs_d.size() < nfreqs) {
+        bf_freqs_d.resize(nfreqs);
+    }
+    if (bf_phase_map_d.size() < phase_map_entries) {
+        bf_phase_map_d.resize(phase_map_entries);
+    }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType
+FFAWorkspaceCUDA<FoldTypeCUDA>::get_brute_table_bytes() const noexcept {
+    return (bf_freqs_d.size() * sizeof(double)) +
+           (bf_phase_map_d.size() * sizeof(uint32_t));
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -503,11 +522,12 @@ SizeType CUBScratchArena::temp_bytes_for(SizeType max_n_leaves,
 
     // 1b. DeviceScan::ExclusiveSum
     SizeType scan_bytes = 0;
+    const utils::BranchOffsetOutIter dummy_scan_out{nullptr, nullptr, nullptr,
+                                                    0U, 0U};
     cuda_utils::check_cuda_call(
-        cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes,
-                                      static_cast<uint32_t*>(nullptr),
-                                      static_cast<uint32_t*>(nullptr),
-                                      static_cast<int>(max_n_leaves), stream),
+        cub::DeviceScan::ExclusiveSum(
+            nullptr, scan_bytes, static_cast<uint32_t*>(nullptr),
+            dummy_scan_out, static_cast<int>(max_n_leaves), stream),
         "cub::DeviceScan::ExclusiveSum sizing failed");
 
     // 1c. DeviceSelect::Flagged (counting iterator + uint8 flags)

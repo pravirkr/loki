@@ -22,7 +22,7 @@ def _search_config(
         nthreads=nthreads,
         max_process_memory_gb=4.0,
         bseg_brute=1024,
-        bseg_ffa=(1 << 16) // 8,
+        nsegments=8,
         prune_poly_order=2,
         target_snr=target_snr,
     )
@@ -172,8 +172,8 @@ def test_ep_plan_cache_is_keyed_on_ffa_segmentation(tmp_path: Path) -> None:
         prune_poly_order=2,
     )
     for changed in (
-        dict(bseg_brute=512, bseg_ffa=(1 << 16) // 8),
-        dict(bseg_brute=1024, bseg_ffa=(1 << 16) // 16),
+        dict(bseg_brute=512, nsegments=8),
+        dict(bseg_brute=1024, nsegments=16),
     ):
         other = libloki.configs.PulsarSearchConfig(**args, **changed)
         with pytest.raises(ValueError, match="bseg"):
@@ -193,7 +193,7 @@ def test_ep_target_snr_defaults_and_override(nparams: int, expected: float) -> N
         eta=1.0,
         param_limits=np.array([[0.0, 0.0]] * (nparams - 1) + [[140.0, 145.0]]),
         bseg_brute=1024,
-        bseg_ffa=8192,
+        nsegments=8,
         prune_poly_order=3,
     )
     assert libloki.configs.EPSearchConfig(**args).target_snr == expected
@@ -246,7 +246,7 @@ def test_frequency_only_ep_is_rejected_before_planning(backend: str) -> None:
         eta=1.0,
         param_limits=np.array([[140.0, 145.0]]),
         bseg_brute=1024,
-        bseg_ffa=8192,
+        nsegments=8,
     )
     with pytest.raises(ValueError, match="frequency-only EP"):
         libloki.prune.EPRegionPlannerTime(cfg, backend=backend)
@@ -265,7 +265,7 @@ def test_ep_rejects_bins_above_1024(nbins: int, nbins_max: int) -> None:
         eta=1.0,
         param_limits=np.array([[-10.0, 10.0], [140.0, 145.0]]),
         bseg_brute=1024,
-        bseg_ffa=8192,
+        nsegments=8,
     )
     with pytest.raises(ValueError, match="nbins_max must be <= 1024"):
         libloki.prune.EPRegionPlannerTime(cfg)
@@ -290,7 +290,7 @@ def test_cuda_threshold_design_fits_the_budget(limit_gb: float) -> None:
         nthreads=1,
         max_process_memory_gb=limit_gb,
         bseg_brute=1024,
-        bseg_ffa=8192,
+        nsegments=8,
     )
     planner = libloki.prune.EPRegionPlannerFourier(cfg, backend="cuda")
     assert planner.nchunks > 0
@@ -312,7 +312,7 @@ def test_ep_planner_runs_region_designs(backend: str) -> None:
         nthreads=1,
         max_process_memory_gb=1.0,
         bseg_brute=1024,
-        bseg_ffa=(1 << 16) // 8,
+        nsegments=8,
         prune_poly_order=2,
     )
     planner = libloki.prune.EPRegionPlannerTime(
@@ -350,7 +350,7 @@ def test_ep_plan_cache_made_on_cuda_serves_cpu(tmp_path: Path) -> None:
             nthreads=nthreads,
             max_process_memory_gb=memory_gb,
             bseg_brute=1024,
-            bseg_ffa=(1 << 16) // 8,
+            nsegments=8,
             prune_poly_order=2,
         )
 
@@ -378,3 +378,61 @@ def test_ep_plan_cache_made_on_cuda_serves_cpu(tmp_path: Path) -> None:
             plan_cache_file=cache,
             backend="cuda",
         )
+
+
+def test_ep_toml_and_plan_active_segments_bindings() -> None:
+    doc = (
+        "[input]\n"
+        "nsamps = 1048576\n"
+        "tsamp = 0.000064\n"
+        "[search]\n"
+        "f_min = 140.0\n"
+        "f_max = 142.0\n"
+        "acc_min = -10.0\n"
+        "acc_max = 10.0\n"
+        "nbins = 32\n"
+        "[ep]\n"
+        "n_runs = 2\n"
+        "[performance]\n"
+        "nthreads = 1\n"
+    )
+    ep_toml = libloki.configs.EPTomlConfig.from_string(doc)
+    assert ep_toml.nsegments is None
+    ep_cfg = ep_toml.to_ep_search_config()
+    assert ep_cfg.nsegments == 128
+    assert ep_cfg.bseg_ffa == 1048576 // 128
+
+    ep_from_str = libloki.configs.EPSearchConfig.from_toml_string(doc)
+    assert ep_from_str.bseg_ffa == ep_cfg.bseg_ffa
+    default_toml = libloki.configs.EPSearchConfig.default_toml_string()
+    assert "# nsegments = 128" in default_toml
+    assert "bseg_ffa" not in default_toml
+
+    np2_cfg = libloki.configs.PulsarSearchConfig(
+        nsamps=36000,
+        tsamp=64e-6,
+        nbins=32,
+        eta=1.0,
+        param_limits=np.array([[-10.0, 10.0], [140.0, 142.0]], dtype=np.float64),
+        bseg_brute=1024,
+        nsegments=8,
+    )
+    # bseg_brute 1024 is a minimum: 32 brute segments of 1125 samples, so the
+    # 8 EP segments of 4500 samples all hold data.
+    assert np2_cfg.bseg_brute == 1125
+    assert np2_cfg.bseg_ffa == 4500
+    plan = libloki.plans.FFAPlanTime(np2_cfg)
+    assert plan.nsegments_active == 8
+    assert plan.nsegments_ref_pool(8, False) == 8
+
+    cand_opts = libloki.configs.CandidateOptions()
+    cand_opts.max_candidates = 10
+    sweep = libloki.prune.EPFreqSweep(
+        _search_config(1),
+        cand_opts,
+        show_progress=False,
+        ref_segs=[0],
+        backend="cpu",
+        device=0,
+    )
+    assert sweep is not None

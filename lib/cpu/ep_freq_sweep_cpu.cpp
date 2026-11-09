@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,7 @@
 #include "lib/detail/utils.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
+#include "lib/search/ep_support.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::pipelines {
@@ -47,7 +49,9 @@ public:
         const std::optional<std::filesystem::path>& plan_cache_file,
         std::optional<SizeType> n_runs,
         const std::optional<std::vector<SizeType>>& ref_segs)
-        : m_base_cfg(std::move(cfg)),
+        : m_base_cfg(cfg.has_explicit_nsegments()
+                         ? std::move(cfg)
+                         : cfg.with_ep_default_nsegments()),
           m_show_progress(show_progress),
           m_min_pd(min_pd),
           m_poly_basis(poly_basis),
@@ -107,6 +111,8 @@ public:
                  std::string_view file_prefix) override {
         timing::SimpleTimer sweep_timer;
         sweep_timer.start();
+        std::tie(ts_e, ts_v) = search::detail::ep_input_series(
+            m_base_cfg, ts_e, ts_v, "EPFreqSweep::execute");
 
         std::error_code ec;
         std::filesystem::create_directories(outdir, ec);
@@ -151,12 +157,17 @@ public:
                 }
             }
 
+            SizeType group_transient = 0;
+            for (SizeType i = chunk_idx; i < range_end; ++i) {
+                group_transient = std::max(group_transient,
+                                           chunk_cfgs[i].ffa_transient_bytes);
+            }
             const auto model_thread_bytes =
                 algorithms::detail::ep_group_thread_bytes<FoldType>(m_memory,
                                                                     group);
             check_group_budget(group, model_thread_bytes,
                                stats.get_max_buffer_size(),
-                               stats.get_max_coord_size());
+                               stats.get_max_coord_size(), group_transient);
 
             const SizeType effective_nbins =
                 std::is_same_v<FoldType, ComplexType>
@@ -254,11 +265,12 @@ private:
     void check_group_budget(const algorithms::detail::EPChunkGroup& group,
                             SizeType thread_bytes,
                             SizeType buffer_size,
-                            SizeType coord_size) const {
+                            SizeType coord_size,
+                            SizeType ffa_transient_bytes) const {
         const double total_gb = algorithms::detail::ep_total_gb(
             m_memory.n_workers, thread_bytes,
-            algorithms::detail::ep_fixed_bytes<FoldType>(m_memory, buffer_size,
-                                                         coord_size));
+            algorithms::detail::ep_fixed_bytes<FoldType>(
+                m_memory, buffer_size, coord_size, ffa_transient_bytes));
         detail::check_ep_group_budget(
             group, total_gb,
             algorithms::detail::effective_memory_limit_gb(

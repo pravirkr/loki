@@ -66,7 +66,7 @@ PulsarSearchConfig make_test_cfg(double max_memory_gb = 4.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
-            /*bseg_ffa=*/kNsamps / 8,
+            /*nsegments=*/8,
             /*snr_min=*/5.0,
             /*max_passing_candidates=*/1U << 22U,
             /*prune_poly_order=*/2};
@@ -282,6 +282,19 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         std::filesystem::remove(bad, ec);
     }
 
+    // 4b. Mismatched propagator_significance and validation_significance
+    {
+        const auto bad_prop = make_modified_cache(
+            "cache_bad_prop_sig.h5", "propagator_significance", 3.5);
+        CHECK_THROWS_AS(reloaded.load_cache(bad_prop), std::invalid_argument);
+        std::filesystem::remove(bad_prop, ec);
+
+        const auto bad_val = make_modified_cache(
+            "cache_bad_val_sig.h5", "validation_significance", 7.0);
+        CHECK_THROWS_AS(reloaded.load_cache(bad_val), std::invalid_argument);
+        std::filesystem::remove(bad_val, ec);
+    }
+
     // 5. Non-existent file
     CHECK_THROWS_AS(reloaded.load_cache(outdir / "does_not_exist_xyz.h5"),
                     std::runtime_error);
@@ -367,7 +380,7 @@ TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",
                                   /*octave_scale=*/2.0, /*nbins_max=*/1024,
                                   /*nbins_min_lossy_bf=*/64,
                                   /*bseg_brute=*/1024,
-                                  /*bseg_ffa=*/kNsamps / 8, /*snr_min=*/5.0,
+                                  /*nsegments=*/8, /*snr_min=*/5.0,
                                   /*max_passing_candidates=*/1U << 22U,
                                   /*prune_poly_order=*/2, p_orb_min,
                                   /*m_c_max=*/1.0, /*m_p_min=*/1.4);
@@ -436,6 +449,8 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     // Inspect unified HDF5 file
     const HighFive::File h5(result_file.string(), HighFive::File::ReadOnly);
     REQUIRE(h5.hasAttribute("ep_sweep_version"));
+    REQUIRE(h5.hasAttribute("backend"));
+    CHECK(h5.getAttribute("backend").read<std::string>() == "cpu");
     REQUIRE(h5.hasAttribute("nchunks"));
     REQUIRE(h5.hasAttribute("total_runtime"));
     REQUIRE(h5.hasAttribute("total_pruning_gflops"));
@@ -522,6 +537,8 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
     {
         const HighFive::File h5(result_file.string(), HighFive::File::ReadOnly);
         REQUIRE(h5.hasAttribute("ep_sweep_version"));
+        REQUIRE(h5.hasAttribute("backend"));
+        CHECK(h5.getAttribute("backend").read<std::string>() == "cuda");
         REQUIRE(h5.hasAttribute("total_pruning_gflops"));
         SizeType nchunks{};
         h5.getAttribute("nchunks").read(nchunks);
@@ -759,5 +776,41 @@ TEST_CASE("EPRegionPlanner accepts a plan cache written on the other backend",
     CHECK(reloaded.get_stats().get_max_memory_gb() ==
           planner.get_stats().get_max_memory_gb());
 
+    std::filesystem::remove_all(outdir, ec);
+}
+
+TEST_CASE("EPFreqSweep handles non-power-of-two nsamps without empty segments",
+          "[ep_freq_sweep]") {
+    const auto outdir =
+        std::filesystem::temp_directory_path() / "loki_ep_non_pow2";
+    std::error_code ec;
+    std::filesystem::remove_all(outdir, ec);
+    std::filesystem::create_directories(outdir);
+
+    const std::vector<ParamLimit> limits{
+        {.min = -10.0, .max = 10.0},
+        {.min = 140.0, .max = 142.0},
+    };
+    const PulsarSearchConfig cfg(
+        /*nsamps=*/40000, /*tsamp=*/64e-6, /*nbins=*/32, /*eta=*/1.0, limits,
+        /*ducy_max=*/0.3, /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
+        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0, /*nbins_max=*/1024,
+        /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/1024, /*nsegments=*/8,
+        /*snr_min=*/5.0, /*max_passing_candidates=*/1U << 22U,
+        /*prune_poly_order=*/2);
+
+    // 40000 samples are 32 brute segments of 1250, so all 8 EP segments of
+    // 5000 samples hold data. A reference segment past them is rejected.
+    REQUIRE(cfg.get_bseg_ffa() == 5000U);
+    CHECK_THROWS_AS(EPFreqSweep(cfg, false, 0.1F, "taylor", 0.1F, {},
+                                std::nullopt, std::nullopt,
+                                std::vector<SizeType>{8U}),
+                    std::invalid_argument);
+
+    const auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps());
+    EPFreqSweep sweep(cfg, false, 0.1F, "taylor", 0.1F, {}, std::nullopt,
+                      /*n_runs=*/2U);
+    CHECK_NOTHROW(sweep.execute(ts_e, ts_v, outdir, "np2"));
+    CHECK(std::filesystem::exists(outdir / "np2_ep_results.h5"));
     std::filesystem::remove_all(outdir, ec);
 }

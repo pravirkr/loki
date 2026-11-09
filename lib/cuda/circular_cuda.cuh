@@ -40,6 +40,15 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
                                 memory::CUBScratchArena& scratch_ws,
                                 cudaStream_t stream);
 
+void circ_taylor_validate_async_cuda(
+    cuda::std::span<const double> leaves_branch,
+    cuda::std::span<uint8_t> validation_mask,
+    SizeType n_leaves,
+    double p_orb_min,
+    double x_mass_const,
+    double validation_significance,
+    cudaStream_t stream);
+
 void circ_taylor_resolve_batch_cuda(
     cuda::std::span<const double> leaves_branch,
     cuda::std::span<const uint8_t> validation_mask,

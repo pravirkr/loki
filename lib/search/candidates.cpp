@@ -19,7 +19,28 @@
 
 namespace loki::search {
 namespace {
-using Polynomial = std::vector<double>;
+/// Degree of the phase-difference polynomial: one per frequency derivative.
+constexpr std::size_t kPhaseDegree =
+    std::tuple_size_v<decltype(Candidate::derivatives)>;
+
+/// Dense polynomial of degree at most kPhaseDegree: c[0] + c[1] x + ...,
+/// with n coefficients (n = 0 is the zero polynomial). Fixed storage: this
+/// runs once per candidate pair, and a bright source brings thousands of
+/// pairs per detection.
+struct Polynomial {
+    std::array<double, kPhaseDegree + 1> c{};
+    std::size_t n{};
+};
+
+/// Points of [-1, 1] collected by roots(): critical points, endpoint zeros
+/// and one bisection root per sign change, at most 3 * degree - 1.
+struct Points {
+    std::array<double, 3 * kPhaseDegree> x{};
+    std::size_t n{};
+    void push(double value) { x.at(n++) = value; }
+    [[nodiscard]] double* begin() { return x.data(); }
+    [[nodiscard]] double* end() { return x.data() + n; }
+};
 
 void positive(double value, const char* label) {
     if (!utils::is_finite(value) || value <= 0) {
@@ -29,51 +50,58 @@ void positive(double value, const char* label) {
 
 double evaluate(const Polynomial& p, double x) {
     double y = 0;
-    for (auto it = p.rbegin(); it != p.rend(); ++it) {
-        y = std::fma(y, x, *it);
+    for (std::size_t i = p.n; i > 0; --i) {
+        y = std::fma(y, x, p.c[i - 1]);
     }
     return y;
 }
 
 Polynomial derivative(const Polynomial& p) {
     Polynomial result;
-    for (std::size_t i = 1; i < p.size(); ++i) {
-        result.push_back(p[i] * static_cast<double>(i));
+    for (std::size_t i = 1; i < p.n; ++i) {
+        result.c[i - 1] = p.c[i] * static_cast<double>(i);
     }
+    result.n = p.n > 0 ? p.n - 1 : 0;
     return result;
 }
 
 // Isolate roots on monotone intervals bounded by roots of the derivative.
-// Degree <= 5. Repeated roots are included at stationary points; redundant
+// Degree <= 6. Repeated roots are included at stationary points; redundant
 // points are harmless when calculating the enclosing phase range.
-std::vector<double> roots(Polynomial p) {
-    while (!p.empty() && p.back() == 0) {
-        p.pop_back();
+Points roots(Polynomial p) {
+    while (p.n > 0 && p.c[p.n - 1] == 0) {
+        --p.n;
     }
-    if (p.size() <= 1) {
-        return {};
+    Points result;
+    if (p.n <= 1) {
+        return result;
     }
-    if (p.size() == 2) {
-        const double x = -p[0] / p[1];
-        return x >= -1 && x <= 1 ? std::vector<double>{x}
-                                 : std::vector<double>{};
+    if (p.n == 2) {
+        const double x = -p.c[0] / p.c[1];
+        if (x >= -1 && x <= 1) {
+            result.push(x);
+        }
+        return result;
     }
-    auto critical = roots(derivative(p));
-    std::vector<double> bounds{-1};
-    bounds.insert(bounds.end(), critical.begin(), critical.end());
-    bounds.push_back(1);
+    const auto critical = roots(derivative(p));
+    Points bounds;
+    bounds.push(-1);
+    for (std::size_t i = 0; i < critical.n; ++i) {
+        bounds.push(critical.x[i]);
+    }
+    bounds.push(1);
     std::ranges::sort(bounds);
-    std::vector<double> result = critical;
-    for (std::size_t i = 1; i < bounds.size(); ++i) {
-        double lo        = bounds[i - 1];
-        double hi        = bounds[i];
+    result = critical;
+    for (std::size_t i = 1; i < bounds.n; ++i) {
+        double lo        = bounds.x[i - 1];
+        double hi        = bounds.x[i];
         const double flo = evaluate(p, lo);
         const double fhi = evaluate(p, hi);
         if (flo == 0) {
-            result.push_back(lo);
+            result.push(lo);
         }
         if (fhi == 0) {
-            result.push_back(hi);
+            result.push(hi);
         }
         if ((flo < 0 && fhi > 0) || (flo > 0 && fhi < 0)) {
             for (int iteration = 0; iteration < 64; ++iteration) {
@@ -85,16 +113,12 @@ std::vector<double> roots(Polynomial p) {
                     hi = mid;
                 }
             }
-            result.push_back(std::midpoint(lo, hi));
+            result.push(std::midpoint(lo, hi));
         }
     }
     std::ranges::sort(result);
     return result;
 }
-
-/// Degree of the phase-difference polynomial: one per frequency derivative.
-constexpr std::size_t kPhaseDegree =
-    std::tuple_size_v<decltype(Candidate::derivatives)>;
 
 /// Frequency reach of a link of phase span @p span over @p tobs. The phase
 /// difference on [-1, 1] has p'(0) = delta_f * Tobs / 2, and Bernstein's
@@ -105,23 +129,53 @@ double link_reach(double span, double tobs) {
     return 1.01 * static_cast<double>(kPhaseDegree) * span / tobs;
 }
 
+/// Span (max - min) over [-1, 1] of the phase difference between the tracks
+/// of @p a (scaled by @p scale_a) and @p b. With @p reject_above set, a pair
+/// whose span provably exceeds it returns early with a value above
+/// @p reject_above that is a lower bound on the span, not the span itself;
+/// the caller's comparison against @p reject_above is unchanged either way.
 double phase_span(const Candidate& a,
                   const Candidate& b,
                   double tobs,
-                  double scale_a = 1.0) {
-    Polynomial p(kPhaseDegree + 1, 0);
+                  double scale_a      = 1.0,
+                  double reject_above = std::numeric_limits<double>::max()) {
+    Polynomial p;
     double factor = 1;
     for (std::size_t k = 0; k < a.derivatives.size(); ++k) {
         factor *= (tobs / 2) / static_cast<double>(k + 1);
-        p[k + 1] = (scale_a * a.derivatives[k] - b.derivatives[k]) * factor;
-        if (!utils::is_finite(p[k + 1])) {
+        p.c[k + 1] = ((scale_a * a.derivatives[k]) - b.derivatives[k]) * factor;
+        if (!utils::is_finite(p.c[k + 1])) {
             throw std::invalid_argument("phase-track coefficients overflow");
         }
     }
-    double low  = std::min(evaluate(p, -1), evaluate(p, 1));
-    double high = std::max(evaluate(p, -1), evaluate(p, 1));
-    for (const double x : roots(derivative(p))) {
-        const double y = evaluate(p, x);
+    // Horner over leading zero coefficients returns the same value, so the
+    // trimmed polynomial evaluates bit for bit as the full one.
+    p.n = kPhaseDegree + 1;
+    while (p.n > 0 && p.c[p.n - 1] == 0) {
+        --p.n;
+    }
+    const double at_hi = evaluate(p, 1);
+    const double at_lo = evaluate(p, -1);
+    double low         = std::min(at_hi, at_lo);
+    double high        = std::max(at_hi, at_lo);
+    if (reject_above < std::numeric_limits<double>::max()) {
+        // The span is at least the spread of the endpoint values, and, since
+        // p(0) = 0 lies between the extrema, at least each endpoint's
+        // magnitude. Rounding in the extremum evaluation can put the computed
+        // span below the second bound by a few ulp at most; the factor
+        // keeps this a strict lower bound of the computed span, so a pair
+        // rejected here is one the full computation would reject. Pairs
+        // inside the margin take the exact path.
+        const double bound =
+            std::max({high - low, std::abs(at_hi), std::abs(at_lo)}) *
+            (1 - 1e-6);
+        if (bound > reject_above) {
+            return bound;
+        }
+    }
+    const auto critical = roots(derivative(p));
+    for (std::size_t i = 0; i < critical.n; ++i) {
+        const double y = evaluate(p, critical.x[i]);
         low            = std::min(low, y);
         high           = std::max(high, y);
     }
@@ -234,13 +288,16 @@ std::uint64_t CandidateClusterer::append(const Candidate& c) {
         const auto end = m_index.upper_bound(c.derivatives[0] + reach);
         for (auto it = m_index.lower_bound(c.derivatives[0] - reach); it != end;
              ++it) {
-            if (it->second < match &&
-                phase_span(clusters[it->second].representative, c, m_tobs) <=
-                    std::max(m_options.phase_radius,
-                             m_options.radius *
-                                 std::min(clusters[it->second]
-                                              .representative.duty_cycle(),
-                                          c.duty_cycle()))) {
+            if (it->second >= match) {
+                continue;
+            }
+            const double limit = std::max(
+                m_options.phase_radius,
+                m_options.radius *
+                    std::min(clusters[it->second].representative.duty_cycle(),
+                             c.duty_cycle()));
+            if (phase_span(clusters[it->second].representative, c, m_tobs, 1.0,
+                           limit) <= limit) {
                 match = it->second;
             }
         }
@@ -324,7 +381,8 @@ std::uint64_t CandidateClusterer::append_transitive(const Candidate& c) {
             std::max(m_options.phase_radius,
                      m_options.radius *
                          std::min(m_nodes[node].duty, m_nodes[other].duty));
-        if (phase_span(c, m_nodes[other].representative, m_tobs) > limit) {
+        if (phase_span(c, m_nodes[other].representative, m_tobs, 1.0, limit) >
+            limit) {
             continue;
         }
         // Inputs are globally sorted. The earliest root is the strongest

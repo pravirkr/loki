@@ -173,7 +173,7 @@ SMALL_KW = {
 
 # Issue #15 Taylor patterns: FFAPlanTime(cfg).get_branching_pattern("taylor")
 # with FFASearchConfig(nsamps=2**23, tsamp=8.192e-5, nbins=32, eta=1.0,
-# param_limits=[[-10, 10], [133.333, 200]], bseg_ffa=nsamps // nseg).
+# param_limits=[[-10, 10], [133.333, 200]], nsegments=nseg).
 # Rounded to 3 decimals; keyed by the number of segments nseg.
 BRANCHING_ISSUE15 = {
     4: np.array([3.143, 4.818, 2.217], dtype=np.float32),

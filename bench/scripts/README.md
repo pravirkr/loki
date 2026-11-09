@@ -44,6 +44,23 @@ python bench/scripts/ffa/compare_ffa.py $LOKI_BENCH_WORK/runs/{base,new}_W4/W4_f
 | `compare_sweep.py` | Two `EPFreqSweep` results: candidate sets and level statistics within a tolerance. |
 | `ep_production_cuda.py`, `measure_ep_peak_rss.py` | Planned EP sweeps and the memory model against peak RSS / device memory (see each file's docstring). |
 
+## Golden runs (`golden_runs/`)
+
+| Script | Purpose |
+|---|---|
+| `run_golden.sh` | Seeded `loki simulate`, then a small FFA search and an accelerated EP search (with candidates) per backend (default `cpu cuda`) with one `loki` binary. Runs in well under a minute. The EP case does not overflow the world tree, so the trimming path is not covered. |
+| `compare_h5.py` | Two `run_golden.sh` output trees file by file: every dataset and attribute bit-exact (or `--rtol`), ignoring attributes that record time, host, version, paths or run provenance (`backend`, `config_toml`, `config_effective`). Exit 0 when all match. Against a build before `ab3637c`, CPU EP files still differ in the planner's `chunk_memory_gb` attribute (memory-model change). |
+
+```bash
+bench/scripts/golden_runs/run_golden.sh base/loki $LOKI_BENCH_WORK/golden/base
+bench/scripts/golden_runs/run_golden.sh build/applications/loki $LOKI_BENCH_WORK/golden/new
+python bench/scripts/golden_runs/compare_h5.py $LOKI_BENCH_WORK/golden/{base,new}
+```
+
+Time-domain CUDA folds jitter run to run; the harness searches in the
+Fourier domain, so the datasets of the cpu and of the cuda outputs are each
+expected bit-identical between builds that keep the arithmetic.
+
 ## Threshold schemes (`schemes/`)
 
 | Script | Purpose |

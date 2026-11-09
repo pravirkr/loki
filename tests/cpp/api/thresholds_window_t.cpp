@@ -35,7 +35,7 @@ Exec exec_of(std::string_view backend) {
 
 // FFAPlanTime(...).get_branching_pattern("taylor") for nsamps 2^23, tsamp
 // 8.192e-5 s, nbins 32, eta 1, param_limits [[-10, 10], [133.333, 200]],
-// bseg_ffa nsamps / nseg (bench/scripts/schemes/_branching.py).
+// nsegments nseg (bench/scripts/schemes/_branching.py).
 std::vector<float> issue15_pattern(int nseg) {
     switch (nseg) {
     case 4:

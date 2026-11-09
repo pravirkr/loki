@@ -92,7 +92,7 @@ make_cfg(SizeType nparams, bool kadane = false, SizeType nbins = kNbins) {
             /*nbins_max=*/std::max<SizeType>(1024, nbins),
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
-            /*bseg_ffa=*/(1U << 16U) / 8,
+            /*nsegments=*/8,
             /*snr_min=*/5.0,
             /*max_passing_candidates=*/1U << 20U,
             /*prune_poly_order=*/2,
@@ -240,7 +240,7 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
                                              {.min = 140.0, .max = f_max}};
         return PulsarSearchConfig(1U << 16U, 64e-6, 32, 1.0, limits, 0.3, 1.5,
                                   std::is_same_v<TestType, ComplexTypeCUDA>, 1,
-                                  4.0, 2.0, 1024, 64, 1024, 8192);
+                                  4.0, 2.0, 1024, 64, 1024, 8);
     };
     const auto larger  = config(145.0);
     const auto smaller = config(141.0);
@@ -263,6 +263,22 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
                                    larger.get_nparams(), false);
     ffa.shared_fold_internal =
         loki::cuda_utils::as_span(arena).first(plan.get_buffer_size());
+    // The sweep sizes the brute-fold tables once, at its largest chunk, and
+    // the model counts those bytes.
+    const auto tables =
+        loki::algorithms::detail::ep_cuda_brute_table_sizes(plan);
+    const auto small_tables =
+        loki::algorithms::detail::ep_cuda_brute_table_sizes(small_plan);
+    REQUIRE(small_tables.nfreqs < tables.nfreqs);
+    ffa.reserve_brute_tables(tables.nfreqs, tables.phase_map_entries);
+    const auto table_bytes = ffa.get_brute_table_bytes();
+    CHECK(table_bytes ==
+          loki::algorithms::detail::ep_ffa_transient_bytes<HostFoldT>(
+              make_ctx(larger.get_nparams()), plan));
+    const auto* const freqs_ptr =
+        thrust::raw_pointer_cast(ffa.bf_freqs_d.data());
+    const auto* const map_ptr =
+        thrust::raw_pointer_cast(ffa.bf_phase_map_d.data());
     const auto stream = cudaStreamPerThread;
     EPWorkspaceCUDA<TestType> ep(
         kBatch, branch_max, capacity, ncoords, larger.get_nparams(), width,
@@ -310,6 +326,10 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
         REQUIRE(initial->n_leaves == chunk_plan.get_ncoords().back());
     }
     REQUIRE(results.size() == 3);
+    // No chunk grew or moved a table.
+    CHECK(ffa.get_brute_table_bytes() == table_bytes);
+    CHECK(thrust::raw_pointer_cast(ffa.bf_freqs_d.data()) == freqs_ptr);
+    CHECK(thrust::raw_pointer_cast(ffa.bf_phase_map_d.data()) == map_ptr);
     std::filesystem::remove_all(outdir);
 }
 

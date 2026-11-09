@@ -18,6 +18,7 @@
 
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
+#include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
 #include "loki/search/candidates.hpp"
@@ -580,6 +581,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                double snr_min) {
     options.validate();
     observation.validate();
+    const auto started = std::chrono::steady_clock::now();
     ScratchDirectory scratch(options.temporary_directory.empty()
                                  ? (output.parent_path().empty()
                                         ? std::filesystem::path(".")
@@ -661,7 +663,9 @@ void publish_candidate_results(const std::filesystem::path& spool,
     ScratchDirectory publication(output.parent_path().empty()
                                      ? std::filesystem::path(".")
                                      : output.parent_path());
-    const auto publish = publication.path / "result.partial";
+    const auto publish          = publication.path / "result.partial";
+    std::uint64_t cluster_count = 0;
+    std::uint64_t selected      = 0;
     try {
         {
             HighFive::File result(publish.string(), HighFive::File::Excl);
@@ -773,8 +777,6 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                    batch);
             const bool singleton_stream =
                 !options.cluster && !options.flag_harmonics;
-            std::uint64_t cluster_count = 0;
-            std::uint64_t selected      = 0;
             if (!sorted.empty()) {
                 std::ifstream in(sorted, std::ios::binary);
                 Candidate c;
@@ -856,6 +858,14 @@ void publish_candidate_results(const std::filesystem::path& spool,
         std::filesystem::remove(publish, error);
         throw;
     }
+    // The search logs its own stages; this is the host post-processing that
+    // follows it, which can dominate a GPU run (clustering a bright source).
+    const auto seconds = std::chrono::duration<double>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    spdlog::info("Candidate postprocessing complete in {:.2f} s: {} "
+                 "detections, {} clusters, {} candidates -> {}",
+                 seconds, nrows, cluster_count, selected, output.string());
 }
 } // namespace
 

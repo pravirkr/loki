@@ -149,7 +149,7 @@ TEST_CASE("FFAFreqSweep CUDA matches the CPU sweep across regions",
             /*nthreads=*/1, /*max_process_memory_gb=*/4.0,
             /*octave_scale=*/2.0, /*nbins_max=*/256,
             /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/std::nullopt,
-            /*bseg_ffa=*/std::nullopt, /*snr_min=*/3.0,
+            /*nsegments=*/std::nullopt, /*snr_min=*/3.0,
             /*max_passing_candidates=*/1U << 24U);
         FFAFreqSweep sweep(cfg, /*show_progress=*/false, exec);
         sweep.execute(ts_e, ts_v, outdir, prefix);

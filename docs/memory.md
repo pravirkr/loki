@@ -154,7 +154,7 @@ fitted to.
 | group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_irfft_scratch_bytes` (the fused pruning kernel's statistics and tile states, one 8-byte word per branched leaf at most; no IRFFT fold scratch) | one group |
 | shared | `ep_cuda_shared_bytes`: logical FFA internal fold size, coordinates, and seed-output fold buffer; internal/tree overlap is subtracted once from the group total | coordinates/output: whole sweep; shared fold arena: one group |
 | inputs | the device copy of `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
-| FFA transient | scratch the FFA of one chunk allocates while it runs, `ep_ffa_transient_bytes`; the largest of any chunk counts | whole sweep |
+| FFA brute-fold tables | the level-0 frequencies and the phase-bin map of the brute fold, `ep_ffa_transient_bytes` (CUDA; sizes from `ep_cuda_brute_table_sizes`). The engine sizes them once in its constructor, at the largest chunk, so no chunk grows them mid-sweep. The frequency and phase-map maxima may come from different chunks; the excess is the frequency table, 8 bytes per frequency, inside the unmodelled reserve | whole sweep |
 
 The CUB temporary storage is not a formula: `ep_cuda_cub_scratch_bytes`
 (`lib/cuda/ep_memory_cuda.cu`) asks CUB for the size, so the model follows the
@@ -207,8 +207,8 @@ count the views logically; the sweep peak subtracts the shared overlap once.
 Standalone workspaces continue to own their buffers.
 
 At the start of `execute`, before the group workspace is allocated, the engine
-checks that the device still has room for that workspace and the transient FFA
-scratch (the shared buffers are already allocated).
+checks that the device still has room for that workspace (the shared buffers and
+the brute-fold tables are already allocated).
 
 ### FFA frequency sweep on CUDA
 

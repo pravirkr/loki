@@ -713,9 +713,9 @@ float WorldTree<FoldType>::get_prune_threshold(
     // Median score for severity (restricted range)
     auto const mid = begin + total_candidates / 2;
     if (mid <= kth) {
-        std::nth_element(begin, mid, kth + 1);
+        std::nth_element(begin, mid, kth + 1, std::greater<float>());
     } else {
-        std::nth_element(kth + 1, mid, end);
+        std::nth_element(kth + 1, mid, end, std::greater<float>());
     }
     const float median_threshold =
         std::nextafter(*mid, std::numeric_limits<float>::max());
@@ -739,7 +739,7 @@ void WorldTree<FoldType>::prune_on_overload(float threshold) {
     // Single-pass: scan and compact in-place
     for (SizeType read_logical = 0; read_logical < old_size; ++read_logical) {
         // Check filter condition
-        if (m_scores[phys_read] > threshold) {
+        if (m_scores[phys_read] >= threshold) {
             // Move data only if gaps were created
             if (phys_read != phys_write) {
                 std::copy_n(m_leaves.begin() + (phys_read * m_leaves_stride),

@@ -145,6 +145,7 @@ loki::algorithms::FFA<float> ffa(ws, fft, cfg, loki::Exec::cuda(0));
 ```
 
 The library layout and the rules for adding algorithms or backends are in [`docs/architecture.md`](docs/architecture.md).
+The performance rules, and the optimisations that were measured and rejected, are in [`docs/performance.md`](docs/performance.md).
 
 ---
 
@@ -367,7 +368,3 @@ apptainer exec --nv loki.sif loki --version
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-Candidate clustering for FFA and Taylor EP, the versioned HDF5 schema, and
-PulsarX folding export are documented in [Candidate products](docs/candidates.md).
-The common EP candidate path supports Taylor searches with RFI control disabled.

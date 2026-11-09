@@ -42,6 +42,7 @@ min_pd = 0.1
 ref_ducy = 0.1
 prune_poly_order = 3
 n_runs = 16
+nsegments = 128
 
 [performance]
 nthreads = 1
@@ -51,7 +52,6 @@ device = 0
 # free device memory less 1 GB.
 max_process_memory_gb = 15.0
 bseg_brute = 4096
-bseg_ffa = 262144
 
 [output]
 outdir = "pruning_results/ep_production_cuda"

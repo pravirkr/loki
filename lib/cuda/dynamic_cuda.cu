@@ -1,6 +1,8 @@
 #include "lib/cuda/dynamic_cuda.cuh"
 
 #include <bit>
+#include <cstddef>
+#include <cstring>
 #include <limits>
 
 #include <cuda/std/limits>
@@ -37,7 +39,8 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    int device_id)
+    int device_id,
+    cudaStream_t stream)
     : m_nseg_ffa(nseg_ffa),
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
@@ -65,24 +68,48 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
     m_dparams_init_d.resize(dparams_init.size());
     m_param_limits_d.resize(param_limits.size());
 
+    const auto counts_bytes  = param_grid_count_init.size() * sizeof(SizeType);
+    const auto dparams_bytes = dparams_init.size() * sizeof(double);
+    const auto limits_bytes  = param_limits.size() * sizeof(ParamLimit);
+    const auto stats_bytes   = kStatsWords * sizeof(uint64_t);
+
+    // At most one tile per leaf (the memory model's bound).
+    m_tile_state_d.resize(kStatsWords + (m_batch_size * m_branch_max) + 1);
+    {
+        uint32_t* stats_h = nullptr;
+        cuda_utils::check_cuda_call(
+            cudaMallocHost(&stats_h, stats_bytes + counts_bytes +
+                                         dparams_bytes + limits_bytes),
+            "BasePruneDPFunctsCUDA: cudaMallocHost failed");
+        m_stats_h         = {stats_h, [](uint32_t* p) { cudaFreeHost(p); }};
+        cudaEvent_t ready = nullptr;
+        cuda_utils::check_cuda_call(
+            cudaEventCreateWithFlags(&ready, cudaEventDisableTiming),
+            "BasePruneDPFunctsCUDA: cudaEventCreate failed");
+        m_stats_ready = {ready, [](cudaEvent_t e) { cudaEventDestroy(e); }};
+    }
+
+    auto* const stage_h =
+        reinterpret_cast<std::byte*>(m_stats_h.get()) + stats_bytes;
+    std::memcpy(stage_h, param_grid_count_init.data(), counts_bytes);
+    std::memcpy(stage_h + counts_bytes, dparams_init.data(), dparams_bytes);
+    std::memcpy(stage_h + counts_bytes + dparams_bytes, param_limits.data(),
+                limits_bytes);
+
     cuda_utils::check_cuda_call(
         cudaMemcpyAsync(
-            thrust::raw_pointer_cast(m_param_grid_count_init_d.data()),
-            param_grid_count_init.data(),
-            param_grid_count_init.size() * sizeof(SizeType),
-            cudaMemcpyHostToDevice),
+            thrust::raw_pointer_cast(m_param_grid_count_init_d.data()), stage_h,
+            counts_bytes, cudaMemcpyHostToDevice, stream),
         "cudaMemcpyAsync param grid count init failed");
     cuda_utils::check_cuda_call(
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_dparams_init_d.data()),
-                        dparams_init.data(),
-                        dparams_init.size() * sizeof(double),
-                        cudaMemcpyHostToDevice),
+                        stage_h + counts_bytes, dparams_bytes,
+                        cudaMemcpyHostToDevice, stream),
         "cudaMemcpyAsync dparams init failed");
     cuda_utils::check_cuda_call(
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_limits_d.data()),
-                        param_limits.data(),
-                        param_limits.size() * sizeof(ParamLimit),
-                        cudaMemcpyHostToDevice),
+                        stage_h + counts_bytes + dparams_bytes, limits_bytes,
+                        cudaMemcpyHostToDevice, stream),
         "cudaMemcpyAsync param limits failed");
 
     const auto nbins = m_cfg.get_nbins();
@@ -91,20 +118,6 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
             const auto table = ffa_fourier_bluestein_table(nbins);
             m_bluestein_d.assign(table.begin(), table.end());
         }
-    }
-    // At most one tile per leaf (the memory model's bound).
-    m_tile_state_d.resize(kStatsWords + (m_batch_size * m_branch_max) + 1);
-    {
-        uint32_t* stats_h = nullptr;
-        cuda_utils::check_cuda_call(
-            cudaMallocHost(&stats_h, kStatsWords * sizeof(uint64_t)),
-            "BasePruneDPFunctsCUDA: cudaMallocHost failed");
-        m_stats_h         = {stats_h, [](uint32_t* p) { cudaFreeHost(p); }};
-        cudaEvent_t ready = nullptr;
-        cuda_utils::check_cuda_call(
-            cudaEventCreateWithFlags(&ready, cudaEventDisableTiming),
-            "BasePruneDPFunctsCUDA: cudaEventCreate failed");
-        m_stats_ready = {ready, [](cudaEvent_t e) { cudaEventDestroy(e); }};
     }
 }
 
@@ -230,7 +243,8 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::shift_add_score(
     memory::CUBScratchArena& scratch_ws,
     cudaStream_t stream,
     const EPDirectWriteCUDA<FoldTypeCUDA>* direct,
-    MinMaxFloat* minmax) {
+    MinMaxFloat* minmax,
+    SizeType* n_valid_out) {
     (void)scratch_ws;
     auto* const stats_d = reinterpret_cast<uint32_t*>(
         thrust::raw_pointer_cast(m_tile_state_d.data()));
@@ -285,7 +299,7 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::shift_add_score(
     }
     ep_shift_add_score_cuda<FoldTypeCUDA>(args, stream);
     cuda_utils::check_cuda_call(cudaMemcpyAsync(m_stats_h.get(), stats_d,
-                                                3 * sizeof(uint32_t),
+                                                4 * sizeof(uint32_t),
                                                 cudaMemcpyDeviceToHost, stream),
                                 "shift_add_score: statistics copy failed");
     if (direct != nullptr) {
@@ -296,12 +310,13 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::shift_add_score(
     }
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "shift_add_score: sync failed");
-    return decode_stats(minmax);
+    return decode_stats(minmax, n_valid_out);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType
-BasePruneDPFunctsCUDA<FoldTypeCUDA>::decode_stats(MinMaxFloat* minmax) const {
+BasePruneDPFunctsCUDA<FoldTypeCUDA>::decode_stats(MinMaxFloat* minmax,
+                                                  SizeType* n_valid_out) const {
     const uint32_t* const stats_h = m_stats_h.get();
     if (minmax != nullptr) {
         *minmax = {std::numeric_limits<float>::max(),
@@ -311,15 +326,18 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::decode_stats(MinMaxFloat* minmax) const {
             minmax->min = std::bit_cast<float>(ep_score_key_bits(~stats_h[2]));
         }
     }
+    if (n_valid_out != nullptr) {
+        *n_valid_out = stats_h[3];
+    }
     return stats_h[0];
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::collect_shift_add_score(
-    MinMaxFloat& minmax) {
+    MinMaxFloat& minmax, SizeType* n_valid_out) {
     cuda_utils::check_cuda_call(cudaEventSynchronize(m_stats_ready.get()),
                                 "collect_shift_add_score: sync failed");
-    return decode_stats(&minmax);
+    return decode_stats(&minmax, n_valid_out);
 }
 
 // Intermediate implementation for Taylor basis
@@ -405,7 +423,8 @@ PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    int device_id)
+    int device_id,
+    cudaStream_t stream)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
@@ -413,7 +432,8 @@ PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
            std::move(cfg),
            batch_size,
            branch_max,
-           device_id) {}
+           device_id,
+           stream) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -569,7 +589,8 @@ PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::PrunePolyChebyshevDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    int device_id)
+    int device_id,
+    cudaStream_t stream)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
@@ -577,7 +598,8 @@ PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::PrunePolyChebyshevDPFunctsCUDA(
            std::move(cfg),
            batch_size,
            branch_max,
-           device_id) {}
+           device_id,
+           stream) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -721,7 +743,8 @@ PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::PruneCircTaylorDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    int device_id)
+    int device_id,
+    cudaStream_t stream)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
@@ -729,7 +752,8 @@ PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::PruneCircTaylorDPFunctsCUDA(
            std::move(cfg),
            batch_size,
            branch_max,
-           device_id) {}
+           device_id,
+           stream) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -763,6 +787,20 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::validate(
         leaves_branch, validation_mask, n_leaves, this->m_cfg.get_p_orb_min(),
         this->m_cfg.get_x_mass_const(),
         this->m_cfg.get_validation_significance(), scratch_ws, stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::validate_async(
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<uint32_t> /*leaves_origins*/,
+    cuda::std::span<uint8_t> validation_mask,
+    std::pair<double, double> /*coord_cur*/,
+    SizeType n_leaves,
+    cudaStream_t stream) const noexcept {
+    circ_taylor_validate_async_cuda(
+        leaves_branch, validation_mask, n_leaves, this->m_cfg.get_p_orb_min(),
+        this->m_cfg.get_x_mass_const(),
+        this->m_cfg.get_validation_significance(), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -881,22 +919,23 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
                             SizeType branch_max,
-                            int device_id) {
+                            int device_id,
+                            cudaStream_t stream) {
     const auto n_params = cfg.get_nparams();
     if (poly_basis == "taylor" && n_params <= 4) {
         return std::make_unique<PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max, device_id);
+            std::move(cfg), batch_size, branch_max, device_id, stream);
     }
     if (poly_basis == "taylor" && n_params == 5) {
         return std::make_unique<PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max, device_id);
+            std::move(cfg), batch_size, branch_max, device_id, stream);
     }
     if (poly_basis == "chebyshev" && n_params <= 4) {
         return std::make_unique<PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max, device_id);
+            std::move(cfg), batch_size, branch_max, device_id, stream);
     }
     throw std::runtime_error(fmt::format(
         "Unknown poly_basis: '{}'. Valid options: 'taylor', 'chebyshev'",
@@ -931,7 +970,8 @@ create_prune_dp_functs_cuda<float>(std::string_view,
                                    search::PulsarSearchConfig,
                                    SizeType,
                                    SizeType,
-                                   int);
+                                   int,
+                                   cudaStream_t);
 template std::unique_ptr<PruneDPFunctsCUDA<ComplexTypeCUDA>>
 create_prune_dp_functs_cuda<ComplexTypeCUDA>(std::string_view,
                                              std::span<const SizeType>,
@@ -941,6 +981,7 @@ create_prune_dp_functs_cuda<ComplexTypeCUDA>(std::string_view,
                                              search::PulsarSearchConfig,
                                              SizeType,
                                              SizeType,
-                                             int);
+                                             int,
+                                             cudaStream_t);
 
 } // namespace loki::core

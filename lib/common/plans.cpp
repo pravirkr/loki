@@ -59,6 +59,33 @@ struct FFAPlanBase::Impl {
 
     const search::FFASearchConfig& get_config() const noexcept { return m_cfg; }
 
+    SizeType get_nsegments_active() const noexcept {
+        const SizeType bseg_ffa = m_cfg.get_bseg_ffa();
+        if (bseg_ffa == 0 || nsegments.empty()) {
+            return 0;
+        }
+        const SizeType n_real = (m_cfg.get_nsamps() + bseg_ffa - 1) / bseg_ffa;
+        return std::min(nsegments.back(), n_real);
+    }
+
+    SizeType
+    get_nsegments_ref_pool(std::optional<SizeType> n_runs = std::nullopt,
+                           bool explicit_ref_segs = false) const noexcept {
+        const SizeType active   = get_nsegments_active();
+        const SizeType bseg_ffa = m_cfg.get_bseg_ffa();
+        if (explicit_ref_segs || active <= 2 || bseg_ffa == 0) {
+            return active;
+        }
+        const SizeType rem = m_cfg.get_nsamps() % bseg_ffa;
+        if (rem != 0 && rem * 2 < bseg_ffa) {
+            const SizeType pool = active - 1;
+            if (!n_runs.has_value() || *n_runs <= pool) {
+                return pool;
+            }
+        }
+        return active;
+    }
+
     SizeType get_coord_size() const noexcept {
         return std::accumulate(ncoords.begin(), ncoords.end(), SizeType{0},
                                std::plus<>());
@@ -200,12 +227,13 @@ struct FFAPlanBase::Impl {
     get_branching_pattern_approx(std::string_view poly_basis,
                                  SizeType ref_seg,
                                  IndexType isuggest) const {
+        const SizeType n_segs_active = get_nsegments_active();
         if (poly_basis == "taylor") {
             return core::generate_bp_poly_taylor_approx(
                 param_counts[n_levels - 1], dparams_act[n_levels - 1],
-                m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
-                nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
-                ref_seg, isuggest, m_cfg.get_use_conservative_tile());
+                m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(), n_segs_active,
+                m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg, isuggest,
+                m_cfg.get_use_conservative_tile());
         }
         if (poly_basis == "chebyshev") {
             if (m_cfg.get_use_conservative_tile()) {
@@ -215,9 +243,8 @@ struct FFAPlanBase::Impl {
             }
             return core::generate_bp_poly_chebyshev_approx(
                 param_counts[n_levels - 1], dparams_act[n_levels - 1],
-                m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
-                nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
-                ref_seg, isuggest);
+                m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(), n_segs_active,
+                m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg, isuggest);
         }
         throw std::invalid_argument(fmt::format(
             "Invalid poly_basis ({}) for branching pattern generation",
@@ -231,19 +258,20 @@ struct FFAPlanBase::Impl {
 
     BranchingForecast forecast_branching(std::string_view poly_basis,
                                          SizeType ref_seg) const {
-        const auto param_arr = compute_param_grid(n_levels - 1);
+        const auto param_arr         = compute_param_grid(n_levels - 1);
+        const SizeType n_segs_active = get_nsegments_active();
         if (poly_basis == "taylor") {
             if (n_params <= 4) {
                 return core::generate_bp_poly_taylor(
                     param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
-                    nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
-                    ref_seg, m_cfg.get_use_conservative_tile());
+                    n_segs_active, m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg,
+                    m_cfg.get_use_conservative_tile());
             }
             if (n_params == 5) {
                 return core::generate_bp_circ_taylor(
                     param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
-                    nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
-                    ref_seg, m_cfg.get_use_conservative_tile());
+                    n_segs_active, m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg,
+                    m_cfg.get_use_conservative_tile());
             }
             throw std::invalid_argument("nparams > 5 not supported for "
                                         "branching pattern generation");
@@ -262,8 +290,7 @@ struct FFAPlanBase::Impl {
             if (n_params <= 4) {
                 return core::generate_bp_poly_chebyshev(
                     param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
-                    nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
-                    ref_seg);
+                    n_segs_active, m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg);
             }
         }
         throw std::invalid_argument(fmt::format(
@@ -290,6 +317,8 @@ private:
         dparams.resize(levels);
         dparams_act.resize(levels);
 
+        // The config picks bseg_brute = ceil(nsamps / 2^L), so this is 2^L
+        // and the zero-filled tail is shorter than 2^L samples.
         const auto nsegments_init =
             std::bit_ceil((m_cfg.get_nsamps() + m_cfg.get_bseg_brute() - 1) /
                           m_cfg.get_bseg_brute());
@@ -376,6 +405,14 @@ std::span<const SizeType> FFAPlanBase::get_segment_lens() const noexcept {
 }
 std::span<const SizeType> FFAPlanBase::get_nsegments() const noexcept {
     return m_impl->nsegments;
+}
+SizeType FFAPlanBase::get_nsegments_active() const noexcept {
+    return m_impl->get_nsegments_active();
+}
+SizeType
+FFAPlanBase::get_nsegments_ref_pool(std::optional<SizeType> n_runs,
+                                    bool explicit_ref_segs) const noexcept {
+    return m_impl->get_nsegments_ref_pool(n_runs, explicit_ref_segs);
 }
 std::span<const double> FFAPlanBase::get_tsegments() const noexcept {
     return m_impl->tsegments;

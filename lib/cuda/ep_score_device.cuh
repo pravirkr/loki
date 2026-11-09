@@ -225,6 +225,11 @@ __device__ __forceinline__ bool ep_block_finish(EPBlock<kMaxPB>& b,
         }
         atomicMax(a.stats + 1, b.key_max);
         atomicMax(a.stats + 2, b.key_min_inv);
+        uint32_t nvalid = 0;
+        for (uint32_t i = 0; i < nprof; ++i) {
+            nvalid += static_cast<uint32_t>(b.valid[i] != 0);
+        }
+        atomicAdd(a.stats + 3, nvalid);
     }
     if (a.tree_folds == nullptr) {
         return false;

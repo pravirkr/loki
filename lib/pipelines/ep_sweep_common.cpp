@@ -28,9 +28,11 @@ void initialize_ep_results(
     float min_pd,
     std::string_view poly_basis,
     float ref_ducy,
-    float total_runtime) {
+    float total_runtime,
+    std::string_view backend) {
     HighFive::File main_h5(result_file.string(), HighFive::File::Overwrite);
     main_h5.createAttribute("ep_sweep_version", std::string("1.0.0-cpp"));
+    main_h5.createAttribute("backend", std::string(backend));
     main_h5.createAttribute("complete", 0);
     main_h5.createAttribute("param_names", base_cfg.get_param_names());
     main_h5.createAttribute("nchunks", chunk_cfgs.size());
@@ -85,7 +87,7 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                        float ref_ducy,
                        float total_runtime) {
     initialize_ep_results(result_file, chunk_cfgs, base_cfg, min_pd, poly_basis,
-                          ref_ducy, total_runtime);
+                          ref_ducy, total_runtime, "cpu");
     HighFive::File main_h5(result_file.string(), HighFive::File::ReadWrite);
     double accumulated_flops = 0.0;
     for (SizeType i = 0; i < chunk_cfgs.size(); ++i) {
@@ -140,7 +142,7 @@ EPSweepWriter::EPSweepWriter(
       m_partial_file(std::filesystem::path(result_file) += ".partial"),
       m_nchunks(chunks.size()) {
     initialize_ep_results(m_partial_file, chunks, cfg, min_pd, poly_basis,
-                          ref_ducy, 0.0F);
+                          ref_ducy, 0.0F, "cuda");
     m_thread = std::thread([this] { run(); });
 }
 

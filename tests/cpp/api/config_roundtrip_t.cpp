@@ -67,7 +67,6 @@ void set_non_defaults(FFATomlConfig& cfg) {
     cfg.nbins_max              = 512;
     cfg.nbins_min_lossy_bf     = 32;
     cfg.bseg_brute             = 256;
-    cfg.bseg_ffa               = 4096;
     cfg.max_passing_candidates = 1000;
     cfg.outdir                 = "out dir/";
     cfg.prefix                 = "run_7";
@@ -148,7 +147,6 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(a.nbins_max == b.nbins_max);
     CHECK(a.nbins_min_lossy_bf == b.nbins_min_lossy_bf);
     CHECK(a.bseg_brute == b.bseg_brute);
-    CHECK(a.bseg_ffa == b.bseg_ffa);
     CHECK(a.max_passing_candidates == b.max_passing_candidates);
     CHECK(a.outdir == b.outdir);
     CHECK(a.prefix == b.prefix);
@@ -179,6 +177,7 @@ void check_same_ep(const EPTomlConfig& a, const EPTomlConfig& b) {
     CHECK(a.prune_poly_order == b.prune_poly_order);
     CHECK(a.n_runs == b.n_runs);
     CHECK(a.ref_segs == b.ref_segs);
+    CHECK(a.nsegments == b.nsegments);
     CHECK(a.p_orb_min == b.p_orb_min);
     CHECK(a.m_c_max == b.m_c_max);
     CHECK(a.m_p_min == b.m_p_min);
@@ -232,6 +231,7 @@ TEST_CASE("EPTomlConfig to_toml_string gives back every setting",
     cfg.ref_ducy                = 0.15F;
     cfg.prune_poly_order        = 4;
     cfg.ref_segs                = std::vector<loki::SizeType>{0, 3, 7};
+    cfg.nsegments               = 64;
     cfg.p_orb_min               = 3600.0;
     cfg.m_c_max                 = 2.0;
     cfg.m_p_min                 = 1.3;

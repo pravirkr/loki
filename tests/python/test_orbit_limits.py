@@ -45,7 +45,7 @@ def test_circular_limits_drive_a_search_config() -> None:
         eta=1.0,
         param_limits=limits,
         bseg_brute=4096,
-        bseg_ffa=1 << 18,
+        nsegments=128,
         prune_poly_order=3,
     )
     assert cfg.nparams == 3

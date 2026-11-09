@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -39,6 +40,7 @@
 #include "lib/detail/utils.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
+#include "lib/search/ep_support.hpp"
 
 namespace loki::pipelines {
 
@@ -94,7 +96,9 @@ public:
         std::optional<SizeType> n_runs,
         const std::optional<std::vector<SizeType>>& ref_segs,
         int device_id)
-        : m_base_cfg(std::move(cfg)),
+        : m_base_cfg(cfg.has_explicit_nsegments()
+                         ? std::move(cfg)
+                         : cfg.with_ep_default_nsegments()),
           m_min_pd(min_pd),
           m_poly_basis(poly_basis),
           m_ref_ducy(ref_ducy),
@@ -135,17 +139,26 @@ public:
             stats.get_max_memory_gb(), stats.get_memory_limit_gb(),
             utils::format_pow2(stats.get_max_sugg()));
 
-        // The FFA workspace needs the deepest chunk's level count.
+        // The FFA workspace needs the deepest chunk's level count and the
+        // largest chunk's brute-fold tables.
         SizeType max_levels = 0;
+        algorithms::detail::EPBruteTableSizes max_tables;
         for (const auto& chunk : chunk_cfgs) {
             const plans::FFAPlan<FoldType> plan(chunk.cfg);
             max_levels = std::max(max_levels, plan.get_n_levels());
+            const auto tables =
+                algorithms::detail::ep_cuda_brute_table_sizes(plan);
+            max_tables.nfreqs = std::max(max_tables.nfreqs, tables.nfreqs);
+            max_tables.phase_map_entries = std::max(
+                max_tables.phase_map_entries, tables.phase_map_entries);
         }
 
         // Shared buffers, held for the whole sweep.
         m_ffa_workspace = memory::FFAWorkspaceCUDA<FoldTypeCUDA>(
             stats.get_max_buffer_size(), stats.get_max_coord_size(), max_levels,
             m_base_cfg.get_nparams(), false);
+        m_ffa_workspace.reserve_brute_tables(max_tables.nfreqs,
+                                             max_tables.phase_map_entries);
         m_fold_d.resize(stats.get_max_buffer_size(), DeviceFoldT{});
         m_ts_e_d.resize(m_base_cfg.get_nsamps());
         m_ts_v_d.resize(m_base_cfg.get_nsamps());
@@ -166,7 +179,6 @@ public:
         peak_memory.shared_fold_bytes =
             stats.get_max_buffer_size() * sizeof(DeviceFoldT);
         SizeType peak_group_bytes = 0;
-        SizeType peak_transient   = 0;
         for (const auto& group : algorithms::detail::ep_chunk_groups(
                  std::span<const algorithms::EPChunkConfig>(chunk_cfgs))) {
             peak_group_bytes =
@@ -174,14 +186,9 @@ public:
                          algorithms::detail::ep_group_thread_bytes<FoldType>(
                              peak_memory, group));
         }
-        for (const auto& chunk : chunk_cfgs) {
-            peak_transient =
-                std::max(peak_transient, chunk.ffa_transient_bytes);
-        }
         m_extra_peak_gb =
-            static_cast<double>(peak_group_bytes + peak_transient +
-                                stats.get_max_buffer_size() *
-                                    sizeof(DeviceFoldT)) /
+            static_cast<double>(peak_group_bytes + stats.get_max_buffer_size() *
+                                                       sizeof(DeviceFoldT)) /
             utils::kBytesPerGB;
 
         spdlog::debug("EPFreqSweep (CUDA {}): allocated the shared buffers "
@@ -204,13 +211,8 @@ public:
         sweep_timer.start();
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
 
-        if (ts_e.size() != m_base_cfg.get_nsamps() ||
-            ts_v.size() != m_base_cfg.get_nsamps()) {
-            throw std::invalid_argument(fmt::format(
-                "EPFreqSweep::execute: ts_e and ts_v must have nsamps={} "
-                "samples, got {} and {}",
-                m_base_cfg.get_nsamps(), ts_e.size(), ts_v.size()));
-        }
+        std::tie(ts_e, ts_v) = search::detail::ep_input_series(
+            m_base_cfg, ts_e, ts_v, "EPFreqSweep::execute");
         check_device_has_room();
 
         std::error_code ec;
@@ -409,8 +411,8 @@ private:
     thrust::device_vector<DeviceFoldT> m_fold_d;
     thrust::device_vector<float> m_ts_e_d;
     thrust::device_vector<float> m_ts_v_d;
-    /// Device memory the sweep still takes on top of the shared buffers: the
-    /// largest group's workspace and the transient FFA scratch (GB).
+    /// Device memory the sweep still takes on top of the shared buffers and
+    /// the brute-fold tables: the largest group's workspace (GB).
     double m_extra_peak_gb{0.0};
 
     // Runtime checks of the plan against the memory model (docs/memory.md).

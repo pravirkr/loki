@@ -122,4 +122,59 @@ TEMPLATE_TEST_CASE("WorldTreeCUDA::add_initial takes the leading seeds of a "
         loki::cuda_utils::as_span(folds_d), loki::cuda_utils::as_span(scores_d),
         kNUsed, stream));
 }
+
+TEST_CASE(
+    "WorldTreeCUDA overflow matches CPU and validate checks leaves stride",
+    "[world_tree][cuda]") {
+    loki::cuda_utils::CudaSetDeviceGuard const guard(0);
+    constexpr SizeType kCapacity = 8;
+    constexpr SizeType kNParams  = 1;
+    constexpr SizeType kNBins    = 4;
+    constexpr SizeType kBatch    = 6;
+
+    WorldTreeCUDA<float> tree(kCapacity, kNParams, kNBins, kBatch);
+    const auto leaves_stride = tree.get_leaves_stride();
+    const auto folds_stride  = tree.get_folds_stride();
+
+    const float exact_thresh =
+        std::nextafter(35.0F, std::numeric_limits<float>::max());
+    std::vector<double> batch1_leaves(6 * leaves_stride, 1.0);
+    std::vector<float> batch1_folds(6 * folds_stride, 1.0F);
+    std::vector<float> batch1_scores{10.0F,        20.0F, 30.0F,
+                                     exact_thresh, 50.0F, 60.0F};
+    std::vector<uint32_t> batch1_indices{0, 1, 2, 3, 4, 5};
+    const thrust::device_vector<double> batch1_leaves_d(batch1_leaves);
+    const thrust::device_vector<float> batch1_folds_d(batch1_folds);
+    const thrust::device_vector<float> batch1_scores_d(batch1_scores);
+    const thrust::device_vector<uint32_t> batch1_indices_d(batch1_indices);
+
+    cudaStream_t stream = nullptr;
+    tree.prepare_in_place_update();
+    REQUIRE(
+        tree.add_batch_scattered(loki::cuda_utils::as_span(batch1_leaves_d),
+                                 loki::cuda_utils::as_span(batch1_folds_d),
+                                 loki::cuda_utils::as_span(batch1_scores_d),
+                                 loki::cuda_utils::as_span(batch1_indices_d),
+                                 5.0F, 6, stream) == 5.0F);
+    REQUIRE(tree.get_size() == 6);
+
+    std::vector<double> batch2_leaves(4 * leaves_stride, 2.0);
+    std::vector<float> batch2_folds(4 * folds_stride, 2.0F);
+    std::vector<float> batch2_scores{25.0F, 35.0F, 45.0F, 55.0F};
+    std::vector<uint32_t> batch2_indices{0, 1, 2, 3};
+    const thrust::device_vector<double> batch2_leaves_d(batch2_leaves);
+    const thrust::device_vector<float> batch2_folds_d(batch2_folds);
+    const thrust::device_vector<float> batch2_scores_d(batch2_scores);
+    const thrust::device_vector<uint32_t> batch2_indices_d(batch2_indices);
+
+    const float new_thresh = tree.add_batch_scattered(
+        loki::cuda_utils::as_span(batch2_leaves_d),
+        loki::cuda_utils::as_span(batch2_folds_d),
+        loki::cuda_utils::as_span(batch2_scores_d),
+        loki::cuda_utils::as_span(batch2_indices_d), 5.0F, 4, stream);
+    REQUIRE(new_thresh == exact_thresh);
+    REQUIRE(tree.get_size() == 5);
+
+    REQUIRE_NOTHROW(tree.validate(kCapacity, kNParams, kNBins, kBatch));
+}
 #endif // LOKI_ENABLE_CUDA

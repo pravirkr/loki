@@ -8,6 +8,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "loki/common/backend.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/io/preprocess.hpp"
 #include "loki/search/configs.hpp"
@@ -17,8 +18,7 @@ namespace {
 /// A complete EP document. Each part is spliced into its table, so a test can
 /// add or replace one key without writing a second [ep] or [performance].
 std::string make_doc(const std::string& ep           = "",
-                     const std::string& perf         = "nthreads = 2\n"
-                                                       "bseg_ffa = 8192\n",
+                     const std::string& perf         = "nthreads = 2\n",
                      const std::string& search_extra = "",
                      const std::string& tables       = "") {
     return "[input]\n"
@@ -32,7 +32,8 @@ std::string make_doc(const std::string& ep           = "",
            "nbins = 32\n" +
            search_extra +
            "[ep]\n"
-           "n_runs = 2\n" +
+           "n_runs = 2\n"
+           "nsegments = 8\n" +
            ep + "[performance]\n" + perf + tables;
 }
 
@@ -66,8 +67,7 @@ TEST_CASE("EPTomlConfig rejects unknown and removed keys", "[config][ep]") {
 TEST_CASE("EP candidate controls do not replace the pruning target",
           "[config][ep][candidates]") {
     const auto cfg = loki::search::EPTomlConfig::from_string(make_doc(
-        "target_snr = 8.5\n", "nthreads = 2\nbseg_ffa = 8192\n",
-        "snr_min = 12.0\n",
+        "target_snr = 8.5\n", "nthreads = 2\n", "snr_min = 12.0\n",
         "[candidates]\ncluster = false\ngrouping = \"anchored\"\n"
         "memory_gb = 0.02\nretain_detections = false\nmax_candidates = 3\n"));
     CHECK_FALSE(cfg.candidates.cluster);
@@ -85,14 +85,14 @@ TEST_CASE("EP candidate controls do not replace the pruning target",
 
 TEST_CASE("EPTomlConfig reads the [preprocessing] table", "[config][ep]") {
     const auto cfg = loki::search::EPTomlConfig::from_string(
-        make_doc("", "nthreads = 2\nbseg_ffa = 8192\n", "",
+        make_doc("", "nthreads = 2\n", "",
                  "[preprocessing]\nmethod = \"zscore\"\nclip_sigma = 4.0\n"));
     REQUIRE(cfg.preprocessing.method == loki::io::PreprocessMethod::kZScore);
     REQUIRE(cfg.preprocessing.clip_sigma == 4.0);
-    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
-                          make_doc("", "nthreads = 2\nbseg_ffa = 8192\n", "",
-                                   "[preprocessing]\nblock_sigma = -1.0\n")),
-                      std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        loki::search::EPTomlConfig::from_string(make_doc(
+            "", "nthreads = 2\n", "", "[preprocessing]\nblock_sigma = -1.0\n")),
+        std::invalid_argument);
 }
 
 TEST_CASE("EPTomlConfig rejects RFI options, which the EP search lacks",
@@ -175,7 +175,9 @@ TEST_CASE("EPTomlConfig reads whole numbers as reals", "[config][ep]") {
 
 TEST_CASE("EPTomlConfig takes the runs from the file or the command line",
           "[config][ep]") {
-    // Neither set: the document parses, the search config does not.
+    // Neither set: the search config does not depend on the runs, so it
+    // builds (the CLI then defaults to 16 runs, the library to every
+    // reference segment).
     const std::string no_runs = "[input]\n"
                                 "nsamps = 65536\n"
                                 "tsamp = 0.000064\n"
@@ -185,10 +187,10 @@ TEST_CASE("EPTomlConfig takes the runs from the file or the command line",
                                 "nbins = 32\n"
                                 "acc_min = -10.0\n"
                                 "acc_max = 10.0\n"
-                                "[performance]\n"
-                                "bseg_ffa = 8192\n";
+                                "[ep]\n"
+                                "nsegments = 8\n";
     const auto cfg = loki::search::EPTomlConfig::from_string(no_runs);
-    REQUIRE_THROWS_AS(cfg.to_ep_search_config(), std::invalid_argument);
+    REQUIRE_NOTHROW(cfg.to_ep_search_config());
 
     // A command line value is applied after the parse, so it can complete it.
     auto with_runs   = cfg;
@@ -230,23 +232,35 @@ TEST_CASE("EPTomlConfig validates explicit reference segments",
                                                 "nbins = 32\n"
                                                 "[ep]\n"
                                                 "ref_segs = [0, 2]\n"
-                                                "[performance]\n"
-                                                "bseg_ffa = 8192\n");
+                                                "nsegments = 8\n");
     REQUIRE(cfg.ref_segs.has_value());
     REQUIRE(cfg.ref_segs->size() == 2);
     REQUIRE_FALSE(cfg.n_runs.has_value());
 }
 
-TEST_CASE("EP search needs an FFA level below the series", "[config][ep]") {
-    // bseg_ffa == nsamps leaves one segment and no pruning levels.
-    const auto cfg = loki::search::EPTomlConfig::from_string(
-        make_doc("", "nthreads = 2\nbseg_ffa = 65536\n"));
-    REQUIRE_THROWS_AS(cfg.to_ep_search_config(), std::invalid_argument);
+TEST_CASE("EP search needs at least two power-of-2 segments", "[config][ep]") {
+    const auto doc = [](const std::string& nsegments) {
+        return "[input]\nnsamps = 65536\ntsamp = 0.000064\n"
+               "[search]\nf_min = 140.0\nf_max = 142.0\nacc_min = -10.0\n"
+               "acc_max = 10.0\nnbins = 32\n[ep]\nn_runs = 2\nnsegments = " +
+               nsegments + "\n";
+    };
+    // One segment leaves no pruning levels.
+    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(doc("1")),
+                      std::invalid_argument);
+    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(doc("12")),
+                      std::invalid_argument);
+    REQUIRE_NOTHROW(loki::search::EPTomlConfig::from_string(doc("16"))
+                        .to_ep_search_config());
+    // The removed key says what replaces it.
+    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
+                          make_doc("", "nthreads = 2\nbseg_ffa = 8192\n")),
+                      std::invalid_argument);
 }
 
 TEST_CASE("EP search rejects Kadane peak detection", "[config][ep]") {
-    const auto cfg = loki::search::EPTomlConfig::from_string(make_doc(
-        "", "nthreads = 2\nbseg_ffa = 8192\n", "use_boxcar_kadane = true\n"));
+    const auto cfg = loki::search::EPTomlConfig::from_string(
+        make_doc("", "nthreads = 2\n", "use_boxcar_kadane = true\n"));
     REQUIRE_THROWS_AS(cfg.to_ep_search_config(), std::invalid_argument);
 }
 
@@ -292,8 +306,7 @@ TEST_CASE("EP threshold simulation has an independent target SNR",
     REQUIRE(defaults.get_snr_min() == 7.0);
     const auto custom =
         loki::search::EPTomlConfig::from_string(
-            make_doc("target_snr = 12\n", "nthreads = 2\nbseg_ffa = 8192\n",
-                     "snr_min = 6.0\n"))
+            make_doc("target_snr = 12\n", "nthreads = 2\n", "snr_min = 6.0\n"))
             .to_ep_search_config();
     REQUIRE(custom.get_target_snr() == 12.0);
     REQUIRE(custom.get_snr_min() == 6.0);
@@ -345,6 +358,111 @@ TEST_CASE("EP config rejects bin limits above 1024", "[config][ep]") {
                           make_doc("", "nbins_max = 1025\n")),
                       std::invalid_argument);
     const auto cfg = loki::search::EPTomlConfig::from_string(
-        make_doc("", "nbins_max = 1024\nbseg_ffa = 8192\n"));
+        make_doc("", "nbins_max = 1024\n"));
     REQUIRE_NOTHROW(cfg.to_ep_search_config());
+}
+
+TEST_CASE("EP config defaults to 128 FFA segments when nsegments is omitted",
+          "[config][ep]") {
+    // Power-of-two nsamps: 128 segments exactly.
+    const std::string doc_pow2 = "[input]\n"
+                                 "nsamps = 1048576\n"
+                                 "tsamp = 0.000064\n"
+                                 "[search]\n"
+                                 "f_min = 140.0\n"
+                                 "f_max = 142.0\n"
+                                 "acc_min = -10.0\n"
+                                 "acc_max = 10.0\n"
+                                 "nbins = 32\n"
+                                 "[ep]\n"
+                                 "n_runs = 2\n"
+                                 "[performance]\n"
+                                 "nthreads = 1\n";
+    const auto toml_pow2 = loki::search::EPTomlConfig::from_string(doc_pow2);
+    REQUIRE_FALSE(toml_pow2.nsegments.has_value());
+    const auto ep_pow2 = toml_pow2.to_ep_search_config();
+    REQUIRE(ep_pow2.get_nsegments() ==
+            loki::search::EPSearchConfig::kDefaultEPSegments);
+    REQUIRE(ep_pow2.get_bseg_ffa() ==
+            1048576U / loki::search::EPSearchConfig::kDefaultEPSegments);
+    const loki::plans::FFAPlan<float> plan_pow2(ep_pow2);
+    REQUIRE(plan_pow2.get_nsegments_active() ==
+            loki::search::EPSearchConfig::kDefaultEPSegments);
+
+    // Non-power-of-two nsamps: 128 equal, full segments of a whole number
+    // of brute segments; the tail that fills no brute segment of the finest
+    // tree (fewer than 2^L samples) is dropped.
+    const std::vector<loki::ParamLimit> limits{
+        {.min = -10.0, .max = 10.0},
+        {.min = 140.0, .max = 142.0},
+    };
+    const loki::search::PulsarSearchConfig raw_cfg(70000, 64e-6, 32, 1.0,
+                                                   limits);
+    REQUIRE_FALSE(raw_cfg.has_explicit_nsegments());
+    REQUIRE(raw_cfg.get_nsegments() == 1U);
+    const auto norm_cfg = raw_cfg.with_ep_default_nsegments();
+    REQUIRE(norm_cfg.has_explicit_nsegments());
+    REQUIRE(norm_cfg.get_nsegments() == 128U);
+    REQUIRE(norm_cfg.get_nsamps_input() == 70000U);
+    REQUIRE(norm_cfg.get_nsamps() == norm_cfg.get_bseg_ffa() * 128U);
+    REQUIRE(norm_cfg.get_nsamps() <= 70000U);
+    const loki::SizeType nseg_brute =
+        norm_cfg.get_nsamps() / norm_cfg.get_bseg_brute();
+    REQUIRE(70000U - norm_cfg.get_nsamps() < nseg_brute);
+    // FFA searches keep the whole series.
+    REQUIRE(raw_cfg.get_nsamps() == 70000U);
+    const loki::plans::FFAPlan<float> plan_np2(norm_cfg);
+    REQUIRE(plan_np2.get_nsegments().back() == 128U);
+    REQUIRE(plan_np2.get_nsegments_active() == 128U);
+}
+
+TEST_CASE("EP chunk configs keep the EP segments of the base config",
+          "[config][ep]") {
+    // Non-power-of-two nsamps: each chunk picks its own brute length, but
+    // only among bseg_ffa >> k, so segment k covers the same samples in
+    // every chunk.
+    const std::vector<loki::ParamLimit> limits{
+        {.min = -10.0, .max = 10.0},
+        {.min = 140.0, .max = 142.0},
+    };
+    const auto base =
+        loki::search::PulsarSearchConfig(70000, 64e-6, 32, 1.0, limits)
+            .with_ep_default_nsegments();
+    // Unconstrained, the 20-30 Hz chunk would take other EP segments.
+    const auto slow = base.get_updated_ep_config(32, 1.0, 20.0, 30.0);
+    const auto fast = base.get_updated_ep_config(32, 1.0, 500.0, 700.0);
+    CAPTURE(base.get_bseg_brute(), base.get_bseg_ffa(), slow.get_bseg_brute(),
+            fast.get_bseg_brute());
+    REQUIRE(slow.get_nsegments() == base.get_nsegments());
+    REQUIRE(fast.get_nsegments() == base.get_nsegments());
+    REQUIRE(slow.get_bseg_ffa() == base.get_bseg_ffa());
+    REQUIRE(fast.get_bseg_ffa() == base.get_bseg_ffa());
+    // A fresh config of the slow chunk is not constrained.
+    const std::vector<loki::ParamLimit> slow_limits{
+        {.min = -10.0, .max = 10.0},
+        {.min = 20.0, .max = 30.0},
+    };
+    const auto fresh =
+        loki::search::PulsarSearchConfig(70000, 64e-6, 32, 1.0, slow_limits)
+            .with_nsegments(128);
+    CAPTURE(fresh.get_bseg_brute(), fresh.get_bseg_ffa());
+    REQUIRE(fresh.get_bseg_ffa() != base.get_bseg_ffa());
+}
+
+TEST_CASE("EPSearchConfig TOML helpers round-trip", "[config][ep]") {
+    const auto default_str =
+        loki::search::EPSearchConfig::default_toml_string();
+    REQUIRE(default_str.find("# nsegments = 128") != std::string_view::npos);
+    REQUIRE(default_str.find("bseg_ffa") == std::string_view::npos);
+    const auto ep_cfg =
+        loki::search::EPSearchConfig::from_toml_string(make_doc());
+    REQUIRE(ep_cfg.get_nbins() == 32U);
+    REQUIRE(ep_cfg.get_bseg_ffa() == 8192U);
+
+    const auto path =
+        std::filesystem::temp_directory_path() / "loki_ep_search_cfg_t.toml";
+    loki::search::EPSearchConfig::write_default_toml(path);
+    REQUIRE(std::filesystem::exists(path));
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
 }

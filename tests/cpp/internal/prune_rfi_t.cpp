@@ -60,7 +60,7 @@ PulsarSearchConfig make_small_cfg() {
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
-            /*bseg_ffa=*/kNsamps / 16,
+            /*nsegments=*/16,
             /*snr_min=*/5.0,
             /*max_passing_candidates=*/1U << 22U,
             /*prune_poly_order=*/2};

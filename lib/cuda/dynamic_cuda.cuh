@@ -73,6 +73,20 @@ public:
                               memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) const noexcept = 0;
 
+    virtual void validate_async(cuda::std::span<double> leaves_branch,
+                                cuda::std::span<uint32_t> leaves_origins,
+                                cuda::std::span<uint8_t> validation_mask,
+                                std::pair<double, double> coord_cur,
+                                SizeType n_leaves,
+                                cudaStream_t stream) const noexcept {
+        (void)leaves_branch;
+        (void)leaves_origins;
+        (void)validation_mask;
+        (void)coord_cur;
+        (void)n_leaves;
+        (void)stream;
+    }
+
     virtual void resolve(cuda::std::span<const double> leaves_branch,
                          cuda::std::span<const uint8_t> validation_mask,
                          cuda::std::span<uint32_t> param_indices,
@@ -138,12 +152,18 @@ public:
                     memory::CUBScratchArena& scratch_ws,
                     cudaStream_t stream,
                     const EPDirectWriteCUDA<FoldTypeCUDA>* direct = nullptr,
-                    MinMaxFloat* minmax = nullptr) = 0;
+                    MinMaxFloat* minmax                           = nullptr,
+                    SizeType* n_valid_out = nullptr) = 0;
 
     /// Results of the last direct-mode shift_add_score (waits for it):
     /// the number of passing leaves, and their min/max in @p minmax.
-    virtual SizeType collect_shift_add_score(MinMaxFloat& minmax) = 0;
+    virtual SizeType
+    collect_shift_add_score(MinMaxFloat& minmax,
+                            SizeType* n_valid_out = nullptr) = 0;
 
+    /// Transform the first @p n_leaves leaves to @p coord_next. An empty
+    /// @p validation_mask means every leaf is valid (all three bases honour
+    /// this: the direct-write path transforms passing leaves only).
     virtual void transform(cuda::std::span<double> leaves_tree,
                            cuda::std::span<const uint8_t> validation_mask,
                            std::pair<double, double> coord_next,
@@ -209,14 +229,15 @@ protected:
     // leaf), zeroed by one memset; and the pinned host copy of the
     // statistics. Counted as the scorer scratch.
     static constexpr SizeType kStatsWords = 2;
-    thrust::device_vector<unsigned long long> m_tile_state_d;
+    cuda_utils::DeviceVectorNoInit<unsigned long long> m_tile_state_d;
     std::unique_ptr<uint32_t, void (*)(uint32_t*)> m_stats_h{nullptr, nullptr};
     // Recorded after the statistics copy of a direct-mode batch.
     std::unique_ptr<CUevent_st, void (*)(cudaEvent_t)> m_stats_ready{nullptr,
                                                                      nullptr};
 
-    /// Passing count and min/max from the pinned statistics.
-    SizeType decode_stats(MinMaxFloat* minmax) const;
+    /// Passing count, valid count, and min/max from the pinned statistics.
+    SizeType decode_stats(MinMaxFloat* minmax,
+                          SizeType* n_valid_out = nullptr) const;
 
     // Constructor for all derived classes
     BasePruneDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,
@@ -226,7 +247,8 @@ protected:
                           search::PulsarSearchConfig cfg,
                           SizeType batch_size,
                           SizeType branch_max,
-                          int device_id = 0);
+                          int device_id       = 0,
+                          cudaStream_t stream = nullptr);
 
 public:
     // Common implementations shared by all variants
@@ -283,9 +305,11 @@ public:
                     memory::CUBScratchArena& scratch_ws,
                     cudaStream_t stream,
                     const EPDirectWriteCUDA<FoldTypeCUDA>* direct = nullptr,
-                    MinMaxFloat* minmax = nullptr) override;
+                    MinMaxFloat* minmax                           = nullptr,
+                    SizeType* n_valid_out = nullptr) override;
 
-    SizeType collect_shift_add_score(MinMaxFloat& minmax) override;
+    SizeType collect_shift_add_score(MinMaxFloat& minmax,
+                                     SizeType* n_valid_out = nullptr) override;
 
     [[nodiscard]] float get_scorer_scratch_memory_gib() const noexcept override;
 };
@@ -341,7 +365,8 @@ public:
                                 search::PulsarSearchConfig cfg,
                                 SizeType batch_size,
                                 SizeType branch_max,
-                                int device_id = 0);
+                                int device_id       = 0,
+                                cudaStream_t stream = nullptr);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -418,7 +443,8 @@ public:
         search::PulsarSearchConfig cfg,
         SizeType batch_size,
         SizeType branch_max,
-        int device_id = 0);
+        int device_id       = 0,
+        cudaStream_t stream = nullptr);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -484,7 +510,8 @@ public:
                                 search::PulsarSearchConfig cfg,
                                 SizeType batch_size,
                                 SizeType branch_max,
-                                int device_id = 0);
+                                int device_id       = 0,
+                                cudaStream_t stream = nullptr);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -504,6 +531,13 @@ public:
                       SizeType n_leaves,
                       memory::CUBScratchArena& scratch_ws,
                       cudaStream_t stream) const noexcept override;
+
+    void validate_async(cuda::std::span<double> leaves_branch,
+                        cuda::std::span<uint32_t> leaves_origins,
+                        cuda::std::span<uint8_t> validation_mask,
+                        std::pair<double, double> coord_cur,
+                        SizeType n_leaves,
+                        cudaStream_t stream) const noexcept override;
 
     void resolve(cuda::std::span<const double> leaves_branch,
                  cuda::std::span<const uint8_t> validation_mask,
@@ -553,7 +587,8 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
                             SizeType branch_max,
-                            int device_id = 0);
+                            int device_id       = 0,
+                            cudaStream_t stream = nullptr);
 
 // Type aliases for convenience
 using PrunePolyTaylorDPFunctsCUDAFloat = PrunePolyTaylorDPFunctsCUDA<float>;

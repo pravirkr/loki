@@ -152,6 +152,32 @@ void bind_prune(py::module_& m) {
              py::arg("ref_segs")        = std::nullopt, py::kw_only(),
              py::arg("backend") = "cpu", py::arg("device") = 0,
              py::arg("candidates") = std::nullopt)
+        .def(py::init(
+                 [](const PulsarSearchConfig& cfg,
+                    const search::CandidateOptions& candidates,
+                    bool show_progress, float min_pd,
+                    std::string_view poly_basis, float ref_ducy,
+                    const algorithms::PruneRFIConfig& rfi_config,
+                    const std::optional<std::filesystem::path>& plan_cache_file,
+                    std::optional<SizeType> n_runs,
+                    const std::optional<std::vector<SizeType>>& ref_segs,
+                    std::string_view backend, int device) {
+                     const auto exec = make_exec(backend, device);
+                     return long_call([&] {
+                         return std::make_unique<EPFreqSweep>(
+                             cfg, candidates, show_progress, min_pd, poly_basis,
+                             ref_ducy, rfi_config, plan_cache_file, n_runs,
+                             ref_segs, exec);
+                     });
+                 }),
+             py::arg("cfg"), py::arg("candidates"),
+             py::arg("show_progress") = true, py::arg("min_pd") = 0.1F,
+             py::arg("poly_basis") = "taylor", py::arg("ref_ducy") = 0.1F,
+             py::arg("rfi_config")      = algorithms::PruneRFIConfig(),
+             py::arg("plan_cache_file") = std::nullopt,
+             py::arg("n_runs")          = std::nullopt,
+             py::arg("ref_segs")        = std::nullopt, py::kw_only(),
+             py::arg("backend") = "cpu", py::arg("device") = 0)
         .def(
             "execute",
             [](EPFreqSweep& self, const PyArrayT<float>& ts_e,
