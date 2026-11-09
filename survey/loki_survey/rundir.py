@@ -57,6 +57,11 @@ class RunDir:
         return self.root / "units.jsonl"
 
     @property
+    def splits_jsonl(self) -> Path:
+        """Units split after hitting their time limit, and their parts."""
+        return self.root / "splits.jsonl"
+
+    @property
     def status_db(self) -> Path:
         return self.root / "status.sqlite"
 

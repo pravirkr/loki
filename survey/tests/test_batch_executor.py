@@ -7,11 +7,12 @@ each failure class is then driven end to end through ``fake_scheduler.py``.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
-from loki_survey.config import Batch, Resolved, Site
+from loki_survey.config import Batch, Resolved, Site, parse_survey
 from loki_survey.executors.batch import (
     ENDED,
     KILL,
@@ -34,6 +35,7 @@ from loki_survey.executors.slurm import (
     parse_squeue,
 )
 from loki_survey.rundir import RunDir
+from loki_survey.split import expand, load_splits
 from loki_survey.status import (
     CANCELLED,
     CRASHED,
@@ -449,11 +451,47 @@ def test_crash_is_reported_not_retried(tmp_path: Path, fake: Fake) -> None:
     assert db.counts() == {"done": 2}
 
 
-def test_time_limit_is_reported(tmp_path: Path, fake: Fake) -> None:
+def test_time_limit_is_reported_when_splitting_is_off(
+    tmp_path: Path,
+    fake: Fake,
+) -> None:
     fake.control(timeout=["u0:1"])
-    db, _ = drive(tmp_path)
+    db, _ = drive(tmp_path, timeout_splits=0)
     state = db.get("u0")
     assert (state.state, state.failure) == ("failed", TIMEOUT)
+    assert "split 0 times already" in db.failures()[0][3]
+
+
+SPLIT_SURVEY = {
+    "survey": {"name": "split"},
+    "data": {"series": ["*.dat"]},
+    "search": {
+        "snr_min": 7.0,
+        "region": [{"name": "r", "f_hz": [1.0, 2.0], "nbins": 32}],
+        "box": [{"name": "b", "kind": "ffa", "order": "freq"}],
+    },
+}
+
+
+def test_time_limit_splits_the_unit_in_two(tmp_path: Path, fake: Fake) -> None:
+    """A unit out of time runs again as two half bands; a part out of time fails."""
+    fake.control(timeout=["u0:1", "u0__s1:1"])
+    db, executor, units = executor_for(tmp_path)
+    executor.resolved = replace(executor.resolved, survey=parse_survey(SPLIT_SURVEY))
+    executor.watch(units)
+    assert db.get("u0").state == "split"
+    assert db.get("u0__s0").state == "done"
+    state = db.get("u0__s1")
+    assert (state.state, state.failure) == ("failed", TIMEOUT)
+    assert "split 1 times already" in db.failures()[0][3]
+    parts = load_splits(RunDir.at(tmp_path / "run"))["u0"]
+    middle = 2.0**0.5
+    assert [(p.id, p.f_min, p.f_max) for p in parts] == [
+        ("u0__s0", 1.0, middle),
+        ("u0__s1", middle, 2.0),
+    ]
+    assert [p.param_limits for p in parts] == [[[1.0, middle]], [[middle, 2.0]]]
+    assert expand(units, load_splits(RunDir.at(tmp_path / "run"))) == parts
 
 
 def test_stalled_job_is_killed_and_resubmitted(tmp_path: Path, fake: Fake) -> None:

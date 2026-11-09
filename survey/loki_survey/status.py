@@ -66,7 +66,9 @@ ADDED_COLUMNS = (
     ("attempts", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
     ("attempts", "ended_seen", "REAL"),
 )
-STATES = ("pending", "queued", "running", "done", "failed")
+STATES = ("pending", "queued", "running", "done", "failed", "split")
+# A unit replaced by its parts after hitting its time limit (split.py).
+SPLIT = "split"
 LIVE_STATES = ("queued", "running")
 # Failure classes, each handled its own way by the executors.
 OOM = "oom"

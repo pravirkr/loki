@@ -35,6 +35,8 @@ threads = 2
 # host_failures = 2     # exclude a host after this many failures that point
 #                       # at it (not while every host fails and none runs)
 # stall_min = 30        # a running job silent this long is stalled; 0: off
+# timeout_splits = 1    # cluster: split a unit out of time into two half bands
+#                       # this many times over; 0: report it instead
 
 # For kind = "lsf" (ask your admins, or run the commands shown):
 # [lsf]

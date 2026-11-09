@@ -266,13 +266,21 @@ def write_units(run: RunDir, units: list[Unit]) -> None:
     atomic_write_text(run.units_jsonl, text)
 
 
-def load_units(run: RunDir) -> list[Unit]:
+def load_planned_units(run: RunDir) -> list[Unit]:
+    """Return the unit list as ``plan`` wrote it."""
     if not run.units_jsonl.is_file():
         msg = f"{run.units_jsonl} not found; run 'loki-survey plan' first"
         raise FileNotFoundError(msg)
     return [
         Unit(**json.loads(line)) for line in run.units_jsonl.read_text().splitlines()
     ]
+
+
+def load_units(run: RunDir) -> list[Unit]:
+    """Return the units to run: the planned ones, each split one by its parts."""
+    from loki_survey.split import expand, load_splits  # noqa: PLC0415
+
+    return expand(load_planned_units(run), load_splits(run))
 
 
 def run_plan(

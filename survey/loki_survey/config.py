@@ -125,6 +125,8 @@ DEFAULT_HOST_FAILURES = 2
 DEFAULT_STALL_MIN = 30.0
 DEFAULT_SUBMIT_TIMEOUT_S = 300.0
 DEFAULT_MAX_ARRAY = 1000
+# A unit that hits its time limit is split in two this many times over.
+DEFAULT_TIMEOUT_SPLITS = 1
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,7 @@ class Site:
     requeue_retries: int = DEFAULT_REQUEUE_RETRIES
     host_failures: int = DEFAULT_HOST_FAILURES
     stall_min: float = DEFAULT_STALL_MIN
+    timeout_splits: int = DEFAULT_TIMEOUT_SPLITS
     batch: Batch | None = None
 
     @property
@@ -518,6 +521,7 @@ def parse_site(doc: dict[str, Any], where: str = "site.toml") -> Site:
             "requeue_retries",
             "host_failures",
             "stall_min",
+            "timeout_splits",
         },
         f"{where} [retry]",
     )
@@ -626,6 +630,12 @@ def parse_site(doc: dict[str, Any], where: str = "site.toml") -> Site:
             ),
         ),
         stall_min=float(stall_min),
+        timeout_splits=_nonnegative_int(
+            retry,
+            "timeout_splits",
+            DEFAULT_TIMEOUT_SPLITS,
+            f"{where} [retry]",
+        ),
         batch=batch,
     )
     if site.oom_factor <= 1.0:

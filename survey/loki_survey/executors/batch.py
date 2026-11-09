@@ -5,7 +5,9 @@ failed pends forever). It submits arrays, then polls: each poll reads the
 scheduler's record of every live attempt, classes each failure and decides
 what to do with it. Out-of-memory units are resubmitted with more memory;
 preempted, killed, lost and stalled units, and units on a failing host, are
-resubmitted as they were; a crash or a time limit is reported, not retried.
+resubmitted as they were; a unit that hits its time limit is split into two
+half bands (split.py), as many times over as the site allows; a crash is
+reported, not retried.
 
 A job runs ``jobs/<array>.sh``, which picks its unit from ``jobs/<array>.txt``
 by array index, touches a heartbeat file while it runs, and calls
@@ -26,8 +28,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from loki_survey.config import ConfigError
 from loki_survey.executors.local import log_tail
+from loki_survey.plan import build_ep_plan, load_units
 from loki_survey.rundir import read_json, sha256_text
+from loki_survey.split import expand, load_splits, record_split, split_depth, split_unit
 from loki_survey.status import (
     CANCELLED,
     CRASHED,
@@ -37,6 +42,7 @@ from loki_survey.status import (
     OOM,
     PREEMPTED,
     REQUEUED,
+    SPLIT,
     STALLED,
     TIMEOUT,
     Attempt,
@@ -240,6 +246,8 @@ class BatchExecutor:
         self.db = db
         self.scheduler = scheduler
         self.tag = run_tag(run)
+        # The units this driver has submitted or been asked to watch.
+        self.units: dict[str, Unit] = {}
 
     # -- polling -----------------------------------------------------------
 
@@ -376,11 +384,18 @@ class BatchExecutor:
         elif failure == CANCELLED:
             state = "pending"
         elif failure == TIMEOUT:
-            limit = self.batch.time_min if self.batch else None
-            detail = (
-                f"{detail}; give its region more bands in survey.toml, or raise "
-                f"time_min in site.toml (now {limit or 'the queue default'})"
-            )
+            parts = self._split(a)
+            if parts:
+                state = SPLIT
+                detail = f"{detail}; split into {', '.join(p.id for p in parts)}"
+            else:
+                limit = self.batch.time_min if self.batch else None
+                detail = (
+                    f"{detail}; split {split_depth(a.unit)} times already "
+                    f"([retry] timeout_splits = {site.timeout_splits}); give its "
+                    f"region more bands in survey.toml, or raise time_min in "
+                    f"site.toml (now {limit or 'the queue default'})"
+                )
         self.db.finish(
             a.unit,
             a.attempt,
@@ -393,12 +408,36 @@ class BatchExecutor:
             host=record.host,
         )
         where = f" on {record.host}" if record.host else ""
-        if state == "pending" and memory is not None:
+        if state == SPLIT:
+            print(f"{failure:9s} {a.unit}{where}: {detail.splitlines()[0]}")
+        elif state == "pending" and memory is not None:
             print(f"{failure:9s} {a.unit}{where}: resubmit with {memory:.3g} GB")
         elif state == "pending":
             print(f"{failure:9s} {a.unit}{where}: resubmit")
         else:
             print(f"FAIL {failure} {a.unit}{where}: {detail.splitlines()[0]}")
+
+    def _split(self, a: Attempt) -> list[Unit] | None:
+        """Split a unit that hit its time limit; return its parts, or None."""
+        if split_depth(a.unit) >= self.site.timeout_splits:
+            return None
+        unit = self.units.get(a.unit)
+        if unit is None and self.run.units_jsonl.is_file():
+            unit = next((u for u in load_units(self.run) if u.id == a.unit), None)
+        if unit is None:
+            return None
+        try:
+            parts = split_unit(self.resolved, unit)
+            for part in parts:
+                if part.plan_key is not None:
+                    build_ep_plan(self.run, self.resolved, part)
+        except (ConfigError, ValueError) as exc:
+            print(f"could not split {a.unit}: {exc}")
+            return None
+        record_split(self.run, unit, parts, TIMEOUT)
+        # The parts start from the parent's reservation.
+        self.db.sync(parts, a.memory_gb)
+        return parts
 
     def _count_host_failure(self, host: str, detail: str) -> None:
         """Exclude a host once enough failures point at it and not elsewhere.
@@ -428,6 +467,7 @@ class BatchExecutor:
 
     def submit(self, units: list[Unit]) -> int:
         """Submit every pending unit as arrays grouped by memory; return how many."""
+        self.units.update({u.id: u for u in units})
         groups: dict[float, list[Unit]] = {}
         for unit in units:
             state = self.db.get(unit.id)
@@ -529,12 +569,16 @@ class BatchExecutor:
                 print(time.strftime("%H:%M:%S"), f"poll skipped: {exc}", flush=True)
                 time.sleep(self.site.poll_s)
                 continue
+            # A unit split since the last poll is run as its parts.
+            units = expand(units, load_splits(self.run))
             self.submit(units)
             counts = self.db.counts()
             line = "  ".join(
                 f"{s} {counts.get(s, 0)}"
                 for s in ("done", "running", "queued", "pending", "failed")
             )
+            if counts.get(SPLIT):
+                line += f"  split {counts[SPLIT]}"
             if line != last:
                 print(time.strftime("%H:%M:%S"), line, flush=True)
                 last = line

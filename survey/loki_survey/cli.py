@@ -202,6 +202,7 @@ def _report(run: RunDir, resolved: Resolved) -> int:
     try:
         db.sync(_selected_units(run, None), resolved.site.unit_memory_gb)
         counts = db.counts()
+        split = counts.pop("split", 0)
         total = sum(counts.values())
         print(
             "  ".join(
@@ -210,6 +211,8 @@ def _report(run: RunDir, resolved: Resolved) -> int:
             )
             + f"  of {total}",
         )
+        if split:
+            print(f"{split} units hit their time limit and run as half-band parts")
         for uid, failure, attempts, detail in db.failures():
             print(f"FAILED {uid}: {failure} after {attempts} attempts")
             if detail:
