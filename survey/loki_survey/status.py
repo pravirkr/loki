@@ -64,6 +64,7 @@ ADDED_COLUMNS = (
     ("attempts", "running_since", "REAL"),
     ("attempts", "began", "INTEGER NOT NULL DEFAULT 0"),
     ("attempts", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+    ("attempts", "ended_seen", "REAL"),
 )
 STATES = ("pending", "queued", "running", "done", "failed")
 LIVE_STATES = ("queued", "running")
@@ -110,6 +111,7 @@ class Attempt:
     host: str | None
     began: bool
     cancel_requested: bool
+    ended_seen: float | None = None
 
 
 class StatusDB:
@@ -266,7 +268,8 @@ class StatusDB:
         """Every attempt queued on or running in a cluster."""
         rows = self.conn.execute(
             "SELECT unit, attempt, phase, array_name, job, job_index, memory_gb, "
-            "started, running_since, host, began, cancel_requested FROM attempts "
+            "started, running_since, host, began, cancel_requested, ended_seen "
+            "FROM attempts "
             "WHERE phase IN ('queued', 'running') ORDER BY unit, attempt",
         )
         return [
@@ -274,6 +277,7 @@ class StatusDB:
                 *row[:10],
                 began=bool(row[10]),
                 cancel_requested=bool(row[11]),
+                ended_seen=row[12],
             )
             for row in rows.fetchall()
         ]
@@ -300,11 +304,24 @@ class StatusDB:
                 (time.time(), unit_id, attempt),
             )
 
-    def mark_began(self, unit_id: str, attempt: int, host: str | None) -> None:
-        """Record that ``run-unit`` itself started (so the host could run it)."""
+    def mark_ended_seen(self, unit_id: str, attempt: int) -> None:
+        """Record when the scheduler first reported the attempt ended."""
         with self.conn:
             self.conn.execute(
-                "UPDATE attempts SET began = 1, host = COALESCE(?, host) "
+                "UPDATE attempts SET ended_seen = COALESCE(ended_seen, ?) "
+                "WHERE unit = ? AND attempt = ?",
+                (time.time(), unit_id, attempt),
+            )
+
+    def mark_began(self, unit_id: str, attempt: int, host: str | None) -> None:
+        """Record that ``run-unit`` itself started (so the host could run it).
+
+        The host it reports fills in only a host the scheduler has not named:
+        the scheduler's names are the ones its exclusions understand.
+        """
+        with self.conn:
+            self.conn.execute(
+                "UPDATE attempts SET began = 1, host = COALESCE(host, ?) "
                 "WHERE unit = ? AND attempt = ?",
                 (host, unit_id, attempt),
             )

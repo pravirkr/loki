@@ -76,9 +76,11 @@ REASON_CLASSES = {
 HOST_EXIT_CODES = (128 + 4, 128 + 7)
 # A stall is this many heartbeats missed in a row.
 HEARTBEATS_PER_STALL = 6
-# A scheduler may not list a job it accepted moments ago; wait this many polls
-# before calling an attempt lost.
-MISSING_GRACE_POLLS = 3
+# A scheduler may not list a job it accepted moments ago, and a network file
+# system may show a finished job's files only up to a minute after it ends
+# (NFS caches a directory's attributes for up to 60 s). Wait this many polls
+# before deciding from what is missing.
+SETTLE_POLLS = 3
 ARRAY_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
 BYTES_PER_GB = 1e9
 
@@ -285,9 +287,9 @@ class BatchExecutor:
             return
         if record is None:
             record = self.scheduler.ended_record(a)
+        settle_s = SETTLE_POLLS * self.site.poll_s
         if record is None:
-            grace = MISSING_GRACE_POLLS * self.site.poll_s
-            if time.time() - a.started < grace:
+            if time.time() - a.started < settle_s:
                 return
             record = JobRecord(ENDED, text="the scheduler has no record of the job")
         if record.state == PENDING:
@@ -301,6 +303,14 @@ class BatchExecutor:
             elif self._stalled(a):
                 self._stall(a, record)
             return
+        if record.reason is None:
+            # No scheduler reason: the job's own files (summary, started
+            # marker) decide its class, so give them time to appear.
+            if a.ended_seen is None:
+                self.db.mark_ended_seen(a.unit, a.attempt)
+                return
+            if time.time() - a.ended_seen < settle_s:
+                return
         self._ended(a, record)
 
     def _stalled(self, a: Attempt) -> bool:

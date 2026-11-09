@@ -60,13 +60,17 @@ STUB = """
 import json, os, pathlib, sys
 run, uid, attempt = pathlib.Path(sys.argv[4]), sys.argv[5], sys.argv[7]
 marker = run / "logs" / f"{uid}.{attempt}.started"
-marker.write_text(json.dumps({"host": os.environ.get("FAKE_HOST")}))
+# A fully qualified name, as platform.node() gives on some clusters.
+marker.write_text(json.dumps({"host": f"{os.environ.get('FAKE_HOST')}.example.org"}))
 behaviour = run / "behaviour.json"
 how = json.loads(behaviour.read_text()).get(uid) if behaviour.is_file() else None
 if how == "crash":
     print("loki: something broke")
     sys.exit(3)
-(run / "out" / f"{uid}.json").write_text("{}")
+# "late": the summary is written where the test can reveal it later, as a
+# network file system shows it to the driver only some time after the job.
+name = f".late-{uid}.json" if how == "late" else f"{uid}.json"
+(run / "out" / name).write_text("{}")
 """
 
 BJOBS = {
@@ -291,18 +295,18 @@ def test_bsub_and_sbatch_arguments(tmp_path: Path) -> None:
     assert "--partition=gen" in argv
 
 
-def drive(
+def executor_for(
     tmp_path: Path,
     kind: str = "lsf",
     *,
     n: int = 1,
-    crash: tuple[str, ...] = (),
+    behaviour: dict[str, str] | None = None,
     **changes: object,
-) -> tuple[StatusDB, BatchExecutor]:
-    """Run ``n`` stub units to the end through the fake scheduler."""
+) -> tuple[StatusDB, BatchExecutor, list]:
+    """Set up ``n`` stub units and an executor on the fake scheduler."""
     run = RunDir.at(tmp_path / "run")
     run.ensure()
-    (run.root / "behaviour.json").write_text(json.dumps(dict.fromkeys(crash, "crash")))
+    (run.root / "behaviour.json").write_text(json.dumps(behaviour or {}))
     resolved = Resolved(
         survey=None,  # type: ignore[arg-type]
         site=site(kind, stub_python(tmp_path, STUB), **changes),
@@ -313,6 +317,25 @@ def drive(
     db.sync(units, resolved.site.unit_memory_gb)
     kinds = {"lsf": LsfScheduler, "slurm": SlurmScheduler}
     executor = BatchExecutor(run, resolved, db, kinds[kind](run, resolved.site))
+    return db, executor, units
+
+
+def drive(
+    tmp_path: Path,
+    kind: str = "lsf",
+    *,
+    n: int = 1,
+    crash: tuple[str, ...] = (),
+    **changes: object,
+) -> tuple[StatusDB, BatchExecutor]:
+    """Run ``n`` stub units to the end through the fake scheduler."""
+    db, executor, units = executor_for(
+        tmp_path,
+        kind,
+        n=n,
+        behaviour=dict.fromkeys(crash, "crash"),
+        **changes,
+    )
     executor.watch(units)
     return db, executor
 
@@ -453,6 +476,20 @@ def test_busy_scheduler_makes_no_duplicate(tmp_path: Path, fake: Fake) -> None:
     db, _ = drive(tmp_path, n=2)
     assert db.counts() == {"done": 2}
     assert len(fake.jobs()) == 1
+
+
+def test_late_summary_is_not_a_crash(tmp_path: Path, fake: Fake) -> None:
+    """The job ended well, but its summary shows on the driver's host later."""
+    fake.control()
+    db, executor, units = executor_for(tmp_path, behaviour={"u0": "late"})
+    executor.submit(units)
+    executor.reconcile()  # ended, exit 0, no summary yet: settle, do not judge
+    assert db.get("u0").state == "queued"
+    out = tmp_path / "run" / "out"
+    (out / ".late-u0.json").rename(out / "u0.json")
+    executor.reconcile()
+    assert db.get("u0").state == "done"
+    assert [(f, h) for _, _, f, h in history(db, "u0")] == [(None, "h1")]
 
 
 def test_cancel_returns_units_to_pending(tmp_path: Path, fake: Fake) -> None:

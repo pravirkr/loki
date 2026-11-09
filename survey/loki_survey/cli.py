@@ -235,7 +235,7 @@ def cmd_run_unit(args: argparse.Namespace) -> int:
     atomic_write_json(
         run.unit_started(args.unit, args.attempt),
         {
-            "host": platform.node(),
+            "host": platform.node().split(".")[0],
             "pid": os.getpid(),
             "time": time.time(),
             "lsf_job": os.environ.get("LSB_JOBID"),
