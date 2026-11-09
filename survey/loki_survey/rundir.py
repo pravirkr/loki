@@ -62,6 +62,10 @@ class RunDir:
         return self.root / "splits.jsonl"
 
     @property
+    def collect_dir(self) -> Path:
+        return self.root / "collect"
+
+    @property
     def status_db(self) -> Path:
         return self.root / "status.sqlite"
 
