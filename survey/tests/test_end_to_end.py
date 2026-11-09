@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import h5py
@@ -94,7 +95,9 @@ def test_simulated_pulsar_is_found(tmp_path: Path, unit_python: str) -> None:
     run = tmp_path / "run"
     (run / "data").mkdir(parents=True)
     simulate(run / "data" / "sim_DM10.00.dat")
-    (run / "survey.toml").write_text(SURVEY)
+    survey = SURVEY + '[evaluate]\ncatalogue = "catalogue.csv"\n'
+    (run / "survey.toml").write_text(survey)
+    (run / "catalogue.csv").write_text(f"name,f0\nSIM,{TRUE_FREQ}\n")
     write_site(run, unit_python)
 
     assert main(["run", str(run)]) == 0
@@ -107,14 +110,25 @@ def test_simulated_pulsar_is_found(tmp_path: Path, unit_python: str) -> None:
             assert "science_sha256" in handle["survey"].attrs
         assert (run / "out" / "raw").is_dir()
 
+    # Collected, matched and reported: FFA and EP found the pulsar, one group.
+    summary = json.loads((run / "collect" / "summary.json").read_text())
+    assert summary["groups"] >= 1
+    recall = json.loads((run / "evaluate" / "summary.json").read_text())
+    (pulsar,) = recall["catalogue"]["pulsars"]
+    assert pulsar["found"]
+    assert pulsar["best"]["selected"]
+    assert "SIM" in (run / "report" / "index.html").read_text()
+
     # A second run finds nothing to do and changes no output.
     before = {p.name: p.stat().st_mtime_ns for p in (run / "out").glob("*.h5")}
     assert main(["run", str(run)]) == 0
     after = {p.name: p.stat().st_mtime_ns for p in (run / "out").glob("*.h5")}
     assert before == after
 
-    # Changing the science after units finished is refused.
-    (run / "survey.toml").write_text(SURVEY.replace("snr_min = 7.0", "snr_min = 6.0"))
+    # The analysis may change after units finished; the science may not.
+    (run / "survey.toml").write_text(survey + "[collect]\nmax_candidates = 5\n")
+    assert main(["check", str(run)]) == 0
+    (run / "survey.toml").write_text(survey.replace("snr_min = 7.0", "snr_min = 6.0"))
     assert main(["check", str(run)]) == 1
 
 

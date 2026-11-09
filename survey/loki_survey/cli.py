@@ -10,6 +10,7 @@ import time
 from importlib import resources
 from pathlib import Path
 
+from loki_survey.collect import IncompleteRunError
 from loki_survey.config import (
     ConfigError,
     Resolved,
@@ -234,6 +235,61 @@ def _report(run: RunDir, resolved: Resolved) -> int:
         db.close()
 
 
+def cmd_collect(args: argparse.Namespace) -> int:
+    from loki_survey.collect import collect  # noqa: PLC0415
+    from loki_survey.plan import load_units  # noqa: PLC0415
+
+    run = RunDir.at(args.rundir)
+    resolved = load_resolved(run)
+    summary = collect(run, resolved, load_units(run), partial=args.partial)
+    removed = sum(summary["removed"].values())
+    print(
+        f"collect: {summary['members']} unit candidates from "
+        f"{summary['units_collected']} of {summary['units']} units in "
+        f"{summary['groups']} groups; {summary['selected']} selected, {removed} "
+        f"removed (ledger {run.collect_dir / 'ledger.jsonl'})",
+    )
+    if summary["units_missing"]:
+        print(f"  {len(summary['units_missing'])} units had not finished")
+    return 0
+
+
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    from loki_survey.evaluate import evaluate  # noqa: PLC0415
+
+    run = RunDir.at(args.rundir)
+    summary = evaluate(run, load_resolved(run))
+    catalogue = summary.get("catalogue")
+    if catalogue:
+        pulsars = catalogue["pulsars"]
+        found = sum(p["found"] for p in pulsars)
+        in_band = sum(p["in_band"] for p in pulsars)
+        print(f"evaluate: {found} of {in_band} catalogued pulsars in band found")
+        for p in pulsars:
+            best = p["best"]
+            if best is not None and not best["selected"]:
+                print(f"  {p['name']}: its group was removed by {best['removed_by']}")
+            elif p["in_band"] and not p["found"]:
+                print(f"  {p['name']}: not found at its own frequency")
+    lines = summary.get("lines")
+    if lines:
+        print(
+            f"evaluate: {lines['n_lines']} lines in {lines['series']}; "
+            f"{lines['groups_on_lines']} groups lie on one",
+        )
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from loki_survey.plan import load_units  # noqa: PLC0415
+    from loki_survey.report import REPORT_HTML, write_report  # noqa: PLC0415
+
+    run = RunDir.at(args.rundir)
+    write_report(run, load_resolved(run), load_units(run))
+    print(f"report: {run.report_dir / REPORT_HTML}")
+    return 0
+
+
 def cmd_run_unit(args: argparse.Namespace) -> int:
     run = RunDir.at(args.rundir)
     # Written before loki is imported: a job that dies before this file
@@ -261,7 +317,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         code = step(args)
         if code:
             return code
+    if not _all_done(RunDir.at(args.rundir)):
+        print("units are still running; collect, evaluate and report when they end")
+        return 0
+    args.partial = False
+    for step in (cmd_collect, cmd_evaluate, cmd_report):
+        code = step(args)
+        if code:
+            return code
     return 0
+
+
+def _all_done(run: RunDir) -> bool:
+    from loki_survey.plan import load_units  # noqa: PLC0415
+
+    return all(run.unit_summary(u.id).is_file() for u in load_units(run))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -290,7 +360,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--units", nargs="*", help="only these unit ids")
     add("cancel", cmd_cancel, "cancel a cluster run's queued and running jobs")
     add("status", cmd_status, "show unit states and failures")
-    p = add("run", cmd_run, "check, prep, plan and submit")
+    p = add("collect", cmd_collect, "group every unit's candidates; write the ledger")
+    p.add_argument(
+        "--partial",
+        action="store_true",
+        help="collect although some units have not finished",
+    )
+    add("evaluate", cmd_evaluate, "match candidates to the catalogue and to lines")
+    add("report", cmd_report, "write report/index.html")
+    p = add(
+        "run",
+        cmd_run,
+        "check, prep, plan and submit; then collect, evaluate and report",
+    )
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--units", nargs="*", help="only these unit ids")
     p.add_argument("--wait", action="store_true", help="as for submit")
@@ -314,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         DriverBusyError,
         SchedulerError,
         SubmitError,
+        IncompleteRunError,
     ) as exc:
         print(f"loki-survey: {exc}", file=sys.stderr)
         return 2

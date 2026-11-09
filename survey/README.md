@@ -7,7 +7,8 @@ candidate list, on a laptop, a single server or an LSF or Slurm cluster.
 pip install ./survey            # needs loki installed
 loki-survey new myrun           # writes myrun/survey.toml and myrun/site.toml
 # edit both files, put the series where survey.toml points
-loki-survey run myrun           # check, prep, plan and submit
+loki-survey run myrun           # check, prep, plan, submit; then collect,
+                                # evaluate and report once every unit is done
 loki-survey status myrun
 ```
 
@@ -21,6 +22,9 @@ loki-survey status myrun
 | `submit` | `units.jsonl` | `out/<unit>.h5` and `out/<unit>.json` per unit |
 | `watch` | the cluster's job records | resubmissions, `status.sqlite` |
 | `status` | `out/`, `status.sqlite` | nothing |
+| `collect` | `out/` | `collect/candidates.h5`, `collect/ledger.jsonl`, `collect/summary.json` |
+| `evaluate` | `collect/`, the catalogue, the lowest-DM series | `evaluate/matches.jsonl`, `evaluate/summary.json` |
+| `report` | everything above | `report/report.json` and `report/index.html` made from it |
 
 Each stage does only what is missing, so rerunning `loki-survey run` after an
 interruption picks up where it stopped.
@@ -78,6 +82,38 @@ longer lists is read from the footer LSF appends to its output in
 `logs/sched/`. Slurm needs its accounting (`sacct`) for the failure classes;
 without it, a failed element can only be called lost.
 
+## Candidates
+
+`collect` reads every unit's candidates (loki has already grouped them within
+the unit) and groups them across units: candidates from any box, band or DM
+whose frequencies lie within `radius_bins` resolutions 1/T are one group, and
+its strongest member represents it. Grouping removes nothing; every unit
+candidate stays in `/members` with its group. Each group gets labels:
+
+- `dm_call`: `undispersed` (strongest at the lowest DM searched, at most
+  `dm_zero_max`), `dispersed` (strongest inside the DMs searched), `lowest_dm`
+  or `highest_dm` (strongest at an edge, so the DM may lie outside the
+  search), `single_dm` or `unknown_dm`; the S/N at each DM is kept;
+- `harmonic_of`: a stronger group, p/q times this one's frequency, with p and
+  q up to `harmonic_max`.
+
+A group leaves the list only through a removal rule, each off by default:
+`snr_min`, `drop_undispersed`, `remove_harmonics`, `max_candidates`. Every
+group a rule removes is in `collect/ledger.jsonl` with the rule and why.
+`collect` refuses a run with unfinished units unless given `--partial`.
+
+`evaluate` labels each group with the catalogued pulsars it matches (a CSV of
+`name`, `f0` or `p0`, and optionally `dm`, `pb` in days and `a1` in light
+seconds; `[evaluate] catalogue`), at p/q times their frequency within the
+Doppler window (`doppler`, 1e-4 by default for the Earth's orbit, plus the
+orbit's v/c), and with the spectral lines of the lowest-DM series. Lines and
+matches are labels; they remove nothing. Its summary lists every catalogued
+pulsar: searched or not, found or not, and whether a rule removed its group.
+
+`report` writes `report/report.json`, everything the page shows, and
+`report/index.html`, made from that file alone: units and failures, cost,
+candidates with their S/N against DM, catalogue recall and the ledger.
+
 ## Tests
 
 ```bash
@@ -85,7 +121,11 @@ cd survey && pytest tests
 ```
 
 `test_end_to_end.py` simulates a pulsar, runs every stage with FFA and EP
-boxes and checks that both find it, on this machine and through a fake LSF.
+boxes and checks that both find it and that `evaluate` matches it to a
+catalogue, on this machine and through a fake LSF. `test_collect.py`,
+`test_evaluate.py` and `test_report.py` use unit outputs written by hand
+(`synthetic.py`): a pulsar over three DMs and two boxes, interference, a
+harmonic and a lone candidate.
 `test_batch_executor.py` drives each failure class through
 `fake_scheduler.py`, a stand-in for LSF and Slurm. Units run in subprocesses
 with `LOKI_SURVEY_TEST_PYTHON` (default: the Python running the tests).
