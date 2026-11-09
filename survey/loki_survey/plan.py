@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from loki_survey.config import ConfigError
 from loki_survey.rundir import (
     RunDir,
     atomic_write_json,
@@ -220,17 +221,27 @@ def build_ep_plan(run: RunDir, resolved: Resolved, unit: Unit) -> dict[str, Any]
             return record
     tmp = cache.with_name(f".{cache.name}.building")
     tmp.unlink(missing_ok=True)
-    libloki.prune.EPFreqSweep(
-        search_config(resolved, unit),
-        show_progress=False,
-        min_pd=resolved.survey.min_pd,
-        poly_basis="taylor",
-        plan_cache_file=str(tmp),
-        ref_segs=unit.ref_segs,
-        backend=resolved.site.backend,
-        device=resolved.site.device,
-        candidates=candidate_options(),
-    )
+    try:
+        libloki.prune.EPFreqSweep(
+            search_config(resolved, unit),
+            show_progress=False,
+            min_pd=resolved.survey.min_pd,
+            poly_basis="taylor",
+            plan_cache_file=str(tmp),
+            ref_segs=unit.ref_segs,
+            backend=resolved.site.backend,
+            device=resolved.site.device,
+            candidates=candidate_options(),
+        )
+    except (RuntimeError, ValueError) as exc:
+        # Most often the unit's budget is too small for loki's own reserves.
+        tmp.unlink(missing_ok=True)
+        msg = (
+            f"{unit.id}: loki could not plan this EP search with "
+            f"{resolved.site.loki_memory_gb:g} GB ([unit].memory_gb - overhead_gb "
+            f"in site.toml): {exc}"
+        )
+        raise ConfigError(msg) from exc
     tmp.replace(cache)
     record = {
         "key": unit.plan_key,

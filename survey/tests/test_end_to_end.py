@@ -155,3 +155,18 @@ def test_check_refuses_a_unit_too_small_for_loki(
     write_site(run, unit_python, memory_gb=2.0, overhead_gb=1.0)
     assert main(["check", str(run)]) == 2
     assert "candidate buffer" in capsys.readouterr().err
+
+
+def test_plan_explains_a_unit_too_small_for_ep(
+    tmp_path: Path,
+    unit_python: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report loki's planning refusal in site.toml's terms, not as a traceback."""
+    run = tmp_path / "run"
+    (run / "data").mkdir(parents=True)
+    simulate(run / "data" / "sim_DM10.00.dat")
+    (run / "survey.toml").write_text(SURVEY)
+    write_site(run, unit_python, memory_gb=2.0, overhead_gb=0.5)
+    assert main(["run", str(run)]) == 2
+    assert "could not plan this EP search with 1.5 GB" in capsys.readouterr().err
