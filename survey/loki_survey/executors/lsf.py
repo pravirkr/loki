@@ -194,11 +194,11 @@ class LsfScheduler:
             str(request.threads),
             "-R",
             resources,
-            "-M",
-            str(total),
             "-o",
             str(out),
         ]
+        if batch.mem_limit:
+            argv += ["-M", str(total)]
         if batch.queue:
             argv += ["-q", batch.queue]
         if batch.time_min:

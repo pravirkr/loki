@@ -226,6 +226,7 @@ def batch(**changes: object) -> Batch:
         "gpu": None,
         "mem_unit": "MB",
         "reserve_per_task": True,
+        "mem_limit": True,
         "max_array": 1000,
         "extra": (),
     }
@@ -280,6 +281,8 @@ def test_bsub_and_sbatch_arguments(tmp_path: Path) -> None:
         "select[(model==X) && hname!=cn800 && hname!=cn801]"
     )
     assert argv[argv.index("-q") + 1] == "short"
+    wexac = LsfScheduler(run, site("lsf", "python", batch=batch(mem_limit=False)))
+    assert "-M" not in wexac.bsub_args(request)
     slurm = SlurmScheduler(run, site("slurm", "python", batch=batch(queue="gen")))
     argv = slurm.sbatch_args(request)
     assert f"--mem={total_mb}M" in argv
@@ -339,6 +342,16 @@ def test_out_of_memory_is_resubmitted_with_more(
     fake.control(need_gb={"u0": 0.7})
     db, _ = drive(tmp_path, kind)
     assert db.get("u0").state == "done"
+    assert [(a, m, f) for a, m, f, _ in history(db, "u0")] == [
+        (1, 0.5, OOM),
+        (2, 0.75, None),
+    ]
+
+
+def test_out_of_memory_without_a_memory_limit_flag(tmp_path: Path, fake: Fake) -> None:
+    """As on wexac: no -M; the limit is the reservation, which still grows."""
+    fake.control(need_gb={"u0": 0.7})
+    db, _ = drive(tmp_path, batch=batch(mem_limit=False))
     assert [(a, m, f) for a, m, f, _ in history(db, "u0")] == [
         (1, 0.5, OOM),
         (2, 0.75, None),

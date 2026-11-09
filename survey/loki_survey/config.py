@@ -140,6 +140,7 @@ class Batch:
     gpu: str | None
     mem_unit: str
     reserve_per_task: bool
+    mem_limit: bool
     max_array: int
     extra: tuple[str, ...]
 
@@ -430,7 +431,14 @@ def _parse_batch(kind: str, table: dict[str, Any], backend: str, where: str) -> 
     """Validate the [lsf] or [slurm] table: each takes its own scheduler's words."""
     common = {"time_min", "gpu", "max_array", "extra"}
     if kind == "lsf":
-        allowed = common | {"queue", "select", "hosts", "mem_unit", "reserve_per_task"}
+        allowed = common | {
+            "queue",
+            "select",
+            "hosts",
+            "mem_unit",
+            "reserve_per_task",
+            "mem_limit",
+        }
     else:
         allowed = common | {"partition", "account", "constraint"}
     _check_keys(table, allowed, where)
@@ -447,6 +455,10 @@ def _parse_batch(kind: str, table: dict[str, Any], backend: str, where: str) -> 
             msg = f"{where}.reserve_per_task: expected true or false, as in "
             msg += "RESOURCE_RESERVE_PER_TASK"
             raise ConfigError(msg)
+    mem_limit = table.get("mem_limit", True)
+    if not isinstance(mem_limit, bool):
+        msg = f"{where}.mem_limit: expected true or false"
+        raise ConfigError(msg)
     gpu = table.get("gpu")
     if backend == "cuda" and not gpu:
         what = "an LSF -gpu string" if kind == "lsf" else "a Slurm --gres value"
@@ -462,6 +474,7 @@ def _parse_batch(kind: str, table: dict[str, Any], backend: str, where: str) -> 
         gpu=gpu if backend == "cuda" else None,
         mem_unit=mem_unit,
         reserve_per_task=reserve_per_task,
+        mem_limit=mem_limit,
         max_array=int(
             _positive(
                 table.get("max_array", DEFAULT_MAX_ARRAY),

@@ -187,7 +187,12 @@ def bsub(args: list[str]) -> int:
     script = args[-1]
     match = re.fullmatch(r"(.+)\[1-(\d+)\](?:%\d+)?", opts["-J"])
     exclude = re.findall(r"hname!=(\S+?)(?:\s|\]|$)", opts["-R"])
-    mem_gb = int(opts["-M"]) * (1 << 20) / 1e9
+    if "-M" in opts:
+        mem_mb = int(opts["-M"])
+    else:  # the limit follows the reservation, per slot
+        per_slot = re.search(r"rusage\[mem=(\d+)\]", opts["-R"]).group(1)
+        mem_mb = int(per_slot) * int(opts["-n"])
+    mem_gb = mem_mb * (1 << 20) / 1e9
     return submit(
         "lsf",
         match.group(1),

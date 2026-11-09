@@ -41,6 +41,8 @@ threads = 2
 # queue = "short"
 # mem_unit = "MB"           # LSF_UNIT_FOR_LIMITS: badmin showconf mbd
 # reserve_per_task = true   # RESOURCE_RESERVE_PER_TASK: bparams -a
+# mem_limit = true          # pass -M; false where the cluster sets the limit
+#                           # from the reservation and refuses -M (wexac)
 # time_min = 600            # -W run limit; default: the queue's
 # select = "model==Intel_Skylake"  # extra select[] expression
 # hosts = []                # -m: only these hosts
