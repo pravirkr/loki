@@ -41,7 +41,8 @@ nbins = 32
 # bands = 1        # split the region into this many log-uniform bands
 
 # Search boxes. kind "ffa" or "ep"; order is the highest derivative searched
-# ("freq", "accel", "jerk" or "snap"). Give the derivative limits directly...
+# ("freq", "accel", "jerk", "snap" or, for EP, "crackle": loki's circular-orbit
+# search). Give the derivative limits directly...
 [[search.box]]
 name = "accel"
 kind = "ffa"
@@ -49,15 +50,18 @@ order = "accel"
 limits = { accel = [-50.0, 50.0] }   # m/s^2
 
 # EP boxes may also set the pruning segments (loki's defaults otherwise):
-# segments = 8        # FFA segments: bseg_ffa = nsamps / segments
+# segments = 8        # FFA segments the tree prunes over (loki's nsegments),
+#                     # a power of two; loki's default is 128
 # bseg_brute = 1024   # samples per brute-force segment
 # ref_segs = [4]      # reference segments the tree grows from
 
 # ...or as circular-orbit priors, from which loki derives the limits per band.
+# With order "crackle", EP propagates each leaf as an orbit where its terms are
+# significant.
 # [[search.box]]
 # name = "binary"
 # kind = "ep"
-# order = "jerk"
+# order = "crackle"
 # orbit = { p_orb_min_s = 10800.0, m_c_max = 0.5, m_p_min = 1.2 }
 
 [output]

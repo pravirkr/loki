@@ -45,8 +45,9 @@ LOKI_DEFAULT_DUCY_MAX = 0.2
 LOKI_DEFAULT_MIN_PD = 0.1
 LOKI_DEFAULT_M_C_MAX = 10.0
 LOKI_DEFAULT_M_P_MIN = 1.2
-# The EP common-candidate path supports Taylor searches of 2 to 4 parameters.
-EP_ORDERS = ("accel", "jerk", "snap")
+# loki's EP candidate path takes Taylor searches of 2 to 5 parameters; the
+# five-parameter (crackle) search is the circular-orbit one.
+EP_ORDERS = ("accel", "jerk", "snap", "crackle")
 
 
 class ConfigError(ValueError):
@@ -352,6 +353,12 @@ def _parse_box(raw: dict[str, Any], region_names: list[str], where: str) -> Box:
         bseg_brute=_optional_int(raw, "bseg_brute", where),
         ref_segs=tuple(raw["ref_segs"]) if "ref_segs" in raw else None,
     )
+    if kind != "ep" and (box.segments is not None or box.ref_segs is not None):
+        msg = f"{where}: 'segments' and 'ref_segs' are EP settings"
+        raise ConfigError(msg)
+    if box.segments is not None and box.segments & (box.segments - 1):
+        msg = f"{where}.segments: loki needs a power of two, got {box.segments}"
+        raise ConfigError(msg)
     if orbit_raw is not None and limits_raw:
         msg = f"{where}: give either 'limits' or 'orbit', not both"
         raise ConfigError(msg)

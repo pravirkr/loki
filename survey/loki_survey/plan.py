@@ -177,8 +177,8 @@ def search_config(resolved: Resolved, unit: Unit) -> Any:  # noqa: ANN401
     }
     if unit.use_fourier is not None:
         kwargs["use_fourier"] = unit.use_fourier
-    if unit.segments is not None:
-        kwargs["bseg_ffa"] = unit.nsamps // unit.segments
+    if unit.kind == "ep" and unit.segments is not None:
+        kwargs["nsegments"] = unit.segments
     if unit.bseg_brute is not None:
         kwargs["bseg_brute"] = unit.bseg_brute
     if unit.kind == "ep":
