@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 HASH_CHUNK_BYTES = 1 << 20
+
+
+class DriverBusyError(RuntimeError):
+    """Another loki-survey process is submitting or watching this run."""
 
 
 @dataclass(frozen=True)
@@ -64,8 +73,22 @@ class RunDir:
         return self.root / "logs"
 
     @property
+    def sched_logs_dir(self) -> Path:
+        """Where LSF and Slurm write each job's own output and footer."""
+        return self.root / "logs" / "sched"
+
+    @property
+    def jobs_dir(self) -> Path:
+        """Job scripts and unit lists of the arrays submitted to a cluster."""
+        return self.root / "jobs"
+
+    @property
     def tmp_dir(self) -> Path:
         return self.root / "tmp"
+
+    @property
+    def driver_lock(self) -> Path:
+        return self.root / ".driver.lock"
 
     @property
     def quarantine_dir(self) -> Path:
@@ -73,7 +96,13 @@ class RunDir:
 
     def working_dirs(self) -> tuple[Path, ...]:
         """Return the directories units write to while they run."""
-        return (self.out_dir, self.raw_dir, self.logs_dir, self.tmp_dir)
+        return (
+            self.out_dir,
+            self.raw_dir,
+            self.logs_dir,
+            self.sched_logs_dir,
+            self.tmp_dir,
+        )
 
     def ensure(self) -> None:
         """Create the layout and check that every working directory is writable.
@@ -85,6 +114,7 @@ class RunDir:
             self.prep_dir,
             self.plans_dir,
             self.quarantine_dir,
+            self.jobs_dir,
             *self.working_dirs(),
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -95,6 +125,39 @@ class RunDir:
             msg = f"run directories are not writable: {', '.join(blocked)}"
             raise PermissionError(msg)
 
+    @contextmanager
+    def driving(self) -> Iterator[None]:
+        """Hold the run's driver lock: one process submits and resubmits."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self.driver_lock.open("a+") as handle:
+            locked = True
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.seek(0)
+                holder = handle.read().strip() or "unknown"
+                msg = (
+                    f"another loki-survey process ({holder}) is driving "
+                    f"{self.root}; stop it first, or use 'status'"
+                )
+                raise DriverBusyError(msg) from None
+            except OSError:
+                # Some network file systems refuse locks altogether.
+                locked = False
+                print(
+                    "warning: cannot lock the run directory; "
+                    "run one 'submit' or 'watch' at a time",
+                )
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"pid {os.getpid()} on {os.uname().nodename}\n")
+            handle.flush()
+            try:
+                yield
+            finally:
+                if locked:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+
     def unit_output(self, unit_id: str) -> Path:
         return self.out_dir / f"{unit_id}.h5"
 
@@ -103,6 +166,14 @@ class RunDir:
 
     def unit_log(self, unit_id: str, attempt: int) -> Path:
         return self.logs_dir / f"{unit_id}.{attempt}.log"
+
+    def unit_started(self, unit_id: str, attempt: int) -> Path:
+        """Written by ``run-unit`` before anything else: where and when it began."""
+        return self.logs_dir / f"{unit_id}.{attempt}.started"
+
+    def unit_alive(self, unit_id: str, attempt: int) -> Path:
+        """Touched by a cluster job while it runs; its age shows a stall."""
+        return self.logs_dir / f"{unit_id}.{attempt}.alive"
 
     def unit_tmp(self, unit_id: str, attempt: int) -> Path:
         return self.tmp_dir / f"{unit_id}.{attempt}"

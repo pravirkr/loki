@@ -29,8 +29,11 @@ DERIVATIVES = ("crackle", "snap", "jerk", "accel")
 ORDERS = ("freq", "accel", "jerk", "snap", "crackle")
 SEARCH_KINDS = ("ffa", "ep")
 TRUNCATIONS = ("pow2", "none")
-EXECUTORS = ("local",)
+EXECUTORS = ("local", "lsf", "slurm")
+BATCH_EXECUTORS = ("lsf", "slurm")
 BACKENDS = ("cpu", "cuda")
+# Memory units an LSF cluster may use for limits (LSF_UNIT_FOR_LIMITS).
+LSF_MEM_UNITS = ("KB", "MB", "GB")
 # loki's defaults (PulsarSearchConfig, EPFreqSweep), recorded when not given.
 LOKI_DEFAULT_ETA = 1.0
 LOKI_DEFAULT_DUCY_MAX = 0.2
@@ -113,6 +116,34 @@ class Survey:
         return next(b for b in self.boxes if b.name == name)
 
 
+# Site defaults, written into resolved.json when site.toml leaves them out.
+DEFAULT_POLL_S = {"local": 1.0, "lsf": 60.0, "slurm": 60.0}
+DEFAULT_OOM_RETRIES = 1
+DEFAULT_OOM_FACTOR = 1.5
+DEFAULT_REQUEUE_RETRIES = 3
+DEFAULT_HOST_FAILURES = 2
+DEFAULT_STALL_MIN = 30.0
+DEFAULT_SUBMIT_TIMEOUT_S = 300.0
+DEFAULT_MAX_ARRAY = 1000
+
+
+@dataclass(frozen=True)
+class Batch:
+    """How to ask an LSF or Slurm cluster for a unit's resources."""
+
+    queue: str | None
+    account: str | None
+    time_min: int | None
+    select: str | None
+    constraint: str | None
+    hosts: tuple[str, ...]
+    gpu: str | None
+    mem_unit: str
+    reserve_per_task: bool
+    max_array: int
+    extra: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class Site:
     executor: str
@@ -127,6 +158,13 @@ class Site:
     poll_s: float
     oom_retries: int
     oom_factor: float
+    prologue: str = ""
+    max_running: int = 0
+    submit_timeout_s: float = DEFAULT_SUBMIT_TIMEOUT_S
+    requeue_retries: int = DEFAULT_REQUEUE_RETRIES
+    host_failures: int = DEFAULT_HOST_FAILURES
+    stall_min: float = DEFAULT_STALL_MIN
+    batch: Batch | None = None
 
     @property
     def loki_memory_gb(self) -> float:
@@ -373,46 +411,152 @@ def parse_survey(doc: dict[str, Any], where: str = "survey.toml") -> Survey:
     )
 
 
+def _nonnegative_int(table: dict[str, Any], key: str, default: int, where: str) -> int:
+    value = table.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        msg = f"{where}.{key}: expected a non-negative integer, got {value!r}"
+        raise ConfigError(msg)
+    return value
+
+
+def _strings(value: Any, where: str) -> tuple[str, ...]:  # noqa: ANN401
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        msg = f"{where}: expected a list of strings"
+        raise ConfigError(msg)
+    return tuple(value)
+
+
+def _parse_batch(kind: str, table: dict[str, Any], backend: str, where: str) -> Batch:
+    """Validate the [lsf] or [slurm] table: each takes its own scheduler's words."""
+    common = {"time_min", "gpu", "max_array", "extra"}
+    if kind == "lsf":
+        allowed = common | {"queue", "select", "hosts", "mem_unit", "reserve_per_task"}
+    else:
+        allowed = common | {"partition", "account", "constraint"}
+    _check_keys(table, allowed, where)
+    mem_unit = "MB"
+    reserve_per_task = False
+    if kind == "lsf":
+        mem_unit = _require(table, "mem_unit", where)
+        if mem_unit not in LSF_MEM_UNITS:
+            msg = f"{where}.mem_unit: expected one of {LSF_MEM_UNITS}, as in "
+            msg += "LSF_UNIT_FOR_LIMITS"
+            raise ConfigError(msg)
+        reserve_per_task = _require(table, "reserve_per_task", where)
+        if not isinstance(reserve_per_task, bool):
+            msg = f"{where}.reserve_per_task: expected true or false, as in "
+            msg += "RESOURCE_RESERVE_PER_TASK"
+            raise ConfigError(msg)
+    gpu = table.get("gpu")
+    if backend == "cuda" and not gpu:
+        what = "an LSF -gpu string" if kind == "lsf" else "a Slurm --gres value"
+        msg = f"{where}.gpu: CUDA units need {what}"
+        raise ConfigError(msg)
+    return Batch(
+        queue=table.get("queue", table.get("partition")),
+        account=table.get("account"),
+        time_min=_optional_int(table, "time_min", where),
+        select=table.get("select"),
+        constraint=table.get("constraint"),
+        hosts=_strings(table.get("hosts", []), f"{where}.hosts"),
+        gpu=gpu if backend == "cuda" else None,
+        mem_unit=mem_unit,
+        reserve_per_task=reserve_per_task,
+        max_array=int(
+            _positive(
+                table.get("max_array", DEFAULT_MAX_ARRAY),
+                f"{where}.max_array",
+                integer=True,
+            ),
+        ),
+        extra=_strings(table.get("extra", []), f"{where}.extra"),
+    )
+
+
 def parse_site(doc: dict[str, Any], where: str = "site.toml") -> Site:
     """Validate a parsed ``site.toml``."""
-    _check_keys(doc, {"executor", "unit", "retry"}, where)
+    _check_keys(doc, {"executor", "unit", "retry", "lsf", "slurm"}, where)
     executor = _table(doc, "executor", where)
     unit = _table(doc, "unit", where)
     retry = _table(doc, "retry", where)
+    ex_where = f"{where} [executor]"
+    kind = _require(executor, "kind", ex_where)
+    if kind not in EXECUTORS:
+        msg = f"{ex_where}.kind: expected one of {EXECUTORS}, got {kind!r}"
+        raise ConfigError(msg)
+    batch_keys = {"prologue", "max_running", "submit_timeout_s"}
+    local_keys = {"max_threads"}
     _check_keys(
         executor,
-        {"kind", "max_memory_gb", "max_threads", "python", "poll_s"},
-        f"{where} [executor]",
+        {"kind", "max_memory_gb", "python", "poll_s"}
+        | (batch_keys if kind in BATCH_EXECUTORS else local_keys),
+        ex_where,
     )
     _check_keys(
         unit,
         {"memory_gb", "overhead_gb", "threads", "backend", "device"},
         f"{where} [unit]",
     )
-    _check_keys(retry, {"oom_retries", "oom_factor"}, f"{where} [retry]")
-    kind = _require(executor, "kind", f"{where} [executor]")
-    if kind not in EXECUTORS:
-        msg = f"{where} [executor].kind: expected one of {EXECUTORS}, got {kind!r}"
-        raise ConfigError(msg)
+    _check_keys(
+        retry,
+        {
+            "oom_retries",
+            "oom_factor",
+            "requeue_retries",
+            "host_failures",
+            "stall_min",
+        },
+        f"{where} [retry]",
+    )
+    for other in BATCH_EXECUTORS:
+        if other in doc and other != kind:
+            msg = f"{where}: [{other}] is set but [executor].kind is {kind!r}"
+            raise ConfigError(msg)
     backend = unit.get("backend", "cpu")
     if backend not in BACKENDS:
         msg = f"{where} [unit].backend: expected one of {BACKENDS}"
+        raise ConfigError(msg)
+    unit_threads = int(
+        _positive(
+            _require(unit, "threads", f"{where} [unit]"),
+            f"{where} [unit].threads",
+            integer=True,
+        ),
+    )
+    batch = None
+    if kind in BATCH_EXECUTORS:
+        batch = _parse_batch(
+            kind,
+            _table(doc, kind, where),
+            backend,
+            f"{where} [{kind}]",
+        )
+        max_threads = unit_threads
+    else:
+        max_threads = int(
+            _positive(
+                _require(executor, "max_threads", ex_where),
+                f"{ex_where}.max_threads",
+                integer=True,
+            ),
+        )
+    prologue = executor.get("prologue", "")
+    if not isinstance(prologue, str):
+        msg = f"{ex_where}.prologue: expected shell lines as a string"
+        raise ConfigError(msg)
+    stall_min = retry.get("stall_min", DEFAULT_STALL_MIN)
+    if not isinstance(stall_min, int | float) or stall_min < 0:
+        msg = f"{where} [retry].stall_min: expected minutes >= 0 (0 turns it off)"
         raise ConfigError(msg)
     site = Site(
         executor=kind,
         max_memory_gb=float(
             _positive(
-                _require(executor, "max_memory_gb", f"{where} [executor]"),
-                f"{where} [executor].max_memory_gb",
+                _require(executor, "max_memory_gb", ex_where),
+                f"{ex_where}.max_memory_gb",
             ),
         ),
-        max_threads=int(
-            _positive(
-                _require(executor, "max_threads", f"{where} [executor]"),
-                f"{where} [executor].max_threads",
-                integer=True,
-            ),
-        ),
+        max_threads=max_threads,
         unit_memory_gb=float(
             _positive(
                 _require(unit, "memory_gb", f"{where} [unit]"),
@@ -425,24 +569,55 @@ def parse_site(doc: dict[str, Any], where: str = "site.toml") -> Site:
                 f"{where} [unit].overhead_gb",
             ),
         ),
-        unit_threads=int(
-            _positive(
-                _require(unit, "threads", f"{where} [unit]"),
-                f"{where} [unit].threads",
-                integer=True,
-            ),
-        ),
+        unit_threads=unit_threads,
         backend=backend,
         device=int(unit.get("device", 0)),
         python=str(executor.get("python", sys.executable)),
         poll_s=float(
-            _positive(executor.get("poll_s", 1.0), f"{where} [executor].poll_s"),
+            _positive(
+                executor.get("poll_s", DEFAULT_POLL_S[kind]),
+                f"{ex_where}.poll_s",
+            ),
         ),
-        oom_retries=int(retry.get("oom_retries", 1)),
+        oom_retries=_nonnegative_int(
+            retry,
+            "oom_retries",
+            DEFAULT_OOM_RETRIES,
+            f"{where} [retry]",
+        ),
         oom_factor=float(
-            _positive(retry.get("oom_factor", 1.5), f"{where} [retry].oom_factor"),
+            _positive(
+                retry.get("oom_factor", DEFAULT_OOM_FACTOR),
+                f"{where} [retry].oom_factor",
+            ),
         ),
+        prologue=prologue,
+        max_running=_nonnegative_int(executor, "max_running", 0, ex_where),
+        submit_timeout_s=float(
+            _positive(
+                executor.get("submit_timeout_s", DEFAULT_SUBMIT_TIMEOUT_S),
+                f"{ex_where}.submit_timeout_s",
+            ),
+        ),
+        requeue_retries=_nonnegative_int(
+            retry,
+            "requeue_retries",
+            DEFAULT_REQUEUE_RETRIES,
+            f"{where} [retry]",
+        ),
+        host_failures=int(
+            _positive(
+                retry.get("host_failures", DEFAULT_HOST_FAILURES),
+                f"{where} [retry].host_failures",
+                integer=True,
+            ),
+        ),
+        stall_min=float(stall_min),
+        batch=batch,
     )
+    if site.oom_factor <= 1.0:
+        msg = f"{where} [retry].oom_factor: must be above 1"
+        raise ConfigError(msg)
     if site.unit_overhead_gb >= site.unit_memory_gb:
         msg = f"{where} [unit]: overhead_gb must be below memory_gb"
         raise ConfigError(msg)
@@ -512,6 +687,15 @@ def _from_dict_survey(d: dict[str, Any]) -> Survey:
     )
 
 
+def _from_dict_site(d: dict[str, Any]) -> Site:
+    batch = d.get("batch")
+    if batch is not None:
+        batch = Batch(
+            **{**batch, "hosts": tuple(batch["hosts"]), "extra": tuple(batch["extra"])},
+        )
+    return Site(**{**d, "batch": batch})
+
+
 def load_resolved(run: RunDir) -> Resolved:
     """Read ``resolved.json``, the configuration every later stage uses."""
     if not run.resolved_json.is_file():
@@ -521,7 +705,7 @@ def load_resolved(run: RunDir) -> Resolved:
     science = dict(doc["survey"])
     science.pop("schema_version", None)
     survey = _from_dict_survey(science)
-    site = Site(**doc["site"])
+    site = _from_dict_site(doc["site"])
     sha = science_sha256(survey)
     if sha != doc["science_sha256"]:
         msg = f"{run.resolved_json}: science hash mismatch; was it edited by hand?"

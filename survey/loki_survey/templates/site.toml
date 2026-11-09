@@ -4,11 +4,21 @@
 # laptop or a cluster.
 
 [executor]
-kind = "local"        # run units as processes on this machine
-max_memory_gb = 16.0  # total memory all running units may reserve
-max_threads = 4       # total threads all running units may use
-# python = "/path/to/python"  # default: the Python running loki-survey
-# poll_s = 1.0
+kind = "local"        # "local" (this machine), "lsf" or "slurm"
+max_memory_gb = 16.0  # local: total memory all running units may reserve;
+                      # lsf/slurm: the most one unit may ever ask for
+max_threads = 4       # local only: total threads all running units may use
+# python = "/path/to/python"  # default: the Python running loki-survey; on a
+#                             # cluster it must exist on the compute nodes
+# poll_s = 1.0                # default 1 s locally, 60 s on a cluster
+#
+# Cluster only:
+# prologue = """
+# module load gcc
+# source /path/to/env/bin/activate
+# """                         # shell lines each job runs before its unit
+# max_running = 0             # cap on running elements per array; 0: none
+# submit_timeout_s = 300      # give up submitting an array after this long
 
 [unit]
 memory_gb = 8.0    # reservation per unit; a unit above it is stopped
@@ -18,5 +28,32 @@ threads = 2
 # device = 0
 
 [retry]
-# oom_retries = 1    # rerun a unit stopped for memory this many times...
-# oom_factor = 1.5   # ...each time with this much more memory
+# oom_retries = 1       # rerun a unit stopped for memory this many times...
+# oom_factor = 1.5      # ...each time with this much more memory
+# requeue_retries = 3   # cluster: resubmit a preempted, killed, lost or
+#                       # stalled unit, or one on a failing host, this often
+# host_failures = 2     # exclude a host after this many failures that point
+#                       # at it (only once units have run on other hosts)
+# stall_min = 30        # a running job silent this long is stalled; 0: off
+
+# For kind = "lsf" (ask your admins, or run the commands shown):
+# [lsf]
+# queue = "short"
+# mem_unit = "MB"           # LSF_UNIT_FOR_LIMITS: badmin showconf mbd
+# reserve_per_task = true   # RESOURCE_RESERVE_PER_TASK: bparams -a
+# time_min = 600            # -W run limit; default: the queue's
+# select = "model==Intel_Skylake"  # extra select[] expression
+# hosts = []                # -m: only these hosts
+# gpu = "num=1:gmodel=NVIDIAA40:j_exclusive=yes"  # -gpu, for backend "cuda"
+# max_array = 1000          # at most MAX_JOB_ARRAY_SIZE (bparams -a)
+# extra = []                # further bsub arguments
+
+# For kind = "slurm":
+# [slurm]
+# partition = "general"
+# account = "mygroup"
+# time_min = 600            # --time; default: the partition's
+# constraint = "skylake"    # --constraint
+# gpu = "gpu:1"             # --gres, for backend "cuda"
+# max_array = 1000          # at most MaxArraySize (scontrol show config)
+# extra = []                # further sbatch arguments
