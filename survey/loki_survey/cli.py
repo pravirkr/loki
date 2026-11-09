@@ -37,10 +37,19 @@ def cmd_new(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    from loki_survey.plan import candidate_options  # noqa: PLC0415
     from loki_survey.unit import versions  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
     resolved = resolve(run)
+    buffer_gb = candidate_options().memory_gb
+    if resolved.site.loki_memory_gb <= buffer_gb:
+        msg = (
+            f"{run.site_toml} [unit]: memory_gb - overhead_gb leaves loki "
+            f"{resolved.site.loki_memory_gb:g} GB, which must be above its "
+            f"{buffer_gb:g} GB candidate buffer; raise memory_gb or lower overhead_gb"
+        )
+        raise ConfigError(msg)
     if run.resolved_json.is_file():
         old = read_json(run.resolved_json)
         if old["science_sha256"] != resolved.science_sha256 and any(

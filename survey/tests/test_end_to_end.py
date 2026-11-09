@@ -15,6 +15,8 @@ from .conftest import write_site
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
     from .conftest import Fake
 
 NSAMPS = 1 << 18
@@ -139,3 +141,17 @@ def test_simulated_pulsar_is_found_through_lsf(
     # The EP unit asked for 4 GB, was killed for memory, and ran at 6 GB.
     arrays = fake.jobs().values()
     assert [round(j["mem_gb"], 1) for j in arrays] == [4.0, 6.0]
+
+
+def test_check_refuses_a_unit_too_small_for_loki(
+    tmp_path: Path,
+    unit_python: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refuse a unit whose loki budget leaves no room past the candidate buffer."""
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "survey.toml").write_text(SURVEY)
+    write_site(run, unit_python, memory_gb=2.0, overhead_gb=1.0)
+    assert main(["check", str(run)]) == 2
+    assert "candidate buffer" in capsys.readouterr().err
