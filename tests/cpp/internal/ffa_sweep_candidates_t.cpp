@@ -260,10 +260,12 @@ TEST_CASE("A real multi-chunk sweep is unaffected by accumulator capacity",
           "[ffa_sweep_candidates][.slow]") {
     // A wide frequency range so the planner produces several chunks with
     // differing nbins, and a low snr_min so a large fraction of the grid
-    // survives and the accumulator overflows repeatedly.
+    // survives and the accumulator overflows repeatedly. f_max stays below
+    // 1 / (nbins_min * tsamp) = 244 Hz, the planner's floor of nbins_min
+    // samples per period.
     constexpr SizeType kNsamps = 1U << 15U;
     constexpr double kTsamp    = 6.4e-5;
-    const std::vector<ParamLimit> limits{ParamLimit{.min = 50.0, .max = 500.0}};
+    const std::vector<ParamLimit> limits{ParamLimit{.min = 50.0, .max = 200.0}};
 
     std::mt19937 rng(42);
     std::normal_distribution<float> noise(0.0F, 1.0F);

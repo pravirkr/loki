@@ -7,14 +7,16 @@ sweep runs every chunk of the band.
 
 The pulse and the search are the same as the CLI pair in
 ep_production_cuda.toml, so either driver gives the same plan (the cache file
-is shared) and the same candidates:
+is shared). The CLI preprocesses the series (robust normalisation) and this
+script does not, so their detection and cluster counts differ slightly:
 
     loki simulate --period 0.007 --dt 0.000064 --nsamps 33554432 --snr 12 \\
         --ducy 0.1 --acc 300 --jerk 0.15 --seed 42 -o ep_production_pulse.tim
     loki search ep -c bench/scripts/ep/ep_production_cuda.toml
 
 The script reports the plan, the device high-water mark against the model, the
-run time, and the best candidate against the injected parameters. The device
+run time split into the sweep and the host work after it (candidate
+clustering), and the best candidate against the injected parameters. The device
 is sampled by the sampler of measure_ep_peak_rss.py, in a child process
 because the sweep holds the interpreter.
 
@@ -99,6 +101,7 @@ def make_config(
         ),
         ducy_max=0.3,
         wtsp=1.2,
+        snr_min=5.0,
         use_fourier=True,
         nthreads=1,
         max_process_memory_gb=memory_gb,
@@ -106,6 +109,26 @@ def make_config(
         nsegments=128,
         prune_poly_order=3,
     )
+
+
+def stage_split(result_file: Path, runtime_s: float) -> dict:
+    """Sweep time from the results file; the rest of the wall time is host work.
+
+    ``total_runtime`` is the EP sweep alone (FFA, pruning, snapshots). What the
+    wall time adds on top is the final snapshot write and the candidate
+    post-processing (clustering), which the log reports as ``Candidate
+    postprocessing complete in ... s``.
+    """
+    with h5py.File(result_file, "r") as h5:
+        sweep_s = float(h5.attrs["total_runtime"])
+        n_clusters = int(h5.attrs.get("n_clusters", -1))
+        n_candidates = int(h5.attrs.get("n_candidates", -1))
+    return {
+        "sweep_s": sweep_s,
+        "post_sweep_s": runtime_s - sweep_s,
+        "n_clusters": n_clusters,
+        "n_candidates": n_candidates,
+    }
 
 
 def top_candidate(result_file: Path) -> dict:
@@ -229,6 +252,8 @@ def run(
         n_runs=n_runs,
         backend="cuda",
         device=device,
+        # The CLI's default [candidates]: clustering is part of the run time.
+        candidates=libloki.configs.CandidateOptions(),
     )
     start = time.perf_counter()
     try:
@@ -242,6 +267,7 @@ def run(
     peak_gb = (info["peak"] - info["baseline"]) / GB
     result_file = out / "ep_production_ep_results.h5"
     best = top_candidate(result_file)
+    split = stage_split(result_file, elapsed)
 
     summary = {
         "nsamps": nsamps,
@@ -250,6 +276,7 @@ def run(
         "device_peak_gb": peak_gb,
         "residual_gb": peak_gb - model_gb,
         "runtime_s": elapsed,
+        **split,
         "n_runs": n_runs,
         "leaves": best["leaves"],
         "top_score": best["score"],
@@ -260,6 +287,13 @@ def run(
     }
     (out / "ep_production_summary.json").write_text(json.dumps(summary, indent=2))
     print(f"runtime {elapsed:.1f} s, {nchunks} chunks, {best['leaves']} leaves")  # noqa: T201
+    print(  # noqa: T201
+        f"split: sweep {split['sweep_s']:.2f} s, post-sweep (snapshot write + "
+        f"candidates) {split['post_sweep_s']:.2f} s; {split['n_clusters']} "
+        f"clusters, {split['n_candidates']} candidates"
+    )
+    if split["n_clusters"] < 0:
+        print("warning: no candidate tables in the results file")  # noqa: T201
     print(  # noqa: T201
         f"device: model {model_gb:.3f} GB, high-water {peak_gb:.3f} GB "
         f"(residual {peak_gb - model_gb:+.3f} GB)"

@@ -13,10 +13,11 @@ the FFA and EP workloads and the comparison tools).
 
 ## Numerics contract
 
-- Freeze golden runs with injected pulses before a cycle. The harness used
-  so far (`run_golden.sh` and `compare_h5.py`: seeded FFA and EP runs on cpu
-  and cuda, compared file by file) is not yet versioned; promoting it to
-  `bench/scripts/` is proposed.
+- Freeze golden runs with injected pulses before a cycle. The harness
+  (`bench/scripts/golden_runs/`: `run_golden.sh` runs seeded FFA and EP
+  searches on cpu and cuda, `compare_h5.py` compares two output trees file
+  by file) does not overflow the EP world tree, so a change to the trimming
+  path needs its own check.
 - A change that keeps the arithmetic (layout, fusion with identical
   operations, host work, memory model) **must stay bit-exact**, proven by a
   unit test.
@@ -115,15 +116,29 @@ the FFA and EP workloads and the comparison tools).
 
 ## Measured production profile (2026-11, L40, 2^25 samples, jerk, 16 runs)
 
-| Stage | Time |
-|---|---|
-| GPU EP sweep | 0.38 s |
-| Candidate clustering (`CandidateClusterer::append_transitive`) | about 50 s before the 2026-11 fix |
-| Whole run | 51 s |
+| Stage | `main` (`b6ca7ef`) | `ep_pipeline` with the fix (`fdbb20e`) |
+|---|---|---|
+| GPU EP sweep | 0.37 s | 0.38 s |
+| Candidate post-processing (14,685 detections, 197 clusters) | about 50.7 s | 2.21 s |
+| Whole run (`loki search ep`, `ep_production_cuda.toml`) | 51.1 s | 3.2 s |
 
-After the fix, production has not been re-measured. On the stress fixture
-(4965 trials of one source, `tests/cpp/api/candidates_stress_t.cpp`) the
-clustering went from 1.40 s to 0.043 s on an M-series laptop, bit-identical.
+Measured 2026-11-09 on an EDGAR L40 node (AMD host, `nthreads = 1`), CLI
+pair from `bench/scripts/ep/ep_production_cuda.py`'s docstring. The
+candidate stage is the `Candidate postprocessing complete in ... s` log
+line; before the fix it is the wall time less the sweep. Detections,
+clusters and candidates are bit-identical between the two builds. The
+candidate stage is still about 70 % of the run; clustering steps that move
+floats (a 2-D index, closed-form roots) are the next option if that
+matters. On the stress fixture (4965 trials of one source,
+`tests/cpp/api/candidates_stress_t.cpp`) the clustering went from 1.40 s to
+0.043 s on an M-series laptop, bit-identical.
+
+`ep_production_cuda.py` reports the split (`sweep_s`, `post_sweep_s`) and
+runs the candidate stage with the CLI's default `[candidates]`. It feeds
+raw samples where the CLI preprocesses (robust normalisation), so its
+detection counts differ from the CLI's (15,142 detections, 225 clusters;
+candidate stage 2.29 s of a 2.8 s run); the best leaf has the same
+parameters (score 11.51 against the CLI's 11.48).
 
 ### Candidate clustering
 
