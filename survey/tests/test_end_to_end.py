@@ -191,3 +191,24 @@ def test_plan_explains_a_unit_too_small_for_ep(
     write_site(run, unit_python, memory_gb=2.0, overhead_gb=0.5)
     assert main(["run", str(run)]) == 2
     assert "could not plan this EP search with 1.5 GB" in capsys.readouterr().err
+
+
+def test_cuda_units_build_their_own_ep_plans(
+    tmp_path: Path,
+    unit_python: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A CUDA plan is sized by a GPU, so plan leaves it to the units."""
+    run = tmp_path / "run"
+    (run / "data").mkdir(parents=True)
+    simulate(run / "data" / "sim_DM10.00.dat")
+    (run / "survey.toml").write_text(SURVEY)
+    write_site(run, unit_python)
+    site = (run / "site.toml").read_text()
+    (run / "site.toml").write_text(
+        site.replace("threads = 2", 'threads = 2\nbackend = "cuda"'),
+    )
+    for step in ("check", "prep", "plan"):
+        assert main([step, str(run)]) == 0
+    assert "built by the CUDA units on their GPU" in capsys.readouterr().out
+    assert not list((run / "plans").glob("*.h5"))

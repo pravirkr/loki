@@ -78,6 +78,14 @@ split, and `units.jsonl` keeps the plan as it was. A plain `submit` also
 retries units that failed, for after their cause is fixed; `watch` leaves them failed. `cancel` stops a run's jobs and returns
 their units to pending.
 
+On a GPU cluster (`[unit] backend = "cuda"`), the driver and the units need
+different builds of loki. The driver (`check`, `prep`, `plan`, `collect`,
+`evaluate`, `fold`) runs where you start it, often a login node without the
+NVIDIA driver, where a CUDA build of loki cannot be imported; run it with a
+CPU-only build. Point `[executor] python` at a Python with the CUDA build for
+the units. CUDA units build their EP plans on their own GPU, since a plan is
+sized by the GPU's free memory.
+
 LSF forgets a finished job after its CLEAN_PERIOD, so an element `bjobs` no
 longer lists is read from the footer LSF appends to its output in
 `logs/sched/`. Slurm needs its accounting (`sacct`) for the failure classes;

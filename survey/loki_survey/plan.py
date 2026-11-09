@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -207,7 +208,11 @@ def plan_cache_path(run: RunDir, key: str) -> Path:
 
 
 def build_ep_plan(run: RunDir, resolved: Resolved, unit: Unit) -> dict[str, Any]:
-    """Build one EP plan cache and record its hash."""
+    """Build one EP plan cache and record its hash.
+
+    Several units may build the same plan at once (CUDA units build theirs on
+    their GPU): each writes its own file and the first to finish publishes it.
+    """
     from loki import libloki  # noqa: PLC0415
 
     if unit.plan_key is None:
@@ -219,7 +224,7 @@ def build_ep_plan(run: RunDir, resolved: Resolved, unit: Unit) -> dict[str, Any]
         record = read_json(record_path)
         if record["sha256"] == sha256_file(cache):
             return record
-    tmp = cache.with_name(f".{cache.name}.building")
+    tmp = cache.with_name(f".{cache.name}.{os.getpid()}.building")
     tmp.unlink(missing_ok=True)
     try:
         libloki.prune.EPFreqSweep(
@@ -242,6 +247,12 @@ def build_ep_plan(run: RunDir, resolved: Resolved, unit: Unit) -> dict[str, Any]
             f"in site.toml): {exc}"
         )
         raise ConfigError(msg) from exc
+    if cache.is_file() and record_path.is_file():
+        # Another unit published this plan while this one was building it.
+        record = read_json(record_path)
+        if record["sha256"] == sha256_file(cache):
+            tmp.unlink(missing_ok=True)
+            return record
     tmp.replace(cache)
     record = {
         "key": unit.plan_key,
@@ -294,9 +305,14 @@ def run_plan(
     for unit in units:
         if unit.plan_key is not None and unit.plan_key not in seen:
             seen[unit.plan_key] = unit
-    for key, unit in seen.items():
-        print(f"plan: EP plan {key} (for {unit.id})")
-        build_ep_plan(run, resolved, unit)
+    if resolved.site.backend == "cuda":
+        # A CUDA plan is sized by the GPU's free memory, which only the
+        # units' own nodes have: each CUDA unit builds its plan there.
+        print(f"plan: {len(seen)} EP plans, built by the CUDA units on their GPU")
+    else:
+        for key, unit in seen.items():
+            print(f"plan: EP plan {key} (for {unit.id})")
+            build_ep_plan(run, resolved, unit)
     kinds: dict[tuple[str, str], int] = {}
     for unit in units:
         kinds[(unit.box, unit.region)] = kinds.get((unit.box, unit.region), 0) + 1

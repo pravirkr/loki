@@ -9,7 +9,9 @@ max_memory_gb = 16.0  # local: total memory all running units may reserve;
                       # lsf/slurm: the most one unit may ever ask for
 max_threads = 4       # local only: total threads all running units may use
 # python = "/path/to/python"  # default: the Python running loki-survey; on a
-#                             # cluster it must exist on the compute nodes
+#                             # cluster it must exist on the compute nodes. For
+#                             # CUDA units, one with loki's CUDA build (the
+#                             # driver itself needs a build that imports here)
 # poll_s = 1.0                # default 1 s locally, 60 s on a cluster
 #
 # Cluster only:

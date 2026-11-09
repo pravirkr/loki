@@ -429,7 +429,8 @@ class BatchExecutor:
         try:
             parts = split_unit(self.resolved, unit)
             for part in parts:
-                if part.plan_key is not None:
+                # A CUDA part builds its plan on its own GPU.
+                if part.plan_key is not None and self.site.backend != "cuda":
                     build_ep_plan(self.run, self.resolved, part)
         except (ConfigError, ValueError) as exc:
             print(f"could not split {a.unit}: {exc}")

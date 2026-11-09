@@ -26,6 +26,7 @@ import loki_survey
 from loki_survey.config import Resolved, load_resolved
 from loki_survey.plan import (
     Unit,
+    build_ep_plan,
     candidate_options,
     load_units,
     plan_cache_path,
@@ -112,6 +113,9 @@ def search(run: RunDir, resolved: Resolved, unit: Unit, workdir: Path) -> Path:
         if unit.plan_key is None:
             msg = f"{unit.id} has no EP plan"
             raise ValueError(msg)
+        if not plan_cache_path(run, unit.plan_key).is_file():
+            # A CUDA unit (or a unit split after plan) builds its own plan.
+            build_ep_plan(run, resolved, unit)
         sweep = libloki.prune.EPFreqSweep(
             cfg,
             show_progress=False,
