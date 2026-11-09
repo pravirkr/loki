@@ -1,11 +1,19 @@
 // A bright source seen in thousands of trials: the regime where the
 // frequency-window prefilter of the clusterer does nothing and every pair
-// must be tested. Guards both the result (against an independent pairwise
-// closure and a fingerprint recorded from the reference implementation) and
-// the running time (a return to per-pair root-finding would show here).
+// must be tested. Guards the result against references computed here from
+// the public distance function (transitive closure, anchored assignment,
+// stored phase extents) and the running time (a return to per-pair
+// root-finding would show here).
+//
+// Bit patterns are deliberately not asserted: under -ffast-math the spans
+// differ in their last bits between compilers and -march settings
+// (docs/architecture.md, Numerics), and the anchored assignment can flip at
+// a link boundary on one of them. The bit-identity of the bounded clusterer
+// to the previous implementation was checked by fingerprint when the fix
+// was made (2026-11-09, same build: transitive 0x3949e458c8b41812, anchored
+// 0x3d6a9ac603f6b912 on an M-series Mac and on GCC 11/14 x86).
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -14,6 +22,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/search/candidates.hpp"
 
@@ -88,28 +97,6 @@ std::vector<Candidate> bright_source_detections() {
     return out;
 }
 
-std::uint64_t fnv1a(std::uint64_t h, std::uint64_t v) {
-    for (int b = 0; b < 8; ++b) {
-        h ^= (v >> (8 * b)) & 0xffU;
-        h *= 0x100000001b3ULL;
-    }
-    return h;
-}
-
-// Every link decision and every stored span, in order.
-std::uint64_t fingerprint(const loki::search::CandidateClustering& out) {
-    std::uint64_t h = 0xcbf29ce484222325ULL;
-    for (const auto m : out.membership) {
-        h = fnv1a(h, m);
-    }
-    for (const auto& c : out.clusters) {
-        h = fnv1a(h, c.representative.id);
-        h = fnv1a(h, c.member_count);
-        h = fnv1a(h, std::bit_cast<std::uint64_t>(c.phase_extent));
-    }
-    return h;
-}
-
 // Canonical labels: clusters numbered by first appearance in input order.
 std::vector<std::uint64_t> canonical(std::vector<std::uint64_t> labels) {
     std::vector<std::uint64_t> map(labels.size(),
@@ -154,6 +141,79 @@ std::vector<std::uint64_t> pairwise_closure(const std::vector<Candidate>& in,
     }
     return labels;
 }
+
+// The documented detection order: decreasing S/N, then ascending
+// derivatives, narrower duty, more bins, lower id (docs/candidates.md).
+bool brighter(const Candidate& a, const Candidate& b) {
+    if (a.snr != b.snr) {
+        return a.snr > b.snr;
+    }
+    if (a.derivatives != b.derivatives) {
+        return a.derivatives < b.derivatives;
+    }
+    if (a.duty_cycle() != b.duty_cycle()) {
+        return a.duty_cycle() < b.duty_cycle();
+    }
+    if (a.nbins != b.nbins) {
+        return a.nbins > b.nbins;
+    }
+    return a.id < b.id;
+}
+
+// Anchored grouping without the frequency window: each trial, in detection
+// order, joins the lowest-numbered existing cluster whose representative is
+// within the link limit, else starts a cluster. The window in the library
+// is a superset of the matching clusters, so the assignments must agree.
+std::vector<std::uint64_t> anchored_reference(const std::vector<Candidate>& in,
+                                              const CandidateOptions& options) {
+    std::vector<std::size_t> order(in.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::ranges::sort(order,
+                      [&](auto a, auto b) { return brighter(in[a], in[b]); });
+    std::vector<std::size_t> representatives;
+    std::vector<std::uint64_t> labels(in.size());
+    for (const auto idx : order) {
+        const auto& c = in[idx];
+        auto match    = std::numeric_limits<std::uint64_t>::max();
+        for (std::size_t id = 0; id < representatives.size(); ++id) {
+            const auto& r     = in[representatives[id]];
+            const double duty = std::min(r.duty_cycle(), c.duty_cycle());
+            const double span =
+                loki::search::phase_track_distance(r, c, kTobs) * duty;
+            if (span <= std::max(options.phase_radius, options.radius * duty)) {
+                match = id;
+                break;
+            }
+        }
+        if (match == std::numeric_limits<std::uint64_t>::max()) {
+            match = representatives.size();
+            representatives.push_back(idx);
+        }
+        labels[idx] = match;
+    }
+    return labels;
+}
+
+// Every stored phase extent is the largest span from the representative to
+// a member. The public distance is span / min(duty); undoing the division
+// costs an ulp, hence the tolerance.
+void check_phase_extents(const std::vector<Candidate>& in,
+                         const loki::search::CandidateClustering& out) {
+    std::vector<double> extent(out.clusters.size(), 0.0);
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        const auto& rep   = out.clusters[out.membership[i]].representative;
+        const double duty = std::min(rep.duty_cycle(), in[i].duty_cycle());
+        extent[out.membership[i]] = std::max(
+            extent[out.membership[i]],
+            loki::search::phase_track_distance(rep, in[i], kTobs) * duty);
+    }
+    for (std::size_t k = 0; k < out.clusters.size(); ++k) {
+        CAPTURE(k);
+        REQUIRE_THAT(out.clusters[k].phase_extent,
+                     Catch::Matchers::WithinRel(extent[k], 1e-9) ||
+                         Catch::Matchers::WithinAbs(extent[k], 1e-15));
+    }
+}
 } // namespace
 
 TEST_CASE("Clustering a bright source with thousands of trials",
@@ -177,27 +237,23 @@ TEST_CASE("Clustering a bright source with thousands of trials",
     // The partition equals an independent closure over every pair.
     REQUIRE(canonical(out.membership) ==
             canonical(pairwise_closure(input, options)));
+    std::uint64_t members = 0;
     for (const auto& c : out.clusters) {
         REQUIRE(c.member_count >= 1);
+        members += c.member_count;
     }
+    REQUIRE(members == input.size());
     // Representatives are the brightest member of their cluster.
     for (std::size_t i = 0; i < input.size(); ++i) {
         REQUIRE(input[i].snr <=
                 out.clusters[out.membership[i]].representative.snr);
     }
+    check_phase_extents(input, out);
 
-    // Bit-exact against the reference implementation (every membership,
-    // representative, count and stored phase extent).
-    const auto fp = fingerprint(out);
-    CAPTURE(fp);
-    CHECK(fp == 0x3949e458c8b41812ULL);
-
-    SECTION("anchored grouping") {
-        options.grouping = "anchored";
-        const auto anchor =
-            loki::search::cluster_candidates(input, kTobs, options);
-        const auto fpa = fingerprint(anchor);
-        CAPTURE(fpa, anchor.clusters.size());
-        CHECK(fpa == 0x3d6a9ac603f6b912ULL);
-    }
+    // Anchored grouping takes the same bounded path for its link test.
+    options.grouping  = "anchored";
+    const auto anchor = loki::search::cluster_candidates(input, kTobs, options);
+    CAPTURE(anchor.clusters.size());
+    REQUIRE(anchor.membership == anchored_reference(input, options));
+    check_phase_extents(input, anchor);
 }

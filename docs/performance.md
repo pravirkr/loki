@@ -150,8 +150,11 @@ at every recursion level and a 64-step bisection per sign change. The fix
 (bit-exact, see `lib/search/candidates.cpp`): fixed-size stack storage for
 the polynomials, and a lower bound on the span from the endpoint values that
 rejects most pairs before any root is found. The lower bound never changes a
-link decision. `tests/cpp/api/candidates_stress_t.cpp` holds the reference
-fingerprint and the pairwise check.
+link decision. `tests/cpp/api/candidates_stress_t.cpp` checks the result
+against references computed in the same process (pairwise closure, anchored
+assignment, phase extents). The bit-identity to the previous implementation
+was verified by fingerprint when the fix was made; that pattern is platform-
+specific (it differs on a no-FMA clang build), so it is not asserted in CI.
 
 If cluster counts grow into the thousands, the harmonic flagging loop in
 `CandidateClusterer::finish` (clusters² × `harmonic_denominator_max`, with a
