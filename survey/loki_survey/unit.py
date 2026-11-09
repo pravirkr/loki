@@ -36,6 +36,7 @@ from loki_survey.rundir import (
     RunDir,
     atomic_write_json,
     canonical_json,
+    read_json,
     sha256_file,
     sha256_text,
 )
@@ -172,15 +173,23 @@ def peak_rss_gb() -> float:
 
 
 def run_unit(run: RunDir, unit_id: str, attempt: int) -> dict[str, Any]:
+    """Search one unit; a unit already done is left as it is."""
     resolved = load_resolved(run)
     units = {u.id: u for u in load_units(run)}
     if unit_id not in units:
         msg = f"unknown unit {unit_id}"
         raise KeyError(msg)
     unit = units[unit_id]
+    if run.unit_summary(unit_id).is_file():
+        print(f"{unit_id} is already done")
+        return read_json(run.unit_summary(unit_id))
     workdir = run.unit_tmp(unit_id, attempt)
     if workdir.exists():
-        shutil.rmtree(workdir)
+        # Left by an earlier run of this same job, which the scheduler
+        # stopped and started again (a preemption on a rerunnable queue).
+        target = run.quarantine_dir / f"{workdir.name}.{int(time.time())}"
+        run.quarantine_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(workdir), str(target))
     workdir.mkdir(parents=True)
     started = time.time()
     result = search(run, resolved, unit, workdir)
