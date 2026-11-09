@@ -64,7 +64,10 @@ def cmd_check(args: argparse.Namespace) -> int:
     run.ensure()
     atomic_write_json(run.resolved_json, resolved_dict(resolved, versions()))
     survey = resolved.survey
-    print(f"survey '{survey.name}': science {resolved.science_sha256[:12]}")
+    print(
+        f"survey '{survey.name}': science {resolved.science_sha256[:12]}, "
+        f"analysis {resolved.analysis_sha256[:12]}",
+    )
     print(f"  {len(survey.regions)} regions, {len(survey.boxes)} boxes")
     print(f"  wrote {run.resolved_json}")
     return 0

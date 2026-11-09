@@ -63,3 +63,24 @@ limits = { accel = [-50.0, 50.0] }   # m/s^2
 [output]
 # Fraction of units that keep loki's full result file (a fixed sample).
 raw_fraction = 0.0
+
+# How collect groups the units' candidates and what it removes. These tables
+# change no search: they have their own hash and may change at any time.
+[collect]
+# radius_bins = 2.0       # one source: frequencies within this many 1/T_obs
+# harmonic_max = 8        # label harmonics p/q with p, q up to this; 0: off
+# dm_zero_max = 0.0       # strongest at the lowest DM, at most this: undispersed
+# Removal rules, all off by default; every removal goes to collect/ledger.jsonl.
+# snr_min = 0.0           # remove groups below this S/N
+# drop_undispersed = false
+# remove_harmonics = false
+# max_candidates = 0      # keep only this many of the strongest; 0: all
+
+# How evaluate labels the candidates.
+[evaluate]
+# catalogue = "catalogue.csv"  # name, f0 or p0, and optional dm, pb (d), a1 (lt-s)
+# harmonic_max = 16       # match p/q times a catalogued frequency
+# doppler = 1e-4          # fractional window: the Earth's orbit, plus the orbit's
+# dm_tol = 0.0            # DMs must agree this closely; 0: not checked
+# line_fap = 1e-3         # false-alarm probability of a spectral line
+# line_tol_bins = 1.0     # a group within this many 1/T_obs of a line is on it

@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import tomllib
 from importlib import resources
+from typing import TYPE_CHECKING
 
 import pytest
 
 from loki_survey.config import (
     ConfigError,
+    analysis_sha256,
+    load_resolved,
+    parse_analysis,
     parse_site,
     parse_survey,
+    resolve,
+    resolved_dict,
     science_sha256,
 )
+from loki_survey.rundir import RunDir, atomic_write_json
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 SURVEY = """
 [survey]
@@ -101,3 +111,43 @@ threads = 2
     )
     with pytest.raises(ConfigError, match="exceeds"):
         parse_site(doc)
+
+
+def test_analysis_has_its_own_hash() -> None:
+    plain = tomllib.loads(SURVEY)
+    tuned = tomllib.loads(SURVEY + "[collect]\nmax_candidates = 50\n")
+    assert science_sha256(parse_survey(plain)) == science_sha256(parse_survey(tuned))
+    assert analysis_sha256(parse_analysis(plain)) != analysis_sha256(
+        parse_analysis(tuned),
+    )
+    assert parse_analysis(tuned).collect.max_candidates == 50
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("[collect]\nradius = 2.0\n", "unknown keys"),
+        ("[collect]\nremove_harmonics = true\nharmonic_max = 0\n", "harmonic_max"),
+        ("[collect]\ndrop_undispersed = 1\n", "true or false"),
+        ("[evaluate]\nline_fap = 1.5\n", "probability"),
+        ("[evaluate]\ndoppler = -1e-4\n", ">= 0"),
+    ],
+)
+def test_invalid_analysis(extra: str, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_analysis(tomllib.loads(SURVEY + extra))
+
+
+def test_resolved_keeps_the_analysis(tmp_path: Path) -> None:
+    run = RunDir.at(tmp_path)
+    (tmp_path / "survey.toml").write_text(
+        SURVEY + '[evaluate]\ncatalogue = "cat.csv"\n[collect]\nsnr_min = 8.0\n',
+    )
+    site = resources.files("loki_survey.templates").joinpath("site.toml").read_text()
+    (tmp_path / "site.toml").write_text(site)
+    resolved = resolve(run)
+    atomic_write_json(run.resolved_json, resolved_dict(resolved, {}))
+    again = load_resolved(run)
+    assert again.analysis == resolved.analysis
+    assert again.analysis.evaluate.catalogue == "cat.csv"
+    assert again.analysis_sha256 == resolved.analysis_sha256

@@ -27,7 +27,9 @@ interruption picks up where it stopped.
 
 - `survey.toml` holds the science: the series, the frequency regions and the
   search boxes. `check` refuses to change it once units have finished; start a
-  new run directory instead.
+  new run directory instead. Its `[collect]` and `[evaluate]` tables change no
+  search and have their own hash, so they may change at any time; every
+  analysis output records the hash it was made with.
 - `site.toml` holds the machine: memory, threads, and the executor. It can
   change between runs without invalidating results.
 

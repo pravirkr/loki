@@ -8,6 +8,11 @@ run to another machine never invalidates it.
 Science choices (frequency ranges, bin counts, thresholds, search boxes) have
 no defaults. Where a value is left out, the default is loki's own, and the
 resolved file records the value used.
+
+The ``[collect]`` and ``[evaluate]`` tables of ``survey.toml`` choose how the
+searches' candidates are combined and labelled. They change no search, so they
+have their own hash: they can be changed after units have run, and every
+analysis output records the hash it was made with.
 """
 
 from __future__ import annotations
@@ -114,6 +119,56 @@ class Survey:
 
     def box(self, name: str) -> Box:
         return next(b for b in self.boxes if b.name == name)
+
+
+# Analysis defaults, written into resolved.json when survey.toml leaves them out.
+# Two candidates from different units are one source when their frequencies
+# differ by at most this many resolutions 1 / T_obs.
+DEFAULT_RADIUS_BINS = 2.0
+# Harmonic ratios p/q are labelled up to this numerator and denominator.
+DEFAULT_COLLECT_HARMONIC_MAX = 8
+DEFAULT_EVALUATE_HARMONIC_MAX = 16
+# Fractional frequency window for a catalogue match: a topocentric frequency
+# differs from a barycentric one by up to the Earth's orbital speed over c.
+DEFAULT_DOPPLER = 1.0e-4
+# A spectral line is a run of FFT bins whose power has this false-alarm
+# probability over the whole spectrum.
+DEFAULT_LINE_FAP = 1.0e-3
+
+
+@dataclass(frozen=True)
+class Collect:
+    """How ``collect`` groups candidates across units and what it removes.
+
+    Grouping and labels never remove anything. Each removal rule is off by
+    default, and every candidate a rule removes is written to the ledger.
+    """
+
+    radius_bins: float = DEFAULT_RADIUS_BINS
+    harmonic_max: int = DEFAULT_COLLECT_HARMONIC_MAX
+    dm_zero_max: float = 0.0
+    snr_min: float = 0.0
+    drop_undispersed: bool = False
+    remove_harmonics: bool = False
+    max_candidates: int = 0
+
+
+@dataclass(frozen=True)
+class Evaluate:
+    """How ``evaluate`` matches candidates to a catalogue and to lines."""
+
+    catalogue: str | None = None
+    harmonic_max: int = DEFAULT_EVALUATE_HARMONIC_MAX
+    doppler: float = DEFAULT_DOPPLER
+    dm_tol: float = 0.0
+    line_fap: float = DEFAULT_LINE_FAP
+    line_tol_bins: float = 1.0
+
+
+@dataclass(frozen=True)
+class Analysis:
+    collect: Collect = Collect()
+    evaluate: Evaluate = Evaluate()
 
 
 # Site defaults, written into resolved.json when site.toml leaves them out.
@@ -337,7 +392,11 @@ def _parse_box(raw: dict[str, Any], region_names: list[str], where: str) -> Box:
 
 def parse_survey(doc: dict[str, Any], where: str = "survey.toml") -> Survey:
     """Validate a parsed ``survey.toml`` and fill in loki's defaults."""
-    _check_keys(doc, {"survey", "data", "preprocess", "search", "output"}, where)
+    _check_keys(
+        doc,
+        {"survey", "data", "preprocess", "search", "output", "collect", "evaluate"},
+        where,
+    )
     survey = _table(doc, "survey", where)
     data = _table(doc, "data", where)
     search = _table(doc, "search", where)
@@ -413,6 +472,84 @@ def parse_survey(doc: dict[str, Any], where: str = "survey.toml") -> Survey:
         regions=regions,
         boxes=boxes,
     )
+
+
+def _bool(table: dict[str, Any], key: str, default: bool, where: str) -> bool:
+    value = table.get(key, default)
+    if not isinstance(value, bool):
+        msg = f"{where}.{key}: expected true or false, got {value!r}"
+        raise ConfigError(msg)
+    return value
+
+
+def _nonnegative(table: dict[str, Any], key: str, default: float, where: str) -> float:
+    value = table.get(key, default)
+    if not isinstance(value, int | float) or isinstance(value, bool) or value < 0:
+        msg = f"{where}.{key}: expected a number >= 0, got {value!r}"
+        raise ConfigError(msg)
+    return float(value)
+
+
+def parse_analysis(doc: dict[str, Any], where: str = "survey.toml") -> Analysis:
+    """Validate the ``[collect]`` and ``[evaluate]`` tables of ``survey.toml``."""
+    raw = _table(doc, "collect", where)
+    cw = f"{where} [collect]"
+    _check_keys(raw, set(Collect.__dataclass_fields__), cw)
+    defaults = Collect()
+    collect = Collect(
+        radius_bins=float(
+            _positive(
+                raw.get("radius_bins", defaults.radius_bins),
+                f"{cw}.radius_bins",
+            ),
+        ),
+        harmonic_max=_nonnegative_int(raw, "harmonic_max", defaults.harmonic_max, cw),
+        dm_zero_max=_nonnegative(raw, "dm_zero_max", defaults.dm_zero_max, cw),
+        snr_min=_nonnegative(raw, "snr_min", defaults.snr_min, cw),
+        drop_undispersed=_bool(raw, "drop_undispersed", defaults.drop_undispersed, cw),
+        remove_harmonics=_bool(raw, "remove_harmonics", defaults.remove_harmonics, cw),
+        max_candidates=_nonnegative_int(
+            raw,
+            "max_candidates",
+            defaults.max_candidates,
+            cw,
+        ),
+    )
+    if collect.remove_harmonics and collect.harmonic_max == 0:
+        msg = f"{cw}: remove_harmonics needs harmonic_max above 0"
+        raise ConfigError(msg)
+    raw = _table(doc, "evaluate", where)
+    ew = f"{where} [evaluate]"
+    _check_keys(raw, set(Evaluate.__dataclass_fields__), ew)
+    edefaults = Evaluate()
+    catalogue = raw.get("catalogue")
+    if catalogue is not None and not isinstance(catalogue, str):
+        msg = f"{ew}.catalogue: expected a path"
+        raise ConfigError(msg)
+    line_fap = _positive(raw.get("line_fap", edefaults.line_fap), f"{ew}.line_fap")
+    if line_fap >= 1:
+        msg = f"{ew}.line_fap: expected a probability in (0, 1)"
+        raise ConfigError(msg)
+    evaluate = Evaluate(
+        catalogue=catalogue,
+        harmonic_max=int(
+            _positive(
+                raw.get("harmonic_max", edefaults.harmonic_max),
+                f"{ew}.harmonic_max",
+                integer=True,
+            ),
+        ),
+        doppler=_nonnegative(raw, "doppler", edefaults.doppler, ew),
+        dm_tol=_nonnegative(raw, "dm_tol", edefaults.dm_tol, ew),
+        line_fap=float(line_fap),
+        line_tol_bins=float(
+            _positive(
+                raw.get("line_tol_bins", edefaults.line_tol_bins),
+                f"{ew}.line_tol_bins",
+            ),
+        ),
+    )
+    return Analysis(collect=collect, evaluate=evaluate)
 
 
 def _nonnegative_int(table: dict[str, Any], key: str, default: int, where: str) -> int:
@@ -674,17 +811,34 @@ def science_sha256(survey: Survey) -> str:
     return sha256_text(canonical_json(science_dict(survey)))
 
 
+def analysis_sha256(analysis: Analysis) -> str:
+    """Hash the choices that combine and label candidates."""
+    return sha256_text(canonical_json(asdict(analysis)))
+
+
 @dataclass(frozen=True)
 class Resolved:
     survey: Survey
     site: Site
     science_sha256: str
+    analysis: Analysis = Analysis()
+
+    @property
+    def analysis_sha256(self) -> str:
+        return analysis_sha256(self.analysis)
 
 
 def resolve(run: RunDir) -> Resolved:
-    survey = parse_survey(load_toml(run.survey_toml), str(run.survey_toml))
+    doc = load_toml(run.survey_toml)
+    survey = parse_survey(doc, str(run.survey_toml))
+    analysis = parse_analysis(doc, str(run.survey_toml))
     site = parse_site(load_toml(run.site_toml), str(run.site_toml))
-    return Resolved(survey=survey, site=site, science_sha256=science_sha256(survey))
+    return Resolved(
+        survey=survey,
+        site=site,
+        science_sha256=science_sha256(survey),
+        analysis=analysis,
+    )
 
 
 def _from_dict_survey(d: dict[str, Any]) -> Survey:
@@ -733,7 +887,14 @@ def load_resolved(run: RunDir) -> Resolved:
     if sha != doc["science_sha256"]:
         msg = f"{run.resolved_json}: science hash mismatch; was it edited by hand?"
         raise ConfigError(msg)
-    return Resolved(survey=survey, site=site, science_sha256=sha)
+    analysis = Analysis()
+    if "analysis" in doc:
+        raw = doc["analysis"]
+        analysis = Analysis(
+            collect=Collect(**raw["collect"]),
+            evaluate=Evaluate(**raw["evaluate"]),
+        )
+    return Resolved(survey=survey, site=site, science_sha256=sha, analysis=analysis)
 
 
 def resolved_dict(resolved: Resolved, versions: dict[str, str]) -> dict[str, Any]:
@@ -742,5 +903,7 @@ def resolved_dict(resolved: Resolved, versions: dict[str, str]) -> dict[str, Any
         "survey": science_dict(resolved.survey),
         "site": asdict(resolved.site),
         "science_sha256": resolved.science_sha256,
+        "analysis": asdict(resolved.analysis),
+        "analysis_sha256": resolved.analysis_sha256,
         "versions": versions,
     }
