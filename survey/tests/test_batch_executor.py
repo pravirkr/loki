@@ -381,6 +381,14 @@ def test_bad_host_is_excluded(tmp_path: Path, fake: Fake, kind: str) -> None:
     assert failed_on == {"h1"}
 
 
+def test_host_that_takes_every_job_is_excluded(tmp_path: Path, fake: Fake) -> None:
+    """A failing host that every job lands on: no unit starts anywhere else."""
+    fake.control(hosts=["h1", "h2"], prefer="h1", bad_hosts=["h1"])
+    db, _ = drive(tmp_path, n=3)
+    assert db.counts() == {"done": 3}
+    assert db.excluded_hosts() == ["h1"]
+
+
 def test_failure_on_every_host_excludes_none(tmp_path: Path, fake: Fake) -> None:
     """A broken prologue is not a host fault: no unit ever starts anywhere."""
     fake.control(hosts=["h1", "h2"])

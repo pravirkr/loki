@@ -7,8 +7,9 @@ The control file (``$FAKE_SCHED_DIR/control.json``) makes chosen elements
 fail; an element is named by ``"<unit>:<attempt>"``, read from the array's
 unit list next to its script:
 
-- ``hosts``: host names; ``bad_hosts``: hosts where a job dies before its
-  script runs (exit 255);
+- ``hosts``: host names, taken in turn; ``prefer``: a host that takes every
+  element while it is not excluded; ``bad_hosts``: hosts where a job dies
+  before its script runs (exit 255);
 - ``need_gb``: {unit: GB}: an element given less memory is killed for it;
 - ``kill``, ``preempt``, ``timeout``: elements ended that way, unrun;
 - ``hang``: elements left running forever without running their script;
@@ -160,6 +161,8 @@ def submit(
     for index in range(1, n + 1):
         host = hosts[counter["host"] % len(hosts)]
         counter["host"] += 1
+        if control.get("prefer") in hosts:
+            host = control["prefer"]
         job["elements"][str(index)] = run_element(job, index, control, host)
     jobs[job["id"]] = job
     save("jobs.json", jobs)

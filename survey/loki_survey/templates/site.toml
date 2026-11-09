@@ -33,7 +33,7 @@ threads = 2
 # requeue_retries = 3   # cluster: resubmit a preempted, killed, lost or
 #                       # stalled unit, or one on a failing host, this often
 # host_failures = 2     # exclude a host after this many failures that point
-#                       # at it (only once units have run on other hosts)
+#                       # at it (not while every host fails and none runs)
 # stall_min = 30        # a running job silent this long is stalled; 0: off
 
 # For kind = "lsf" (ask your admins, or run the commands shown):

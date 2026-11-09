@@ -391,17 +391,19 @@ class BatchExecutor:
             print(f"FAIL {failure} {a.unit}{where}: {detail.splitlines()[0]}")
 
     def _count_host_failure(self, host: str, detail: str) -> None:
-        """Exclude a host once it has failed enough and others have not.
+        """Exclude a host once enough failures point at it and not elsewhere.
 
-        A failure that happens on every host (a broken prologue, a wrong
-        Python) is not a host fault; a host is only excluded once units have
-        started somewhere else.
+        Failures on several hosts while no unit starts anywhere point at the
+        setup (a broken prologue, a wrong Python), not at a host, so none is
+        excluded. Failures on one host are its own, even when every job lands
+        there (a host that fails fast drains the queue into itself).
         """
         failures = self.db.host_failed(host, detail.splitlines()[0])
-        if host in self.db.excluded_hosts():
+        if host in self.db.excluded_hosts() or failures < self.site.host_failures:
             return
-        others = self.db.hosts_that_ran_units() - {host}
-        if failures >= self.site.host_failures and others:
+        ran_elsewhere = self.db.hosts_that_ran_units() - {host}
+        failed_elsewhere = self.db.hosts_with_failures() - {host}
+        if ran_elsewhere or not failed_elsewhere:
             self.db.exclude_host(host)
             print(f"exclude host {host} after {failures} failures")
 

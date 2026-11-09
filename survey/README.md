@@ -60,7 +60,7 @@ Every failure is classed from the scheduler's own record:
 | --- | --- | --- |
 | `oom` | LSF TERM_MEMLIMIT, Slurm OUT_OF_MEMORY | resubmitted with `oom_factor` more memory, up to `oom_retries` times |
 | `preempted`, `killed`, `lost` | the scheduler's state; no record and no footer | resubmitted, up to `requeue_retries` times |
-| `host` | the job died before `run-unit` started, or SIGILL/SIGBUS | resubmitted; the host is excluded after `host_failures` failures, once units have run elsewhere |
+| `host` | the job died before `run-unit` started, or SIGILL/SIGBUS | resubmitted; the host is excluded after `host_failures` failures, unless failures on several hosts with no unit started anywhere point at the setup instead |
 | `stalled` | no heartbeat for `stall_min` minutes | the job is killed and resubmitted once |
 | `timeout` | LSF TERM_RUNLIMIT, Slurm TIMEOUT | reported: give the region more bands, or raise `time_min` |
 | `crashed` | any other non-zero exit | reported with the end of its log; not retried |

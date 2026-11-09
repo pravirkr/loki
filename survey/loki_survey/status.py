@@ -408,6 +408,11 @@ class StatusDB:
         )
         return [r[0] for r in rows.fetchall()]
 
+    def hosts_with_failures(self) -> set[str]:
+        """Hosts with at least one failure that pointed at the host."""
+        rows = self.conn.execute("SELECT host FROM hosts WHERE failures > 0")
+        return {r[0] for r in rows.fetchall()}
+
     def hosts_that_ran_units(self) -> set[str]:
         """Hosts where ``run-unit`` started at least once."""
         rows = self.conn.execute(
