@@ -327,7 +327,7 @@ def test_ep_graph_memory_exhaustion_preserves_previous_product(product, tmp_path
         assert len(result["candidates/id"]) >= 1000
 
 
-@pytest.mark.parametrize("nparams", [3, 4])
+@pytest.mark.parametrize("nparams", [3, 4, 5])
 def test_ep_reported_taylor_derivatives_are_normalized_without_truncation(
     product, tmp_path, nparams
 ):
@@ -336,7 +336,7 @@ def test_ep_reported_taylor_derivatives_are_normalized_without_truncation(
     spool.write_bytes(path.read_bytes())
     with h5py.File(spool, "r+") as handle:
         del handle.attrs["param_names"]
-        names = ["snap", "jerk", "accel", "freq"][-nparams:]
+        names = ["crackle", "snap", "jerk", "accel", "freq"][-nparams:]
         handle.attrs["param_names"] = np.asarray(names, dtype=h5py.string_dtype())
         for source in handle["search/sources/run_path"].asstr()[:]:
             run = handle[source]
@@ -344,8 +344,10 @@ def test_ep_reported_taylor_derivatives_are_normalized_without_truncation(
             leaves = np.zeros((len(old), nparams + 2, 2))
             leaves[:, -4:, :] = old
             leaves[:, nparams - 3, 0] = 3.0  # reported jerk, m/s^3
-            if nparams == 4:
-                leaves[:, 0, 0] = 2.0  # reported snap, m/s^4
+            if nparams >= 4:
+                leaves[:, nparams - 4, 0] = 2.0  # reported snap, m/s^4
+            if nparams == 5:
+                leaves[:, 0, 0] = 1.0  # reported crackle, m/s^5
             del run["param_sets"]
             run["param_sets"] = leaves
     opts = options()
@@ -360,7 +362,7 @@ def test_ep_reported_taylor_derivatives_are_normalized_without_truncation(
         np.testing.assert_allclose(raw["f1"][:], -native[:, -1] * native[:, -2] / C)
         np.testing.assert_allclose(raw["f2"][:], -native[:, -1] * 3.0 / C)
         assert not np.any(raw["has_parameter_errors"][:])
-    if nparams == 4:
+    if nparams >= 4:
         with pytest.raises(ValueError, match="above jerk"):
             export_pulsarx(output, tmp_path / "higher.cands")
     else:

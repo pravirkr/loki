@@ -437,7 +437,7 @@ private:
 
         std::vector<std::uint32_t> widths_report_h;
         // RFI control is rejected on GPU, so it is never active here.
-        if (m_poly_basis == "taylor" && m_cfg.get_nparams() <= 4) {
+        if (m_poly_basis == "taylor") {
             widths_report_h.resize(n_leaves);
             const auto folds   = world_tree.get_folds_circular_view();
             auto& scratch      = ws.prune;
