@@ -264,13 +264,8 @@ BoxcarWidthsCache::BoxcarWidthsCache(std::span<const SizeType> widths,
       psum_buffer(nbins + wmax) {
 
     // Precompute h_vals and b_vals for all widths
-    for (SizeType iw = 0; iw < widths.size(); ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
-    }
+    detail::boxcar_template_consts(nbins, this->widths.data(), ntemplates,
+                                   h_vals.data(), b_vals.data());
 }
 
 std::vector<SizeType>
@@ -308,13 +303,10 @@ void snr_boxcar_1d(std::span<const float> arr,
     for (SizeType iw = 0; iw < ntemplates; ++iw) {
         // Height and baseline of a boxcar filter with width w bins
         // and zero mean and unit square sum
-        const SizeType w = widths[iw];
-        const float h    = std::sqrt(static_cast<float>(nbins - w) /
-                                     static_cast<float>(nbins * w));
-        const float b =
-            static_cast<float>(w) * h / static_cast<float>(nbins - w);
-        const float dmax = utils::diff_max(psum_ptr + w, psum_ptr, nbins);
-        out[iw]          = (((h + b) * dmax) - (b * sum)) / stdnoise;
+        const SizeType w  = widths[iw];
+        const auto [h, b] = detail::boxcar_template(nbins, w);
+        const float dmax  = utils::diff_max(psum_ptr + w, psum_ptr, nbins);
+        out[iw]           = (((h + b) * dmax) - (b * sum)) / stdnoise;
     }
 }
 
