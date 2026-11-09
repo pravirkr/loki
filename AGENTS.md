@@ -3,6 +3,9 @@
 Read `docs/architecture.md` before changing code. It is the frozen layout and
 the rules every change must follow (public API, dispatch, includes, tests,
 namespaces, numerics). Its recipes cover adding an algorithm or a backend.
+Before any performance work read `docs/performance.md`: the numerics
+contract, the engineering rules, and the ideas already measured and
+rejected. Add every new measured result there.
 
 Before finishing a change:
 

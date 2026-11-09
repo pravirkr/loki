@@ -145,6 +145,7 @@ loki::algorithms::FFA<float> ffa(ws, fft, cfg, loki::Exec::cuda(0));
 ```
 
 The library layout and the rules for adding algorithms or backends are in [`docs/architecture.md`](docs/architecture.md).
+The performance rules, and the optimisations that were measured and rejected, are in [`docs/performance.md`](docs/performance.md).
 
 ---
 
