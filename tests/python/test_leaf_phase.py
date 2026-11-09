@@ -1,4 +1,4 @@
-"""An EP leaf's phase model, from Python."""
+"""An EP leaf's phase model and the per-sample fold, from Python."""
 
 from __future__ import annotations
 
@@ -34,6 +34,29 @@ def test_leaf_phase_is_the_taylor_polynomial() -> None:
 def test_leaf_phase_rejects_a_flat_leaf() -> None:
     with pytest.raises(ValueError, match="n_params"):
         libloki.psr_utils.leaf_phase(np.zeros(8), np.zeros(2), 0.0)
+
+
+def test_fold_phase_follows_an_accelerated_pulse() -> None:
+    # A pulse train whose arrival times follow the leaf: folded with the
+    # leaf's own phase, every pulse lands in one bin; at constant frequency
+    # it smears.
+    rng = np.random.default_rng(1)
+    nsamps, tsamp, nbins = 1 << 16, 1e-3, 32
+    times = np.arange(nsamps) * tsamp
+    t_ref = times[-1] / 2
+    leaf = taylor_leaf(2000.0, 0.0, 37.0)
+    phase, _ = libloki.psr_utils.leaf_phase(leaf, times, t_ref)
+    frac = phase - np.floor(phase)
+    on = np.abs(frac - 0.5) < 0.5 / nbins
+    ts_e = (rng.standard_normal(nsamps) + 3.0 * on).astype(np.float32)
+    ts_v = np.ones(nsamps, dtype=np.float32)
+    fold = libloki.fold.fold_phase(ts_e, ts_v, phase, nbins)
+    assert fold.shape == (2, nbins)
+    assert fold[1].sum() == pytest.approx(nsamps)
+    profile = fold[0] / fold[1]
+    assert np.argmax(profile) == nbins // 2
+    constant = libloki.fold.fold_phase(ts_e, ts_v, 37.0 * (times - t_ref), nbins)
+    assert profile.max() > 2 * (constant[0] / constant[1]).max()
 
 
 def test_get_phase_idx_takes_a_frequency() -> None:

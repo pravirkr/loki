@@ -6,6 +6,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/utils/psr_utils.hpp"
 
@@ -142,5 +143,32 @@ TEST_CASE("leaf_phase rejects a malformed leaf", "[psr_utils]") {
                       std::runtime_error);
     std::vector<double> too_few(1);
     REQUIRE_THROWS_AS(leaf_phase(leaf, 2, times, 0.0, too_few),
+                      std::runtime_error);
+}
+
+TEST_CASE("fold_phase bins each sample at its phase", "[fold]") {
+    const SizeType nbins = 8;
+    const SizeType n     = 800;
+    std::vector<float> ts_e(n);
+    std::vector<float> ts_v(n, 1.0F);
+    std::vector<double> phase(n);
+    for (SizeType i = 0; i < n; ++i) {
+        // Ten turns, one sample per 1/80 cycle; a pulse at phase 0.25.
+        phase[i]          = static_cast<double>(i) / 80.0;
+        const double frac = phase[i] - std::floor(phase[i]);
+        ts_e[i]           = std::abs(frac - 0.25) < 1e-9 ? 5.0F : 0.0F;
+    }
+    const auto fold = loki::algorithms::fold_phase(ts_e, ts_v, phase, nbins);
+    REQUIRE(fold.size() == 2 * nbins);
+    // Phase 0.25 of 8 bins is bin 2; every bin gets 1/8 of the samples.
+    REQUIRE(fold[2] == Catch::Approx(50.0));
+    for (SizeType b = 0; b < nbins; ++b) {
+        REQUIRE(fold[nbins + b] == Catch::Approx(100.0));
+        if (b != 2) {
+            REQUIRE(fold[b] == 0.0F);
+        }
+    }
+    const std::vector<double> wrong(n - 1);
+    REQUIRE_THROWS_AS(loki::algorithms::fold_phase(ts_e, ts_v, wrong, nbins),
                       std::runtime_error);
 }

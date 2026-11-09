@@ -117,6 +117,39 @@ common Python reader and PulsarX converter accept supported EP products with
 the same DM/frame/epoch requirements; nonzero derivatives above jerk are
 still rejected by PulsarX export.
 
+### Folding a leaf with loki's own model
+
+`libloki.psr_utils.leaf_phase` gives the pulse phase, in cycles, of an EP leaf
+at any times, with the model the search propagated that leaf with.
+`libloki.fold.fold_phase` folds a weighted series at those phases, binning
+each sample as the brute fold does. A fold made this way cannot drift from
+the search when the search's model changes.
+
+```python
+import h5py
+import numpy as np
+
+# ts: the searched series (libloki.io.TimeSeries), tsamp its sample time
+with h5py.File("results/search_ep_results.h5") as f:
+    run = f["chunks/chunk_0000/runs/004_00"]
+    leaf = run["param_sets"][0]  # (n_params + 2, 2): values and errors
+    tobs = f.attrs["tobs"]
+times = np.arange(ts.ts_e.size) * tsamp
+phase, model = libloki.psr_utils.leaf_phase(leaf, times, tobs / 2)
+fold = libloki.fold.fold_phase(ts.ts_e, ts.ts_v, phase, nbins=64)  # (2, 64)
+```
+
+A reported leaf refers to the middle of the searched span, so `t_ref` is
+`tobs / 2` on the clock of `times`. The phase is
+`f * ((t - t_ref) - D(t - t_ref) / c)`. For a Taylor leaf, D is the
+polynomial of its derivatives. In a five-parameter (circular) search, D is a
+circular orbit when snap and accel (else crackle and jerk) are significant at
+`propagator_significance` and imply a real angular frequency; `model` names
+the choice (`"taylor"`, `"circular_snap"` or `"circular_crackle"`). The gauge
+step that reports a leaf adds a term of order dv/c to its errors, so a leaf
+within about that of a significance threshold may be classed differently from
+the search's last level.
+
 ## Search configuration
 
 ```toml

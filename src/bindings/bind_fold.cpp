@@ -49,6 +49,21 @@ void bind_fold(py::module_& m) {
         py::arg("segment_len"), py::arg("nbins"), py::arg("tsamp"),
         py::arg("t_ref") = 0.0F, py::arg("nthreads") = 1, py::kw_only(),
         py::arg("backend") = "cpu", py::arg("device") = 0);
+    m_fold.def(
+        "fold_phase",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const PyArrayT<double>& phase, SizeType nbins) {
+            auto fold = as_pyarray(algorithms::fold_phase(
+                to_span<const float>(ts_e), to_span<const float>(ts_v),
+                to_span<const double>(phase), nbins));
+            return fold.reshape(
+                {static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(nbins)});
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("phase"), py::arg("nbins"),
+        R"doc(Fold a weighted series at a phase (cycles) per sample.
+
+Each sample goes to the bin nearest frac(phase) * nbins, as in the brute fold.
+Returns shape (2, nbins): the sums of ts_e, then of ts_v, per bin.)doc");
 }
 
 } // namespace loki
