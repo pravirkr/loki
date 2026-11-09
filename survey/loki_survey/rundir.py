@@ -70,6 +70,10 @@ class RunDir:
         return self.root / "evaluate"
 
     @property
+    def report_dir(self) -> Path:
+        return self.root / "report"
+
+    @property
     def status_db(self) -> Path:
         return self.root / "status.sqlite"
 
