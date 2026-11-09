@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import os
+import platform
 import sys
+import time
 from importlib import resources
 from pathlib import Path
 
-from loki_survey.config import ConfigError, load_resolved, resolve, resolved_dict
-from loki_survey.rundir import RunDir, atomic_write_json, read_json
+from loki_survey.config import (
+    ConfigError,
+    Resolved,
+    load_resolved,
+    resolve,
+    resolved_dict,
+)
+from loki_survey.executors.batch import SchedulerError, SubmitError
+from loki_survey.rundir import DriverBusyError, RunDir, atomic_write_json, read_json
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -77,43 +87,117 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_submit(args: argparse.Namespace) -> int:
-    from loki_survey.executors.local import LocalExecutor  # noqa: PLC0415
+def _selected_units(run: RunDir, wanted: list[str] | None) -> list:
     from loki_survey.plan import load_units  # noqa: PLC0415
+
+    units = load_units(run)
+    if wanted:
+        unknown = sorted(set(wanted) - {u.id for u in units})
+        if unknown:
+            msg = f"unknown units: {unknown}"
+            raise ConfigError(msg)
+        units = [u for u in units if u.id in set(wanted)]
+    return units
+
+
+def cmd_submit(args: argparse.Namespace) -> int:
+    from loki_survey.executors import batch_executor  # noqa: PLC0415
+    from loki_survey.executors.local import LocalExecutor  # noqa: PLC0415
     from loki_survey.status import StatusDB  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
     resolved = load_resolved(run)
     run.ensure()
-    units = load_units(run)
-    if args.units:
-        wanted = set(args.units)
-        units = [u for u in units if u.id in wanted]
+    units = _selected_units(run, args.units)
     db = StatusDB(run)
     try:
-        db.reset_running()
-        db.sync(units, resolved.site.unit_memory_gb)
-        LocalExecutor(run, resolved, db).submit(units)
+        with run.driving():
+            db.sync(units, resolved.site.unit_memory_gb)
+            if resolved.site.executor == "local":
+                db.reset_running()
+                LocalExecutor(run, resolved, db).submit(units)
+            else:
+                executor = batch_executor(run, resolved, db)
+                executor.reconcile()
+                if not getattr(args, "watch_only", False):
+                    retried = db.retry_failed([u.id for u in units])
+                    if retried:
+                        print(f"retrying {retried} failed units")
+                    print(f"submitted {executor.submit(units)} units")
+                if getattr(args, "wait", False):
+                    executor.watch(units)
+                else:
+                    print(f"follow them with: loki-survey watch {run.root}")
+    except KeyboardInterrupt:
+        if resolved.site.executor == "local":
+            raise
+        print(
+            f"\nstopped watching; the jobs keep running: loki-survey watch {run.root}",
+        )
+        return 130
     finally:
         db.close()
-    return cmd_status(args)
+    return _report(run, resolved)
 
 
-def cmd_status(args: argparse.Namespace) -> int:
-    from loki_survey.plan import load_units  # noqa: PLC0415
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Poll and resubmit; unlike submit, leave failed units failed."""
+    args.wait = True
+    args.watch_only = True
+    return cmd_submit(args)
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    from loki_survey.executors import batch_executor  # noqa: PLC0415
     from loki_survey.status import StatusDB  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
     resolved = load_resolved(run)
+    if resolved.site.executor == "local":
+        print("local units stop when their 'submit' is interrupted (Ctrl-C)")
+        return 0
     db = StatusDB(run)
     try:
-        db.sync(load_units(run), resolved.site.unit_memory_gb)
+        with run.driving():
+            count = batch_executor(run, resolved, db).cancel()
+    finally:
+        db.close()
+    print(f"cancelled {count} attempts; 'submit' runs their units again")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    from loki_survey.executors import batch_executor  # noqa: PLC0415
+    from loki_survey.status import StatusDB  # noqa: PLC0415
+
+    run = RunDir.at(args.rundir)
+    resolved = load_resolved(run)
+    if resolved.site.executor != "local":
+        db = StatusDB(run)
+        try:
+            with run.driving():
+                db.sync(_selected_units(run, None), resolved.site.unit_memory_gb)
+                batch_executor(run, resolved, db).reconcile()
+        except DriverBusyError:
+            print("a watcher is driving this run; showing its latest state")
+        finally:
+            db.close()
+    return _report(run, resolved)
+
+
+def _report(run: RunDir, resolved: Resolved) -> int:
+    """Print unit counts, failures and excluded hosts; 1 if any unit failed."""
+    from loki_survey.status import StatusDB  # noqa: PLC0415
+
+    db = StatusDB(run)
+    try:
+        db.sync(_selected_units(run, None), resolved.site.unit_memory_gb)
         counts = db.counts()
         total = sum(counts.values())
         print(
             "  ".join(
                 f"{s} {counts.get(s, 0)}"
-                for s in ("done", "running", "pending", "failed")
+                for s in ("done", "running", "queued", "pending", "failed")
             )
             + f"  of {total}",
         )
@@ -121,15 +205,37 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"FAILED {uid}: {failure} after {attempts} attempts")
             if detail:
                 print("    " + detail.replace("\n", "\n    "))
+        excluded = db.excluded_hosts()
+        if excluded:
+            print(f"excluded hosts: {', '.join(excluded)}")
+        quarantined = list(run.quarantine_dir.glob("*"))
+        if quarantined:
+            print(
+                f"{len(quarantined)} temporary directories of failed attempts "
+                f"are in {run.quarantine_dir}",
+            )
         return 0 if counts.get("failed", 0) == 0 else 1
     finally:
         db.close()
 
 
 def cmd_run_unit(args: argparse.Namespace) -> int:
+    run = RunDir.at(args.rundir)
+    # Written before loki is imported: a job that dies before this file
+    # exists points at its node, not at the unit.
+    atomic_write_json(
+        run.unit_started(args.unit, args.attempt),
+        {
+            "host": platform.node(),
+            "pid": os.getpid(),
+            "time": time.time(),
+            "lsf_job": os.environ.get("LSB_JOBID"),
+            "slurm_job": os.environ.get("SLURM_ARRAY_JOB_ID"),
+        },
+    )
     from loki_survey.unit import run_unit  # noqa: PLC0415
 
-    summary = run_unit(RunDir.at(args.rundir), args.unit, args.attempt)
+    summary = run_unit(run, args.unit, args.attempt)
     found, seconds = summary["n_candidates"], summary["total_s"]
     print(f"{args.unit}: {found} candidates in {seconds:.1f} s")
     return 0
@@ -160,10 +266,19 @@ def build_parser() -> argparse.ArgumentParser:
     add("plan", cmd_plan, "write the unit list and build EP plans")
     p = add("submit", cmd_submit, "run every unit that is not done")
     p.add_argument("--units", nargs="*", help="only these unit ids")
+    p.add_argument(
+        "--wait",
+        action="store_true",
+        help="on a cluster, keep polling and resubmitting until all units end",
+    )
+    p = add("watch", cmd_watch, "poll a cluster run and resubmit until all units end")
+    p.add_argument("--units", nargs="*", help="only these unit ids")
+    add("cancel", cmd_cancel, "cancel a cluster run's queued and running jobs")
     add("status", cmd_status, "show unit states and failures")
     p = add("run", cmd_run, "check, prep, plan and submit")
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--units", nargs="*", help="only these unit ids")
+    p.add_argument("--wait", action="store_true", help="as for submit")
     p = add("run-unit", cmd_run_unit, "run one unit (used by executors)")
     p.add_argument("unit")
     p.add_argument("--attempt", type=int, default=1)
@@ -174,6 +289,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (ConfigError, FileNotFoundError, PermissionError) as exc:
+    except (
+        ConfigError,
+        FileNotFoundError,
+        PermissionError,
+        DriverBusyError,
+        SchedulerError,
+        SubmitError,
+    ) as exc:
         print(f"loki-survey: {exc}", file=sys.stderr)
         return 2

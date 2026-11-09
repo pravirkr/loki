@@ -15,6 +15,8 @@ from .conftest import write_site
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from .conftest import Fake
+
 NSAMPS = 1 << 18
 DT = 64e-6
 TRUE_FREQ = 142.3
@@ -112,3 +114,28 @@ def test_simulated_pulsar_is_found(tmp_path: Path, unit_python: str) -> None:
     # Changing the science after units finished is refused.
     (run / "survey.toml").write_text(SURVEY.replace("snr_min = 7.0", "snr_min = 6.0"))
     assert main(["check", str(run)]) == 1
+
+
+def test_simulated_pulsar_is_found_through_lsf(
+    tmp_path: Path,
+    unit_python: str,
+    fake: Fake,
+) -> None:
+    """The same run through the fake LSF, with one unit out of memory once."""
+    run = tmp_path / "run"
+    (run / "data").mkdir(parents=True)
+    simulate(run / "data" / "sim_DM10.00.dat")
+    (run / "survey.toml").write_text(SURVEY)
+    write_site(run, unit_python, kind="lsf")
+    ep_unit = "sim_DM10.00__mid__b0__ep_accel"
+    fake.control(hosts=["h1", "h2"], need_gb={ep_unit: 5.0})
+
+    assert main(["run", str(run), "--wait"]) == 0
+
+    for box in ("ffa_accel", "ep_accel"):
+        uid = f"sim_DM10.00__mid__b0__{box}"
+        best = best_near_truth(run / "out" / f"{uid}.h5")
+        assert best >= RECOVER_SNR_MIN, f"{box}: best S/N {best:.2f}"
+    # The EP unit asked for 4 GB, was killed for memory, and ran at 6 GB.
+    arrays = fake.jobs().values()
+    assert [round(j["mem_gb"], 1) for j in arrays] == [4.0, 6.0]
