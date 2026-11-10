@@ -89,9 +89,12 @@ measuring the chosen schedule on samples that took no part in choosing it
   (2^15 trials, sorted on the device) gives per stage the signal-score
   standard deviation σ_s, a feasibility window [Q_s(0.02 p / M),
   Q_s(1 - p / 2)] of signal quantiles (p = the lowest Pd bin), and the guess
-  g_s = min(median signal score, trials-aware S/N). Stage s searches the grid
-  thresholds within `beam_sigma` σ_s of g_s (inside the window), and a
-  transition may change the offset γ_s - g_s by at most `reach_sigma` σ_s.
+  g_s = min(median signal score, trials-aware S/N), clamped into the window.
+  Stage s searches the grid thresholds within `beam_sigma` σ_s of g_s (inside
+  the window), and a transition may change the offset γ_s - g_s by at most
+  `reach_sigma` σ_s. Unclamped, a bright pulsar's guess sits at the trials
+  term, below the later stages' windows, and the reach forces the first
+  thresholds up to climb into them.
   The threshold may still drop (heavily branched stages), but only as the
   score distributions move. Measured on 5 branching patterns × 2 targets, the
   paths of an unconstrained search lie within 2.5 σ of the guess and change
