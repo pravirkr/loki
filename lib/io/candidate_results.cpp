@@ -591,8 +591,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
     std::vector<std::string> names;
     raw.getAttribute("param_names").read(names);
     const auto nparams = names.size();
-    if (nparams == 0 || nparams > kParamNames.size() ||
-        (ep && (nparams < 2 || nparams > 4))) {
+    if (nparams == 0 || nparams > kParamNames.size() || (ep && nparams < 2)) {
         throw std::invalid_argument("unsupported candidate parameter count");
     }
     // The derivative conversion below assumes the kinematic Taylor order

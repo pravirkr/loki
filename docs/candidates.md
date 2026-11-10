@@ -49,11 +49,18 @@ decisions or RNG streams. Width identity is recovered from the final folds
 using the same backend scorer; the first configured width wins an exact tie.
 Each run now saves this identity in `width`; a chunk saves `scoring_widths`.
 
-This increment supports full-observation polynomial Taylor searches
-(acceleration, jerk and snap) with RFI control disabled. Common-product
-construction rejects active RFI, Chebyshev and circular-model requests. The
-existing diagnostic constructor remains available for other supported searches.
-Harvesting and masking are outside this candidate path.
+This increment supports full-observation Taylor searches (acceleration, jerk,
+snap, and the five-parameter circular-orbit search through crackle) with RFI
+control disabled. Common-product construction rejects active RFI and Chebyshev
+requests. The existing diagnostic constructor remains available for other
+supported searches. Harvesting and masking are outside this candidate path.
+
+A circular search reports each leaf's derivatives at the observation midpoint
+under the leaf's own model (an orbit, or a polynomial where its terms are not
+significant), so the common tables hold them as for a Taylor search.
+Clustering compares candidates by the Taylor track through crackle; over an
+observation that is a small fraction of the orbit, the next term is small,
+and it largely cancels between two candidates on the same orbit.
 
 In Python, pass `candidates=CandidateOptions()` to opt in; `candidates=None`
 retains the existing diagnostic-only API. In C++, use the overload whose
@@ -486,6 +493,7 @@ final leaf across completed runs. Taylor EP recovers that width from final
 folds without overwriting reported scores or changing pruning decisions.
 
 Common EP candidates currently require an inactive RFI configuration and
-polynomial Taylor models through snap. Chebyshev/orbital normalization and
-RFI harvest/masking integration are outside this path. PulsarX export supports
+Taylor models through crackle (the circular-orbit search included).
+Chebyshev normalization and RFI harvest/masking integration are outside this
+path. PulsarX export supports
 terms through jerk and rejects nonzero higher derivatives.

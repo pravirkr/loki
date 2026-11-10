@@ -114,7 +114,7 @@ EPFreqSweep::EPFreqSweep(
         return;
     }
     if (poly_basis != "taylor" || cfg.get_nparams() < 2 ||
-        cfg.get_nparams() > 4 || rfi_config.is_active()) {
+        cfg.get_nparams() > kParamNames.size() || rfi_config.is_active()) {
         throw std::invalid_argument("EP candidates require polynomial Taylor "
                                     "and an inactive RFI config");
     }
