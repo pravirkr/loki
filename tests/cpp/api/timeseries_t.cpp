@@ -4,9 +4,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <limits>
-#include <random>
 #include <stdexcept>
-#include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -14,35 +12,10 @@
 
 #include "loki/common/types.hpp"
 
+#include "temp_dir.hpp"
+
 using Catch::Matchers::WithinAbs;
-
-namespace {
-
-class TempDir {
-public:
-    TempDir() {
-        std::mt19937_64 rng{std::random_device{}()};
-        const auto root =
-            std::filesystem::temp_directory_path() / "loki-io-tests";
-        std::filesystem::create_directories(root);
-        m_path = root / std::to_string(rng());
-        std::filesystem::create_directories(m_path);
-    }
-
-    ~TempDir() { std::filesystem::remove_all(m_path); }
-
-    TempDir(const TempDir&)            = delete;
-    TempDir& operator=(const TempDir&) = delete;
-    TempDir(TempDir&&)                 = delete;
-    TempDir& operator=(TempDir&&)      = delete;
-
-    [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
-
-private:
-    std::filesystem::path m_path;
-};
-
-} // namespace
+using loki::test::TempDir;
 
 TEST_CASE("timeseries rejects invalid weights", "[io]") {
     const std::vector<float> intensity{1.0F, 2.0F};
@@ -82,7 +55,7 @@ TEST_CASE("timeseries stores intensity, variance, and sample interval",
 
 TEST_CASE("timeseries leaves the payload unchanged when preprocessing is off",
           "[io]") {
-    const TempDir dir;
+    const TempDir dir("loki-io-tests");
     std::vector<float> samples{1.5F, -2.0F, 3.25F, 0.0F};
     const std::vector<float> variance(samples.size(), 4.0F);
     const loki::io::TimeSeries series(samples, variance, 6.4e-5);
@@ -101,7 +74,7 @@ TEST_CASE("timeseries leaves the payload unchanged when preprocessing is off",
 }
 
 TEST_CASE("timeseries preprocessing removes a constant offset", "[io]") {
-    const TempDir dir;
+    const TempDir dir("loki-io-tests");
     const std::vector<float> samples(64, 7.0F);
     const std::vector<float> variance(samples.size(), 1.0F);
     const loki::io::TimeSeries series(samples, variance, 0.05);
@@ -123,7 +96,7 @@ TEST_CASE("timeseries preprocessing removes a constant offset", "[io]") {
 }
 
 TEST_CASE("timeseries z-score scales a varying series", "[io]") {
-    const TempDir dir;
+    const TempDir dir("loki-io-tests");
     std::vector<float> samples(32);
     for (std::size_t i = 0; i < samples.size(); ++i) {
         samples[i] = static_cast<float>(i);
@@ -160,7 +133,7 @@ TEST_CASE("timeseries z-score scales a varying series", "[io]") {
 
 TEST_CASE("timeseries read_info returns the header without the samples",
           "[io]") {
-    const TempDir dir;
+    const TempDir dir("loki-io-tests");
     const std::vector<float> samples(1000, 0.5F);
     const std::vector<float> variance(samples.size(), 1.0F);
     const loki::io::TimeSeries series(samples, variance, 1.28e-4);

@@ -15,6 +15,8 @@
 #include "lib/pipelines/ep_sweep_common.hpp"
 #include "lib/search/cands.hpp"
 
+#include "temp_dir.hpp"
+
 namespace {
 
 loki::search::PulsarSearchConfig writer_cfg() {
@@ -45,9 +47,7 @@ loki::pipelines::detail::EPResultPayload payload(std::string name,
 } // namespace
 
 TEST_CASE("EP sweep writer preserves the merged run layout", "[ep_writer]") {
-    const auto dir =
-        std::filesystem::temp_directory_path() / "loki_ep_writer_layout";
-    std::filesystem::create_directories(dir);
+    const loki::test::TempDir dir("loki-ep-writer-layout");
     const auto cfg = writer_cfg();
     const std::vector<loki::algorithms::EPChunkConfig> chunks{
         {.cfg               = cfg,
@@ -73,7 +73,7 @@ TEST_CASE("EP sweep writer preserves the merged run layout", "[ep_writer]") {
     }
     CHECK(writer.finish(1.0F) == 32.0);
     loki::pipelines::detail::merge_ep_sweep_results(
-        dir, dir / "merged.h5", chunks, cfg, 0.1F, "taylor", 0.1F, 1.0F);
+        dir.path(), dir / "merged.h5", chunks, cfg, 0.1F, "taylor", 0.1F, 1.0F);
     const HighFive::File direct((dir / "direct.h5").string(),
                                 HighFive::File::ReadOnly);
     const HighFive::File merged((dir / "merged.h5").string(),
@@ -96,12 +96,11 @@ TEST_CASE("EP sweep writer preserves the merged run layout", "[ep_writer]") {
 
 TEST_CASE("EP sweep writer propagates asynchronous write failures",
           "[ep_writer]") {
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_ep_writer_error.h5";
-    const auto cfg = writer_cfg();
+    const loki::test::TempDir dir("loki-ep-writer-error");
+    const auto path = dir / "ep_writer_error.h5";
+    const auto cfg  = writer_cfg();
     const std::vector<loki::algorithms::EPChunkConfig> chunks{
         {.cfg = cfg, .threshold_scheme = {}, .branching_pattern = {}}};
-    std::filesystem::remove(path);
     loki::pipelines::detail::EPSweepWriter writer(path, chunks, cfg, 0.1F,
                                                   "taylor", 0.1F);
     writer.submit(payload("duplicate", 0));
@@ -114,5 +113,4 @@ TEST_CASE("EP sweep writer propagates asynchronous write failures",
     // one.
     CHECK_FALSE(std::filesystem::exists(path));
     CHECK_THROWS_AS(writer.finish(0.0F), std::logic_error);
-    std::filesystem::remove(std::filesystem::path(path) += ".partial");
 }

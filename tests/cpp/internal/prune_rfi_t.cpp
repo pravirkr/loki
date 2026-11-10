@@ -25,6 +25,8 @@
 #include "lib/search/cands.hpp"
 #include "lib/utils/world_tree.hpp"
 
+#include "temp_dir.hpp"
+
 using loki::Exec;
 using loki::ParamLimit;
 using loki::SizeType;
@@ -36,6 +38,7 @@ using loki::search::HarvestBuffer;
 using loki::search::PruneResultWriter;
 using loki::search::PruneStatsCollection;
 using loki::search::PulsarSearchConfig;
+using loki::test::TempDir;
 
 namespace {
 
@@ -129,9 +132,8 @@ TEST_CASE("PruneStats RFI summaries", "[prune_rfi]") {
 }
 
 TEST_CASE("PruneResultWriter writes harvest groups", "[prune_rfi]") {
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_harvest_io_test.h5";
-    std::filesystem::remove(path);
+    const TempDir dir("loki-harvest-io-test");
+    const auto path = dir / "harvest_io_test.h5";
 
     const std::vector<float> thresholds(15, 1.5F);
     {
@@ -185,9 +187,8 @@ TEST_CASE("PruneResultWriter writes harvest groups", "[prune_rfi]") {
 
 TEST_CASE("PruneResultWriter writes param_sets from a wrapped circular view",
           "[prune_rfi]") {
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_param_sets_test.h5";
-    std::filesystem::remove(path);
+    const TempDir dir("loki-param-sets-test");
+    const auto path = dir / "param_sets_test.h5";
     const std::vector<float> thresholds(15, 1.5F);
     {
         PruneResultWriter writer(path, PruneResultWriter::Mode::kWrite);
@@ -223,7 +224,6 @@ TEST_CASE("PruneResultWriter writes param_sets from a wrapped circular view",
     std::vector<double> read_back(rows.size());
     ds.read_raw(read_back.data());
     REQUIRE(read_back == rows);
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("EPMultiPassTime executes with default RFI config", "[prune_rfi]") {
@@ -234,14 +234,12 @@ TEST_CASE("EPMultiPassTime executes with default RFI config", "[prune_rfi]") {
     const std::vector<SizeType> ref_segs{nsegments / 2};
     auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps(), 0);
 
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_rfi_cpp_default";
-    std::filesystem::create_directories(outdir);
+    const TempDir outdir("loki-ep-rfi-cpp-default");
 
     EPMultiPassTime ep(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
                        /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
                        /*batch_size=*/256, "taylor", /*show_progress=*/false);
-    REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir, "cpp_rfi"));
+    REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir.path(), "cpp_rfi"));
 }
 
 TEST_CASE("EPMultiPassTime full-grid mask empties the tree", "[prune_rfi]") {
@@ -257,17 +255,15 @@ TEST_CASE("EPMultiPassTime full-grid mask empties the tree", "[prune_rfi]") {
     rfi.pulsar_mask.push_back(
         ParamWindow{.f_lo = limits[1].min, .f_hi = limits[1].max});
 
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_rfi_cpp_mask";
-    std::filesystem::create_directories(outdir);
+    const TempDir outdir("loki-ep-rfi-cpp-mask");
 
     EPMultiPassTime ep(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
                        /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
                        /*batch_size=*/256, "taylor", /*show_progress=*/false,
                        rfi);
-    REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir, "cpp_mask"));
+    REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir.path(), "cpp_mask"));
 
-    const auto path = result_path(outdir, "cpp_mask", nsegments);
+    const auto path = result_path(outdir.path(), "cpp_mask", nsegments);
     REQUIRE(std::filesystem::exists(path));
     const HighFive::File file(path.string(), HighFive::File::ReadOnly);
     const auto runs = file.getGroup("runs");
@@ -289,17 +285,15 @@ TEST_CASE("EPMultiPassTime early harvest writes a harvest group",
     PruneRFIConfig rfi;
     rfi.harvest_scheme.assign(nsegments - 1, 0.0F);
 
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_rfi_cpp_harvest";
-    std::filesystem::create_directories(outdir);
+    const TempDir outdir("loki-ep-rfi-cpp-harvest");
 
     EPMultiPassTime ep(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
                        /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
                        /*batch_size=*/256, "taylor", /*show_progress=*/false,
                        rfi);
-    REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir, "cpp_harvest"));
+    REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir.path(), "cpp_harvest"));
 
-    const auto path = result_path(outdir, "cpp_harvest", nsegments);
+    const auto path = result_path(outdir.path(), "cpp_harvest", nsegments);
     REQUIRE(std::filesystem::exists(path));
     const HighFive::File file(path.string(), HighFive::File::ReadOnly);
     const auto runs = file.getGroup("runs");
@@ -352,17 +346,17 @@ TEST_CASE("EPMultiPassTime with make_default_harvest_scheme runs cleanly",
     rfi.harvest_scheme = loki::algorithms::make_default_harvest_scheme(
         thresholds, /*min_level=*/10, /*offset=*/10.0F, /*min_snr=*/15.0F);
 
-    const auto outdir = std::filesystem::temp_directory_path() /
-                        "loki_ep_rfi_cpp_default_harvest";
-    std::filesystem::create_directories(outdir);
+    const TempDir outdir("loki-ep-rfi-cpp-default-harvest");
 
     EPMultiPassTime ep(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
                        /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
                        /*batch_size=*/256, "taylor", /*show_progress=*/false,
                        rfi);
-    REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir, "cpp_default_harvest"));
+    REQUIRE_NOTHROW(
+        ep.execute(ts_e, ts_v, outdir.path(), "cpp_default_harvest"));
 
-    const auto path = result_path(outdir, "cpp_default_harvest", nsegments);
+    const auto path =
+        result_path(outdir.path(), "cpp_default_harvest", nsegments);
     REQUIRE(std::filesystem::exists(path));
 }
 
@@ -375,15 +369,12 @@ TEST_CASE("EPMultiPass backend dispatch", "[prune][backend]") {
     auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps(), 99);
 
     SECTION("Exec::cpu") {
-        const auto outdir =
-            std::filesystem::temp_directory_path() / "loki_ep_backend_cpu";
-        std::filesystem::create_directories(outdir);
+        const TempDir outdir("loki-ep-backend-cpu");
         EPMultiPassTime ep(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
                            /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
                            /*batch_size=*/256, "taylor",
                            /*show_progress=*/false, {}, Exec::cpu(1));
-        REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir, "cpu_dispatch"));
-        std::filesystem::remove_all(outdir);
+        REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir.path(), "cpu_dispatch"));
     }
 
     SECTION("Exec::cuda availability check") {

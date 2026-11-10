@@ -18,6 +18,8 @@
 #include "loki/simulation/modulate.hpp"
 #include "loki/simulation/pulse.hpp"
 
+#include "temp_dir.hpp"
+
 #ifndef LOKI_APP_PATH
 #define LOKI_APP_PATH ""
 #endif
@@ -191,9 +193,7 @@ void run_cli_search(const std::filesystem::path& toml_path) {
 
 TEST_CASE("FFA CLI recovers injected pulsar in narrow search window",
           "[ffa][recovery][integration]") {
-    const auto base =
-        std::filesystem::temp_directory_path() / "loki_ffa_recovery_cli";
-    std::filesystem::create_directories(base);
+    const loki::test::TempDir base("loki-ffa-recovery-cli");
 
     const auto spin_ts  = base / "spin.tim";
     const auto accel_ts = base / "accel.tim";
@@ -220,7 +220,6 @@ TEST_CASE("FFA CLI recovers injected pulsar in narrow search window",
         const auto result_h5 = outdir / (prefix + "_ffa_results.h5");
 
         std::filesystem::create_directories(outdir);
-        std::filesystem::remove(result_h5);
 
         write_ffa_toml(toml, case_def.ts_path, outdir, prefix,
                        case_def.use_fourier, case_def.search_accel, 99.95,
@@ -245,7 +244,6 @@ TEST_CASE("FFA CLI recovers injected pulsar in narrow search window",
         const auto prefix    = std::string("offband");
         const auto result_h5 = outdir / "offband_ffa_results.h5";
         std::filesystem::create_directories(outdir);
-        std::filesystem::remove(result_h5);
         write_ffa_toml(toml, spin_ts, outdir, prefix, /*use_fourier=*/true,
                        /*search_accel=*/false, 50.0, 50.1);
         run_cli_search(toml);
@@ -253,6 +251,4 @@ TEST_CASE("FFA CLI recovers injected pulsar in narrow search window",
         INFO("offband peak S/N: " << peak);
         REQUIRE(peak < kRecoverSnrMin);
     }
-
-    std::filesystem::remove_all(base);
 }

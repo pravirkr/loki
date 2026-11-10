@@ -13,6 +13,8 @@
 #include "loki/io/preprocess.hpp"
 #include "loki/search/configs.hpp"
 
+#include "temp_dir.hpp"
+
 namespace {
 
 /// A complete EP document. Each part is spliced into its table, so a test can
@@ -289,13 +291,11 @@ TEST_CASE("The default EP template requires a physical acceleration range",
 
 TEST_CASE("EPTomlConfig::write_default writes a document that loads",
           "[config][ep]") {
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_ep_config_t.toml";
+    const loki::test::TempDir dir("loki-ep-config");
+    const auto path = dir / "ep_config.toml";
     loki::search::EPTomlConfig::write_default(path);
     const auto cfg = loki::search::EPTomlConfig::load(path);
     REQUIRE_THROWS_AS(cfg.to_ep_search_config(), std::invalid_argument);
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
 }
 
 TEST_CASE("EP threshold simulation has an independent target SNR",
@@ -459,10 +459,8 @@ TEST_CASE("EPSearchConfig TOML helpers round-trip", "[config][ep]") {
     REQUIRE(ep_cfg.get_nbins() == 32U);
     REQUIRE(ep_cfg.get_bseg_ffa() == 8192U);
 
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_ep_search_cfg_t.toml";
+    const loki::test::TempDir dir("loki-ep-search-cfg");
+    const auto path = dir / "ep_search_cfg.toml";
     loki::search::EPSearchConfig::write_default_toml(path);
     REQUIRE(std::filesystem::exists(path));
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
 }

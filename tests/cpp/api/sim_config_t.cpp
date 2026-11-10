@@ -10,6 +10,8 @@
 
 #include "loki/simulation/configs.hpp"
 
+#include "temp_dir.hpp"
+
 namespace {
 
 using loki::simulation::SimulateTomlConfig;
@@ -143,8 +145,8 @@ TEST_CASE("SimulateTomlConfig default document loads", "[config][simulate]") {
     CHECK(cfg.nsamps == 2097152);
     CHECK(cfg.format == "tim");
 
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_sim_config_t.toml";
+    const loki::test::TempDir dir("loki-sim-config");
+    const auto path = dir / "sim_config.toml";
     SimulateTomlConfig::write_default(path);
     const auto loaded = SimulateTomlConfig::load(path);
     CHECK(loaded.period == cfg.period);
@@ -166,8 +168,8 @@ TEST_CASE("SimulateTomlConfig suggests the key a typo meant",
 
 TEST_CASE("SimulateTomlConfig load names the file of an error",
           "[config][simulate]") {
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_sim_config_bad_t.toml";
+    const loki::test::TempDir dir("loki-sim-config-bad");
+    const auto path = dir / "sim_config_bad.toml";
     {
         std::ofstream file(path);
         file << "[signal]\nsnr = \"high\"\n";
@@ -181,7 +183,6 @@ TEST_CASE("SimulateTomlConfig load names the file of an error",
                        Catch::Matchers::ContainsSubstring(
                            "signal.snr must be a number"));
     }
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("SimulateTomlConfig validate names the key and flag",

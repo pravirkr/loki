@@ -32,6 +32,8 @@
 #include "lib/detection/thresholds_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
 
+#include "temp_dir.hpp"
+
 using loki::Backend;
 using loki::ComplexType;
 using loki::ComplexTypeCUDA;
@@ -311,15 +313,14 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
             [&results](loki::pipelines::detail::EPResultPayload result) {
                 results.push_back(std::move(result));
             }};
-    const auto outdir =
-        std::filesystem::temp_directory_path() /
-        (std::is_same_v<TestType, ComplexTypeCUDA> ? "loki_ep_group_fourier"
-                                                   : "loki_ep_group_time");
+    const loki::test::TempDir outdir(std::is_same_v<TestType, ComplexTypeCUDA>
+                                         ? "loki-ep-group-fourier"
+                                         : "loki-ep-group-time");
     const std::vector<float> thresholds(nsegments - 1, 100.0F);
     for (const auto* cfg : {&larger, &smaller, &larger}) {
         loki::algorithms::EPMultiPassCudaCore<TestType> core(
             pipeline, *cfg, thresholds, 1, std::nullopt, {}, capacity, kBatch);
-        core.execute_device(outdir, "chunk");
+        core.execute_device(outdir.path(), "chunk");
         const auto initial = results.back().stats.get_stats(0);
         REQUIRE(initial.has_value());
         const loki::plans::FFAPlan<HostFoldT> chunk_plan(*cfg);
@@ -330,7 +331,6 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
     CHECK(ffa.get_brute_table_bytes() == table_bytes);
     CHECK(thrust::raw_pointer_cast(ffa.bf_freqs_d.data()) == freqs_ptr);
     CHECK(thrust::raw_pointer_cast(ffa.bf_phase_map_d.data()) == map_ptr);
-    std::filesystem::remove_all(outdir);
 }
 
 TEST_CASE("CUDA threshold pools are allocated by run() only",
