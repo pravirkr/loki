@@ -6,17 +6,16 @@
 
 #include "lib/search/cands.hpp"
 
+#include "temp_dir.hpp"
+
 using loki::search::FFAResultMetadata;
 using loki::search::FFAResultWriter;
 
 TEST_CASE("FFAResultWriter creates datasets and completes atomically",
           "[ffa][hdf5]") {
-    const auto dir  = std::filesystem::temp_directory_path();
+    const loki::test::TempDir dir("loki-ffa-writer");
     const auto path = dir / "loki_ffa_writer_zero.h5";
     const auto tmp  = std::filesystem::path(path.string() + ".tmp");
-
-    std::filesystem::remove(path);
-    std::filesystem::remove(tmp);
 
     FFAResultWriter writer(path, FFAResultWriter::Mode::kWrite);
     FFAResultMetadata meta;
@@ -51,6 +50,4 @@ TEST_CASE("FFAResultWriter creates datasets and completes atomically",
     int complete = 0;
     file.getAttribute("complete").read(complete);
     REQUIRE(complete == 1);
-
-    std::filesystem::remove(path);
 }

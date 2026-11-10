@@ -19,6 +19,8 @@
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 #include "loki/search/configs.hpp"
 
+#include "temp_dir.hpp"
+
 using Catch::Approx;
 using loki::Backend;
 using loki::Exec;
@@ -141,8 +143,8 @@ TEST_CASE("FFAFreqSweep CUDA matches the CPU sweep across regions",
         }
     }
 
-    const auto outdir = std::filesystem::temp_directory_path();
-    const auto run    = [&](Exec exec, const std::string& prefix) {
+    const loki::test::TempDir outdir("loki-ffa-sweep-parity");
+    const auto run = [&](Exec exec, const std::string& prefix) {
         const PulsarSearchConfig cfg(
             kNsamps, kTsamp, /*nbins=*/64, /*eta=*/1.0, limits,
             /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/true,
@@ -152,10 +154,9 @@ TEST_CASE("FFAFreqSweep CUDA matches the CPU sweep across regions",
             /*nsegments=*/std::nullopt, /*snr_min=*/3.0,
             /*max_passing_candidates=*/1U << 24U);
         FFAFreqSweep sweep(cfg, /*show_progress=*/false, exec);
-        sweep.execute(ts_e, ts_v, outdir, prefix);
+        sweep.execute(ts_e, ts_v, outdir.path(), prefix);
         const auto path = outdir / (prefix + "_ffa_results.h5");
         auto results    = read_results(path);
-        std::filesystem::remove(path);
         return results;
     };
 

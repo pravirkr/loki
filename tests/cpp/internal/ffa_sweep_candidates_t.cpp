@@ -20,6 +20,8 @@
 
 #include "lib/search/cands.hpp"
 
+#include "temp_dir.hpp"
+
 using loki::ParamLimit;
 using loki::SizeType;
 using loki::pipelines::FFAFreqSweep;
@@ -28,6 +30,7 @@ using loki::search::FFAResultMetadata;
 using loki::search::flush_candidates;
 using loki::search::PulsarSearchConfig;
 using loki::search::RegionDecode;
+using loki::test::TempDir;
 
 namespace {
 
@@ -207,8 +210,8 @@ TEST_CASE("CandidateBuffer tracks capacity and rejects overfilling",
 
 TEST_CASE("Flushing on overflow yields the same file as one final flush",
           "[ffa_sweep_candidates]") {
-    const auto table       = make_decode_table();
-    const auto tmp         = std::filesystem::temp_directory_path();
+    const auto table = make_decode_table();
+    const TempDir tmp("loki-cands-flush");
     const auto path_single = tmp / "loki_cands_single.h5";
     const auto path_many   = tmp / "loki_cands_many.h5";
 
@@ -226,15 +229,12 @@ TEST_CASE("Flushing on overflow yields the same file as one final flush",
     REQUIRE(single.snr.size() == total);
     REQUIRE(single.snr == many.snr);
     REQUIRE(single.param_sets == many.param_sets);
-
-    std::filesystem::remove(path_single);
-    std::filesystem::remove(path_many);
 }
 
 TEST_CASE("Bulk slice appends survive a capacity smaller than a chunk",
           "[ffa_sweep_candidates]") {
-    const auto table     = make_decode_table();
-    const auto tmp       = std::filesystem::temp_directory_path();
+    const auto table = make_decode_table();
+    const TempDir tmp("loki-cands-bulk");
     const auto path_ref  = tmp / "loki_cands_bulk_ref.h5";
     const auto path_tiny = tmp / "loki_cands_bulk_tiny.h5";
 
@@ -251,9 +251,6 @@ TEST_CASE("Bulk slice appends survive a capacity smaller than a chunk",
     REQUIRE(bulk.snr.size() == total);
     REQUIRE(bulk.snr == reference.snr);
     REQUIRE(bulk.param_sets == reference.param_sets);
-
-    std::filesystem::remove(path_ref);
-    std::filesystem::remove(path_tiny);
 }
 
 TEST_CASE("A real multi-chunk sweep is unaffected by accumulator capacity",
@@ -295,8 +292,8 @@ TEST_CASE("A real multi-chunk sweep is unaffected by accumulator capacity",
             /*nsegments=*/std::nullopt, /*snr_min=*/1.0,
             max_passing_candidates);
         FFAFreqSweep sweep(cfg, /*show_progress=*/false);
-        const auto outdir = std::filesystem::temp_directory_path();
-        sweep.execute(ts_e, ts_v, outdir, prefix);
+        const TempDir outdir("loki-sweep-capacity");
+        sweep.execute(ts_e, ts_v, outdir.path(), prefix);
         return read_results(outdir / (prefix + "_ffa_results.h5"));
     };
 
@@ -315,17 +312,13 @@ TEST_CASE("A real multi-chunk sweep is unaffected by accumulator capacity",
         static_cast<SizeType>(std::distance(single.snr.begin(), best));
     const double best_f0 = single.param_sets[best_row];
     REQUIRE(std::abs(best_f0 - kInjectedF0) < 1.0);
-
-    const auto tmp = std::filesystem::temp_directory_path();
-    std::filesystem::remove(tmp / "loki_sweep_single_ffa_results.h5");
-    std::filesystem::remove(tmp / "loki_sweep_many_ffa_results.h5");
 }
 
 TEST_CASE("Candidates decode against their own chunk's width set",
           "[ffa_sweep_candidates]") {
     const auto table = make_decode_table();
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_cands_decode.h5";
+    const TempDir dir("loki-cands-decode");
+    const auto path = dir / "cands_decode.h5";
 
     SizeType total = 0;
     for (const auto& dec : table) {
@@ -347,8 +340,6 @@ TEST_CASE("Candidates decode against their own chunk's width set",
         REQUIRE(written.width[offset + s] == expected_width);
         REQUIRE(written.nbins[offset + s] == narrow.nbins);
     }
-
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("Non-power-of-2 accelerated FFAFreqSweep shifts candidates to true "
@@ -399,12 +390,11 @@ TEST_CASE("Non-power-of-2 accelerated FFAFreqSweep shifts candidates to true "
         /*snr_min=*/8.0, /*max_passing_candidates=*/100000);
 
     FFAFreqSweep sweep(cfg, /*show_progress=*/false);
-    const auto outdir        = std::filesystem::temp_directory_path();
+    const TempDir outdir("loki-np2-accel-midpoint");
     const std::string prefix = "loki_np2_accel_midpoint";
-    sweep.execute(ts_e, ts_v, outdir, prefix);
+    sweep.execute(ts_e, ts_v, outdir.path(), prefix);
     const auto h5_path = outdir / (prefix + "_ffa_results.h5");
     const auto res     = read_results(h5_path);
-    std::filesystem::remove(h5_path);
 
     REQUIRE_FALSE(res.snr.empty());
     const auto best_it = std::ranges::max_element(res.snr);
