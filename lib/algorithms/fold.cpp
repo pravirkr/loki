@@ -12,6 +12,8 @@
 
 #include "lib/algorithms/fold_engine.hpp"
 #include "lib/common/dispatch.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
 
 namespace loki::algorithms {
 
@@ -190,6 +192,25 @@ std::vector<FoldType> compute_brute_fold(std::span<const float> ts_e,
     std::vector<FoldType> fold(bf.get_fold_size(), FoldType{});
     bf.execute(ts_e, ts_v, std::span<FoldType>(fold));
     return fold;
+}
+
+std::vector<float> fold_phase(std::span<const float> ts_e,
+                              std::span<const float> ts_v,
+                              std::span<const double> phase,
+                              SizeType nbins) {
+    error_check::check_equal(ts_v.size(), ts_e.size(),
+                             "fold_phase: ts_e and ts_v sizes differ");
+    error_check::check_equal(phase.size(), ts_e.size(),
+                             "fold_phase: one phase per sample is needed");
+    error_check::check_greater_equal(nbins, 1,
+                                     "fold_phase: nbins must be positive");
+    std::vector<double> sums(2 * nbins, 0.0);
+    for (SizeType i = 0; i < ts_e.size(); ++i) {
+        const auto bin = psr_utils::get_phase_idx_uint(phase[i], 1.0, nbins);
+        sums[bin] += static_cast<double>(ts_e[i]);
+        sums[nbins + bin] += static_cast<double>(ts_v[i]);
+    }
+    return {sums.begin(), sums.end()};
 }
 
 // Explicit instantiation

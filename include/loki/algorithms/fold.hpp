@@ -107,4 +107,18 @@ std::vector<FoldType> compute_brute_fold(std::span<const float> ts_e,
                                          double t_ref = 0.0,
                                          Exec exec    = {});
 
+/**
+ * @brief Fold a weighted time series at a phase per sample (CPU).
+ *
+ * Sample i goes to the bin nearest frac(phase[i]) * nbins, as in the brute
+ * fold, with the phases in cycles (e.g. from psr_utils::leaf_phase). The sums
+ * are accumulated in double.
+ *
+ * @return [2, nbins]: the sums of @p ts_e, then of @p ts_v, per bin.
+ */
+std::vector<float> fold_phase(std::span<const float> ts_e,
+                              std::span<const float> ts_v,
+                              std::span<const double> phase,
+                              SizeType nbins);
+
 } // namespace loki::algorithms
