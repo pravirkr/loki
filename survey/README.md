@@ -48,6 +48,13 @@ the unit, the science hash, the input and array hashes and the code versions.
 loki's full result file is kept in `out/raw/` for a fixed sample of units
 (`[output] raw_fraction`).
 
+Within a unit, loki groups the trials above `snr_min` into candidates, as
+`[candidates]` in `survey.toml` says. On real data a search can leave
+millions of trials, more than loki can group in its candidate memory
+(`[unit] candidate_memory_gb`, reserved within the unit's loki budget). Set
+`max_per_cell` and `cell_log_width` to keep only the strongest trials of
+each frequency cell.
+
 The local executor packs units within the site's memory and threads. A unit
 above its memory reservation is stopped and run again with more memory, up
 to `[retry] oom_retries` times. A unit that crashes is reported with the end

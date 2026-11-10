@@ -8,6 +8,7 @@ import pytest
 
 from loki_survey.config import (
     ConfigError,
+    Resolved,
     analysis_sha256,
     load_resolved,
     parse_analysis,
@@ -17,6 +18,7 @@ from loki_survey.config import (
     resolved_dict,
     science_sha256,
 )
+from loki_survey.plan import candidate_options
 from loki_survey.rundir import RunDir, atomic_write_json
 
 if TYPE_CHECKING:
@@ -82,6 +84,7 @@ def test_hash_ignores_formatting_but_not_science() -> None:
         ('kind = "ep"', 'kind = "ffa"\nsegments = 8', "EP settings"),
         ("jerk = [-1.0, 1.0], ", "", "'jerk' is required"),
         ("snr_min = 7.0", "snr_min = 7.0\nsnr_mn = 6.0", "unknown keys"),
+        ('name = "t"', 'name = "t"\n[candidates]\nmemory_gb = 2.0', "set by loki"),
     ],
 )
 def test_invalid_survey(old: str, new: str, message: str) -> None:
@@ -113,6 +116,55 @@ threads = 2
     )
     with pytest.raises(ConfigError, match="exceeds"):
         parse_site(doc)
+
+
+SITE = """
+[executor]
+kind = "local"
+max_memory_gb = 8.0
+max_threads = 4
+[unit]
+memory_gb = 4.0
+overhead_gb = 1.0
+threads = 2
+"""
+
+
+def test_candidate_memory_is_reserved_within_the_loki_budget() -> None:
+    site = parse_site(tomllib.loads(SITE + "candidate_memory_gb = 2.0\n"))
+    assert site.candidate_memory_gb == 2.0
+    assert parse_site(tomllib.loads(SITE)).candidate_memory_gb is None
+    with pytest.raises(ConfigError, match="candidate_memory_gb must be below"):
+        parse_site(tomllib.loads(SITE + "candidate_memory_gb = 3.0\n"))
+
+
+@pytest.mark.parametrize(
+    ("table", "message"),
+    [
+        ("max_per_cel = 1", "no candidate option 'max_per_cel'"),
+        ("max_per_cell = 1", "cell_log_width"),
+        ('max_per_cell = "one"', r"\[candidates\]\.max_per_cell"),
+    ],
+)
+def test_candidate_options_are_loki_options(table: str, message: str) -> None:
+    s = survey(SURVEY + f"[candidates]\n{table}\n")
+    resolved = Resolved(
+        survey=s,
+        site=parse_site(tomllib.loads(SITE)),
+        science_sha256=science_sha256(s),
+    )
+    with pytest.raises(ConfigError, match=message):
+        candidate_options(resolved)
+
+
+def test_candidate_options_take_both_files() -> None:
+    s = survey(SURVEY + "[candidates]\nmax_per_cell = 1\ncell_log_width = 2e-4\n")
+    site = parse_site(tomllib.loads(SITE + "candidate_memory_gb = 2.0\n"))
+    options = candidate_options(Resolved(s, site, science_sha256(s)))
+    assert (options.max_per_cell, options.cell_log_width) == (1, 2e-4)
+    assert options.memory_gb == 2.0
+    # The candidate step is science: it changes what a unit writes.
+    assert science_sha256(s) != science_sha256(survey())
 
 
 def test_analysis_has_its_own_hash() -> None:

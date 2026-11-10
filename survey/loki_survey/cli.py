@@ -43,12 +43,13 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     run = RunDir.at(args.rundir)
     resolved = resolve(run)
-    buffer_gb = candidate_options().memory_gb
+    buffer_gb = candidate_options(resolved).memory_gb
     if resolved.site.loki_memory_gb <= buffer_gb:
         msg = (
             f"{run.site_toml} [unit]: memory_gb - overhead_gb leaves loki "
             f"{resolved.site.loki_memory_gb:g} GB, which must be above its "
-            f"{buffer_gb:g} GB candidate buffer; raise memory_gb or lower overhead_gb"
+            f"{buffer_gb:g} GB candidate buffer; raise memory_gb, lower "
+            "overhead_gb or set candidate_memory_gb"
         )
         raise ConfigError(msg)
     if run.resolved_json.is_file():

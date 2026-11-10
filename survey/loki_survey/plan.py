@@ -101,6 +101,8 @@ def plan_key(resolved: Resolved, unit: Unit) -> str:
         "snr_min": survey.snr_min,
         "min_pd": survey.min_pd,
         "loki_memory_gb": site.loki_memory_gb,
+        # The plan is sized within loki's budget less the candidate memory.
+        "candidate_memory_gb": site.candidate_memory_gb,
         "backend": site.backend,
     }
     return sha256_text(canonical_json(geometry))[:16]
@@ -192,15 +194,32 @@ def search_config(resolved: Resolved, unit: Unit) -> Any:  # noqa: ANN401
     return libloki.configs.FFASearchConfig(**kwargs)
 
 
-def candidate_options() -> Any:  # noqa: ANN401
-    """Loki's candidate options for every unit.
+def candidate_options(resolved: Resolved) -> Any:  # noqa: ANN401
+    """Loki's candidate options for every unit: survey.toml's [candidates].
 
     An EP plan is sized within the search's memory budget less the candidate
     memory, so the plan must be built with the same options the unit runs.
     """
     from loki import libloki  # noqa: PLC0415
 
-    return libloki.configs.CandidateOptions()
+    options = libloki.configs.CandidateOptions()
+    for key, value in resolved.survey.candidates.items():
+        if not hasattr(options, key) or key.startswith("_"):
+            msg = f"[candidates]: loki has no candidate option '{key}'"
+            raise ConfigError(msg)
+        try:
+            setattr(options, key, value)
+        except TypeError as exc:
+            msg = f"[candidates].{key}: {exc}"
+            raise ConfigError(msg) from exc
+    if resolved.site.candidate_memory_gb is not None:
+        options.memory_gb = resolved.site.candidate_memory_gb
+    try:
+        options.validate()
+    except ValueError as exc:
+        msg = f"[candidates]: {exc}"
+        raise ConfigError(msg) from exc
+    return options
 
 
 def plan_cache_path(run: RunDir, key: str) -> Path:
@@ -224,6 +243,7 @@ def build_ep_plan(run: RunDir, resolved: Resolved, unit: Unit) -> dict[str, Any]
         record = read_json(record_path)
         if record["sha256"] == sha256_file(cache):
             return record
+    candidates = candidate_options(resolved)
     tmp = cache.with_name(f".{cache.name}.{os.getpid()}.building")
     tmp.unlink(missing_ok=True)
     try:
@@ -236,7 +256,7 @@ def build_ep_plan(run: RunDir, resolved: Resolved, unit: Unit) -> dict[str, Any]
             ref_segs=unit.ref_segs,
             backend=resolved.site.backend,
             device=resolved.site.device,
-            candidates=candidate_options(),
+            candidates=candidates,
         )
     except (RuntimeError, ValueError) as exc:
         # Most often the unit's budget is too small for loki's own reserves.

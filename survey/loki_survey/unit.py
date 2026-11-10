@@ -91,7 +91,7 @@ def search(run: RunDir, resolved: Resolved, unit: Unit, workdir: Path) -> Path:
     ts_e = np.ascontiguousarray(ts_e[: unit.nsamps])
     ts_v = np.ascontiguousarray(ts_v[: unit.nsamps])
     cfg = search_config(resolved, unit)
-    candidates = candidate_options()
+    candidates = candidate_options(resolved)
     obs = observation(manifest)
     if unit.kind == "ffa":
         sweep = libloki.ffa.FFAFreqSweep(

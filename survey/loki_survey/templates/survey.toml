@@ -64,6 +64,16 @@ limits = { accel = [-50.0, 50.0] }   # m/s^2
 # order = "crackle"
 # orbit = { p_orb_min_s = 10800.0, m_c_max = 0.5, m_p_min = 1.2 }
 
+# loki's candidate step in each unit (docs/candidates.md in loki): any field
+# of libloki.configs.CandidateOptions, except memory_gb ([unit] in site.toml).
+# A search can leave millions of trials above snr_min, too many for loki to
+# group: max_per_cell keeps only the strongest trials of each frequency cell,
+# cell_log_width wide in ln(frequency), which has no default.
+[candidates]
+# max_per_cell = 0         # loki's default: keep every trial
+# cell_log_width = <width in ln(frequency)>; required with max_per_cell
+# grouping = "transitive"  # loki's default; or "anchored"
+
 [output]
 # Fraction of units that keep loki's full result file (a fixed sample).
 raw_fraction = 0.0

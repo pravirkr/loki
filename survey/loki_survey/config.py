@@ -108,6 +108,7 @@ class Survey:
     truncate: str
     masks: dict[str, list[list[float]]]
     preprocess: dict[str, Any]
+    candidates: dict[str, Any]
     snr_min: float
     eta: float
     min_pd: float
@@ -239,12 +240,33 @@ class Site:
     host_failures: int = DEFAULT_HOST_FAILURES
     stall_min: float = DEFAULT_STALL_MIN
     timeout_splits: int = DEFAULT_TIMEOUT_SPLITS
+    # loki's CandidateOptions.memory_gb when None.
+    candidate_memory_gb: float | None = None
     batch: Batch | None = None
 
     @property
     def loki_memory_gb(self) -> float:
         """The memory budget loki plans a unit's search within."""
         return self.unit_memory_gb - self.unit_overhead_gb
+
+
+# CandidateOptions fields loki-survey sets itself: memory_gb comes from
+# site.toml, the unit's work directory holds loki's scratch files, and the
+# later stages need loki's candidate tables.
+SITE_CANDIDATE_OPTIONS = ("enabled", "memory_gb", "temporary_directory")
+
+
+def _candidates(doc: dict[str, Any], where: str) -> dict[str, Any]:
+    """Return the [candidates] table: loki's CandidateOptions, checked at check."""
+    table = dict(_table(doc, "candidates", where))
+    reserved = sorted(set(table) & set(SITE_CANDIDATE_OPTIONS))
+    if reserved:
+        msg = (
+            f"{where} [candidates]: {reserved} are set by loki-survey "
+            "(memory_gb: [unit].candidate_memory_gb in site.toml)"
+        )
+        raise ConfigError(msg)
+    return table
 
 
 def _table(doc: dict[str, Any], key: str, where: str) -> dict[str, Any]:
@@ -420,6 +442,7 @@ def parse_survey(doc: dict[str, Any], where: str = "survey.toml") -> Survey:
             "survey",
             "data",
             "preprocess",
+            "candidates",
             "search",
             "output",
             "collect",
@@ -489,6 +512,7 @@ def parse_survey(doc: dict[str, Any], where: str = "survey.toml") -> Survey:
         truncate=truncate,
         masks=masks,
         preprocess=dict(_table(doc, "preprocess", where)),
+        candidates=_candidates(doc, where),
         snr_min=float(
             _positive(
                 _require(search, "snr_min", f"{where} [search]"),
@@ -694,7 +718,14 @@ def parse_site(doc: dict[str, Any], where: str = "site.toml") -> Site:
     )
     _check_keys(
         unit,
-        {"memory_gb", "overhead_gb", "threads", "backend", "device"},
+        {
+            "memory_gb",
+            "overhead_gb",
+            "candidate_memory_gb",
+            "threads",
+            "backend",
+            "device",
+        },
         f"{where} [unit]",
     )
     _check_keys(
@@ -820,6 +851,16 @@ def parse_site(doc: dict[str, Any], where: str = "site.toml") -> Site:
             DEFAULT_TIMEOUT_SPLITS,
             f"{where} [retry]",
         ),
+        candidate_memory_gb=(
+            float(
+                _positive(
+                    unit["candidate_memory_gb"],
+                    f"{where} [unit].candidate_memory_gb",
+                ),
+            )
+            if "candidate_memory_gb" in unit
+            else None
+        ),
         batch=batch,
     )
     if site.oom_factor <= 1.0:
@@ -827,6 +868,15 @@ def parse_site(doc: dict[str, Any], where: str = "site.toml") -> Site:
         raise ConfigError(msg)
     if site.unit_overhead_gb >= site.unit_memory_gb:
         msg = f"{where} [unit]: overhead_gb must be below memory_gb"
+        raise ConfigError(msg)
+    if (
+        site.candidate_memory_gb is not None
+        and site.candidate_memory_gb >= site.loki_memory_gb
+    ):
+        msg = (
+            f"{where} [unit]: candidate_memory_gb must be below memory_gb - "
+            f"overhead_gb ({site.loki_memory_gb:g} GB), which it is reserved within"
+        )
         raise ConfigError(msg)
     if site.unit_memory_gb > site.max_memory_gb:
         msg = f"{where}: [unit].memory_gb exceeds [executor].max_memory_gb"
