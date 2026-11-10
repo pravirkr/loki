@@ -4,13 +4,21 @@ Run a loki pulsar survey end to end: from dedispersed time series to a
 candidate list, on a laptop, a single server or an LSF or Slurm cluster.
 
 ```bash
-pip install ./survey            # needs loki installed
+pip install .                   # loki itself, from a clone of its repository
+pip install ./survey
+loki-survey tutorial demo       # a small simulated survey: see docs/tutorial.md
+loki-survey run demo
 loki-survey new myrun           # writes myrun/survey.toml and myrun/site.toml
 # edit both files, put the series where survey.toml points
 loki-survey run myrun           # check, prep, plan, submit; then collect,
-                                # evaluate and report once every unit is done
+                                # evaluate, fold and report once every unit is done
 loki-survey status myrun
 ```
+
+[docs/tutorial.md](docs/tutorial.md) walks through a run on simulated data,
+and [docs/outputs.md](docs/outputs.md) describes every file a run writes.
+`loki-survey new` writes templates of both configuration files with every
+key explained.
 
 ## Stages
 
@@ -30,11 +38,12 @@ loki-survey status myrun
 Each stage does only what is missing, so rerunning `loki-survey run` after an
 interruption picks up where it stopped.
 
-- `survey.toml` holds the science: the series, the frequency regions and the
-  search boxes. `check` refuses to change it once units have finished; start a
-  new run directory instead. Its `[collect]` and `[evaluate]` tables change no
-  search and have their own hash, so they may change at any time; every
-  analysis output records the hash it was made with.
+- `survey.toml` holds the science: the series, the frequency regions, the
+  search boxes and loki's `[candidates]` options. `check` refuses to change it
+  once units have finished; start a new run directory instead. Its
+  `[collect]`, `[evaluate]` and `[fold]` tables change no search and have
+  their own hash, so they may change at any time; every analysis output
+  records the hash it was made with.
 - `site.toml` holds the machine: memory, threads, and the executor. It can
   change between runs without invalidating results.
 
@@ -155,6 +164,10 @@ catalogue, on this machine and through a fake LSF. `test_collect.py`,
 `test_evaluate.py` and `test_report.py` use unit outputs written by hand
 (`synthetic.py`): a pulsar over three DMs and two boxes, interference, a
 harmonic and a lone candidate.
+`test_tutorial.py` runs the tutorial survey and checks that each source is
+labelled as it should be. `test_unit_candidates.py` covers loki's candidate
+step in a unit: the per-cell cap, and publishing loki's spool again after a
+failure.
 `test_batch_executor.py` drives each failure class through
 `fake_scheduler.py`, a stand-in for LSF and Slurm. Units run in subprocesses
 with `LOKI_SURVEY_TEST_PYTHON` (default: the Python running the tests).

@@ -48,6 +48,8 @@ name = "accel"
 kind = "ffa"
 order = "accel"
 limits = { accel = [-50.0, 50.0] }   # m/s^2
+# regions = ["high"]   # the regions this box searches; default: all of them
+# use_fourier = true   # loki's default (PulsarSearchConfig.use_fourier)
 
 # EP boxes may also set the pruning segments (loki's defaults otherwise):
 # segments = 8        # FFA segments the tree prunes over (loki's nsegments),
