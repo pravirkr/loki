@@ -37,6 +37,21 @@ def cmd_new(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tutorial(args: argparse.Namespace) -> int:
+    from loki_survey.tutorial import SOURCES, write_tutorial  # noqa: PLC0415
+
+    root = args.rundir
+    written = write_tutorial(root, seed=args.seed)
+    print(f"wrote {len(written)} simulated series in {root / 'data'}, and")
+    print(f"  {root / 'survey.toml'}, {root / 'site.toml'}, {root / 'catalogue.csv'}")
+    for source in SOURCES:
+        listed = "catalogued" if source.catalogued else "not catalogued"
+        print(f"  {source.name}: {source.freq} Hz at DM {source.dm:g}, {listed}")
+    print(f"Run it: loki-survey run {root}")
+    print(f"Then open {root / 'report' / 'index.html'}")
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     from loki_survey.plan import candidate_options  # noqa: PLC0415
     from loki_survey.unit import versions  # noqa: PLC0415
@@ -362,6 +377,8 @@ def build_parser() -> argparse.ArgumentParser:
         return p
 
     add("new", cmd_new, "write template survey.toml and site.toml")
+    p = add("tutorial", cmd_tutorial, "write a small simulated survey to run")
+    p.add_argument("--seed", type=int, default=1, help="the noise seed")
     add("check", cmd_check, "validate the config and write resolved.json")
     p = add("prep", cmd_prep, "read, normalise, mask and downsample each series")
     p.add_argument("--threads", type=int, default=None)
@@ -415,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         SchedulerError,
         SubmitError,
         IncompleteRunError,
+        FileExistsError,
     ) as exc:
         print(f"loki-survey: {exc}", file=sys.stderr)
         return 2
