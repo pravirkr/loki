@@ -605,6 +605,7 @@ private:
             .n_leaves_masked   = stats.n_leaves_masked,
             .n_leaves_vetoed   = stats.n_leaves_vetoed,
             .n_harvested       = stats.n_harvested,
+            .n_overloads       = world_tree.get_n_overloads() - n_overloads,
         };
         // Write stats to log
         std::ofstream log(log_file, std::ios::app);
@@ -825,7 +826,8 @@ private:
                 current_threshold = world_tree.add_batch_scattered(
                     prune_ws.branched_leaves, prune_ws.branched_folds,
                     prune_ws.branched_scores, prune_ws.branched_indices,
-                    current_threshold, n_leaves_passing);
+                    current_threshold, n_leaves_passing,
+                    m_cfg.get_overflow_keep_fraction());
             }
             stats.batch_timers["batch_add"] += timer.stop();
             // Notify the buffer that a batch of the old suggestions has been

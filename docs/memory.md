@@ -462,7 +462,16 @@ max_sugg = round_up(live + batch_size * branch_max + 1, 1024)
 The margin covers simulation error only. Data that departs from the noise
 model (RFI, a bright source) can exceed it; the world tree then trims
 survivors at batch boundaries (a warning, and a loss of sensitivity). It
-never allocates more: memory stays within the plan. Logs and the CLI print
+never allocates more: memory stays within the plan. Each overflowing batch
+raises the stage's threshold so that at most `overflow_keep_fraction` of the
+pool (the stage's survivors so far and the batch) stays, and never more than
+fits; the raised threshold holds for the rest of the stage. The default, 0.5,
+keeps the upper half of the pool. A larger fraction keeps more of the best
+survivors but leaves less room, so the next overflow comes sooner: a trim
+costs one pass over the tree, and the trim work per surviving leaf grows like
+1 / (1 - fraction). At 1 the tree stays full after a trim and nearly every
+later batch trims it again. `level_stats.n_overloads` counts the overflowing
+batches of each stage. Logs and the CLI print
 `max_sugg` and the forecast populations as powers of two (`2^21.3`); the
 cache and the Python stats keep the exact counts.
 `max_passing_candidates` is an FFA output-buffer setting and does not control

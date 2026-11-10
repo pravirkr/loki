@@ -1,12 +1,16 @@
 #ifdef LOKI_ENABLE_CUDA
 #include "lib/cuda/world_tree_cuda.cuh"
 
+#include <algorithm>
 #include <cstdint>
+#include <numeric>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <thrust/copy.h>
@@ -44,6 +48,24 @@ template <typename T>
 std::vector<T> to_host(cuda::std::span<const T> view, SizeType n) {
     std::vector<T> out(n);
     thrust::copy_n(thrust::device_pointer_cast(view.data()), n, out.begin());
+    return out;
+}
+
+/// Scores of the live leaves of a tree that is not updating, read from
+/// physical slot @p start on, each checked against the first value of its
+/// leaf (the tests store a leaf's score there).
+template <typename T>
+std::vector<float> live_scores(const WorldTreeCUDA<T>& tree, SizeType start) {
+    const auto capacity = tree.get_capacity();
+    const auto stride   = tree.get_leaves_stride();
+    const auto scores   = to_host(tree.get_scores_span(), capacity);
+    const auto leaves   = to_host(tree.get_leaves_span(), capacity * stride);
+    std::vector<float> out(tree.get_size());
+    for (SizeType i = 0; i < out.size(); ++i) {
+        const auto slot = (start + i) % capacity;
+        out[i]          = scores[slot];
+        REQUIRE(leaves[slot * stride] == static_cast<double>(out[i]));
+    }
     return out;
 }
 
@@ -126,6 +148,8 @@ TEMPLATE_TEST_CASE("WorldTreeCUDA::add_initial takes the leading seeds of a "
 TEST_CASE(
     "WorldTreeCUDA overflow matches CPU and validate checks leaves stride",
     "[world_tree][cuda]") {
+    // The median rule: an overflow keeps at most half of the pool.
+    constexpr double kMedian = 0.5;
     loki::cuda_utils::CudaSetDeviceGuard const guard(0);
     constexpr SizeType kCapacity = 8;
     constexpr SizeType kNParams  = 1;
@@ -155,7 +179,7 @@ TEST_CASE(
                                  loki::cuda_utils::as_span(batch1_folds_d),
                                  loki::cuda_utils::as_span(batch1_scores_d),
                                  loki::cuda_utils::as_span(batch1_indices_d),
-                                 5.0F, 6, stream) == 5.0F);
+                                 5.0F, 6, kMedian, stream) == 5.0F);
     REQUIRE(tree.get_size() == 6);
 
     std::vector<double> batch2_leaves(4 * leaves_stride, 2.0);
@@ -171,10 +195,109 @@ TEST_CASE(
         loki::cuda_utils::as_span(batch2_leaves_d),
         loki::cuda_utils::as_span(batch2_folds_d),
         loki::cuda_utils::as_span(batch2_scores_d),
-        loki::cuda_utils::as_span(batch2_indices_d), 5.0F, 4, stream);
+        loki::cuda_utils::as_span(batch2_indices_d), 5.0F, 4, kMedian, stream);
     REQUIRE(new_thresh == exact_thresh);
     REQUIRE(tree.get_size() == 5);
 
     REQUIRE_NOTHROW(tree.validate(kCapacity, kNParams, kNBins, kBatch));
+}
+
+TEMPLATE_TEST_CASE("WorldTreeCUDA overflow keeps at most keep_fraction of the "
+                   "pool",
+                   "[world_tree][cuda]",
+                   float,
+                   ComplexTypeCUDA) {
+    // The pool and table of the CPU test (world_tree_t.cpp): 2 * kBatch
+    // candidates for kCapacity slots. The fraction ranks the lowest score
+    // that may stay; past rank kCapacity - 1 the top-k decides. 0.5 is the
+    // median of the pool.
+    const auto row = GENERATE(table<double, SizeType>({
+        {0.5, 40},
+        {0.75, 60},
+        {0.9, 63},
+        {1.0, 63},
+    }));
+
+    const double keep_fraction = std::get<0>(row);
+    const SizeType n_kept      = std::get<1>(row);
+    CAPTURE(keep_fraction);
+    // The scatter kernels read the device context, which a guard sets up.
+    const loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    constexpr SizeType kCapacity = 64;
+    constexpr SizeType kNParams  = 2;
+    constexpr SizeType kNBins    = 8;
+    constexpr SizeType kBatch    = 40;
+    constexpr SizeType kNSeeds   = 8;
+
+    WorldTreeCUDA<TestType> tree(kCapacity, kNParams, kNBins, kBatch);
+    const auto leaves_stride = tree.get_leaves_stride();
+    const auto folds_stride  = tree.get_folds_stride();
+    cudaStream_t stream      = nullptr;
+
+    // Two batches of kBatch leaves: the first holds the even scores, the
+    // second the odd ones, so the pool of both is 0, 1, ..., 2 * kBatch - 1.
+    // Each leaf stores its score as its first value.
+    std::vector<double> leaves;
+    std::vector<float> scores;
+    auto make_batch = [&](SizeType parity) {
+        leaves.assign(kBatch * leaves_stride, 0.0);
+        scores.resize(kBatch);
+        for (SizeType i = 0; i < kBatch; ++i) {
+            scores[i]                 = static_cast<float>((2 * i) + parity);
+            leaves[i * leaves_stride] = static_cast<double>(scores[i]);
+        }
+    };
+    const thrust::device_vector<TestType> folds_d(kBatch * folds_stride,
+                                                  make_value<TestType>(1));
+    std::vector<uint32_t> identity(kBatch);
+    std::iota(identity.begin(), identity.end(), uint32_t{0});
+    const thrust::device_vector<uint32_t> identity_d(identity);
+
+    // Consume every parent first, so the whole ring is free for the new level,
+    // which then starts at the read position.
+    make_batch(0);
+    thrust::device_vector<double> leaves_d(leaves);
+    thrust::device_vector<float> scores_d(scores);
+    tree.add_initial(loki::cuda_utils::as_span(leaves_d),
+                     loki::cuda_utils::as_span(folds_d),
+                     loki::cuda_utils::as_span(scores_d), kNSeeds, stream);
+    tree.prepare_in_place_update();
+    tree.consume_read(kNSeeds);
+    const auto start = tree.get_physical_start_idx();
+
+    // A batch that fits is stored whatever the fraction.
+    float threshold = tree.add_batch_scattered(
+        loki::cuda_utils::as_span(leaves_d), loki::cuda_utils::as_span(folds_d),
+        loki::cuda_utils::as_span(scores_d),
+        loki::cuda_utils::as_span(identity_d), 0.0F, kBatch, keep_fraction,
+        stream);
+    REQUIRE(threshold == 0.0F);
+    REQUIRE(tree.get_size() == kBatch);
+    REQUIRE(tree.overload_count() == 0);
+
+    // The pool is 0, 1, ..., 2 * kBatch - 1, so the n_kept highest stay.
+    const auto n_pool = 2 * kBatch;
+    make_batch(1);
+    leaves_d  = leaves;
+    scores_d  = scores;
+    threshold = tree.add_batch_scattered(
+        loki::cuda_utils::as_span(leaves_d), loki::cuda_utils::as_span(folds_d),
+        loki::cuda_utils::as_span(scores_d),
+        loki::cuda_utils::as_span(identity_d), threshold, kBatch, keep_fraction,
+        stream);
+    loki::cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                      "add_batch_scattered sync failed");
+    REQUIRE(tree.overload_count() == 1);
+    REQUIRE(threshold > static_cast<float>(n_pool - n_kept - 1));
+    REQUIRE(threshold <= static_cast<float>(n_pool - n_kept));
+    REQUIRE(tree.get_size() == n_kept);
+    tree.finalize_in_place_update();
+
+    auto kept = live_scores(tree, start);
+    std::sort(kept.begin(), kept.end());
+    std::vector<float> expected(n_kept);
+    std::iota(expected.begin(), expected.end(),
+              static_cast<float>(n_pool - n_kept));
+    REQUIRE(kept == expected);
 }
 #endif // LOKI_ENABLE_CUDA

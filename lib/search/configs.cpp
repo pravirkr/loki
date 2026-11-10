@@ -362,6 +362,8 @@ const toml_utils::Schema<EPTomlConfig>& ep_schema() {
                 [](auto& c) -> auto& { return c.validation_significance; }),
             field<E>("ep", "use_conservative_tile",
                      [](auto& c) -> auto& { return c.use_conservative_tile; }),
+            field<E>("ep", "overflow_keep_fraction",
+                     [](auto& c) -> auto& { return c.overflow_keep_fraction; }),
             field<E>("output", "plan_cache",
                      [](auto& c) -> auto& { return c.plan_cache; }),
             field<E>("output", "use_plan_cache",
@@ -1779,7 +1781,8 @@ public:
            double validation_significance,
            bool use_conservative_tile,
            SizeType nparams,
-           std::optional<double> target_snr)
+           std::optional<double> target_snr,
+           double overflow_keep_fraction)
         : m_prune_poly_order(prune_poly_order),
           m_p_orb_min(p_orb_min),
           m_m_c_max(m_c_max),
@@ -1791,10 +1794,17 @@ public:
           m_target_snr(target_snr.value_or(nparams <= 2   ? 8.5
                                            : nparams == 3 ? 9.2
                                            : nparams == 4 ? 9.8
-                                                          : 10.0)) {
+                                                          : 10.0)),
+          m_overflow_keep_fraction(overflow_keep_fraction) {
         if (!utils::is_finite(m_target_snr) || m_target_snr <= 0.0) {
             throw std::invalid_argument(
                 "target_snr must be finite and positive");
+        }
+        if (!utils::is_finite(m_overflow_keep_fraction) ||
+            m_overflow_keep_fraction <= 0.0 || m_overflow_keep_fraction > 1.0) {
+            throw std::invalid_argument(
+                fmt::format("overflow_keep_fraction must be in (0, 1] (got {})",
+                            m_overflow_keep_fraction));
         }
     }
 
@@ -1807,6 +1817,7 @@ public:
     bool m_use_conservative_tile;
     std::optional<double> m_target_snr_override;
     double m_target_snr;
+    double m_overflow_keep_fraction;
 
     double get_x_mass_const() const noexcept {
         constexpr double kSafety = 1.1;
@@ -1844,7 +1855,8 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                                double validation_significance,
                                bool use_conservative_tile,
                                bool use_boxcar_kadane,
-                               std::optional<double> target_snr)
+                               std::optional<double> target_snr,
+                               double overflow_keep_fraction)
     : FFASearchConfig(nsamps,
                       tsamp,
                       nbins,
@@ -1871,7 +1883,8 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                                          validation_significance,
                                          use_conservative_tile,
                                          get_nparams(),
-                                         target_snr)) {}
+                                         target_snr,
+                                         overflow_keep_fraction)) {}
 
 EPSearchConfig::EPSearchConfig(FFASearchConfig ffa_cfg,
                                SizeType prune_poly_order,
@@ -1881,7 +1894,8 @@ EPSearchConfig::EPSearchConfig(FFASearchConfig ffa_cfg,
                                double propagator_significance,
                                double validation_significance,
                                bool use_conservative_tile,
-                               std::optional<double> target_snr)
+                               std::optional<double> target_snr,
+                               double overflow_keep_fraction)
     : FFASearchConfig(std::move(ffa_cfg)),
       m_ep_impl(std::make_unique<EPImpl>(prune_poly_order,
                                          p_orb_min,
@@ -1891,7 +1905,8 @@ EPSearchConfig::EPSearchConfig(FFASearchConfig ffa_cfg,
                                          validation_significance,
                                          use_conservative_tile,
                                          get_nparams(),
-                                         target_snr)) {}
+                                         target_snr,
+                                         overflow_keep_fraction)) {}
 
 EPSearchConfig::~EPSearchConfig()                                    = default;
 EPSearchConfig::EPSearchConfig(EPSearchConfig&&) noexcept            = default;
@@ -1935,6 +1950,9 @@ bool EPSearchConfig::get_use_conservative_tile() const noexcept {
 double EPSearchConfig::get_x_mass_const() const noexcept {
     return m_ep_impl->get_x_mass_const();
 }
+double EPSearchConfig::get_overflow_keep_fraction() const noexcept {
+    return m_ep_impl->m_overflow_keep_fraction;
+}
 
 EPSearchConfig EPSearchConfig::get_updated_ep_config(
     SizeType nbins,
@@ -1946,7 +1964,8 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
-        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override);
+        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
+        m_ep_impl->m_overflow_keep_fraction);
 }
 
 EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
@@ -1959,7 +1978,8 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
-        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override);
+        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
+        m_ep_impl->m_overflow_keep_fraction);
 }
 
 EPSearchConfig
@@ -2058,6 +2078,12 @@ void validate_ep_config(const EPTomlConfig& cfg) {
     require_positive(cfg.m_p_min, "ep.m_p_min");
     require_positive(cfg.propagator_significance, "ep.propagator_significance");
     require_positive(cfg.validation_significance, "ep.validation_significance");
+    if (!utils::is_finite(cfg.overflow_keep_fraction) ||
+        cfg.overflow_keep_fraction <= 0.0 || cfg.overflow_keep_fraction > 1.0) {
+        throw std::invalid_argument(
+            fmt::format("ep.overflow_keep_fraction must be in (0, 1] (got {})",
+                        cfg.overflow_keep_fraction));
+    }
 }
 
 } // namespace
@@ -2213,6 +2239,11 @@ validation_significance = 5.0
 
 # Use the conservative tile of the Fourier search
 use_conservative_tile = false
+
+# When a batch overflows the world tree, keep at most this fraction of the
+# stage's survivors and the batch, in (0, 1]. 0.5 keeps the upper half; a
+# larger value keeps more of the best leaves but trims more often.
+overflow_keep_fraction = 0.5
 
 # Alternative to acc_* and jerk_*: limits of physical circular orbits. The
 # acceleration, jerk (snap, crackle) limits and a Doppler-widened frequency
@@ -2380,7 +2411,7 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
     return EPSearchConfig(std::move(ffa), prune_poly_order, orbit_p_min,
                           orbit_m_c, orbit_m_p, propagator_significance,
                           validation_significance, use_conservative_tile,
-                          target_snr);
+                          target_snr, overflow_keep_fraction);
 }
 
 } // namespace loki::search

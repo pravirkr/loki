@@ -237,8 +237,8 @@ public:
      *
      * @return Updated threshold after any trimming
      * Adds filtered batch to write region. If full, trims write region via
-     * top-k threshold. Makes sure all candidates fit, reclaiming space
-     * from consumed old candidates.
+     * the threshold of get_prune_threshold (keep_fraction). Makes sure all
+     * candidates fit, reclaiming space from consumed old candidates.
      * leaves_batch, folds_batch and scores_batch are scattered and
      * indices_batch is the physical indices of the leaves.
      */
@@ -248,7 +248,8 @@ public:
                         std::span<const float> scores_batch,
                         std::span<const SizeType> indices_batch,
                         float current_threshold,
-                        SizeType slots_to_write);
+                        SizeType slots_to_write,
+                        double keep_fraction);
 
     /// Free slots of the write region during an update: slots
     /// [write_head, write_head + n) mod capacity hold no live leaf.
@@ -387,12 +388,14 @@ private:
      * @brief Get prune threshold in current region
      *
      * find a threshold in (Buffer + Batch) so that keeping only scores
-     * strictly above it yields at most total_capacity items.
+     * strictly above it yields at most total_capacity items, and at most
+     * keep_fraction of the pooled items (0.5: the median of the pool).
      */
     float get_prune_threshold(std::span<const float> scores_batch,
                               std::span<const SizeType> indices_batch,
                               SizeType slots_to_write,
-                              float current_threshold);
+                              float current_threshold,
+                              double keep_fraction);
 
     /**
      * @brief Prune write region by threshold with in-place update.

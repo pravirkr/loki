@@ -680,6 +680,7 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
     cuda::std::span<const uint32_t> indices_batch,
     float current_threshold,
     SizeType slots_to_write,
+    double keep_fraction,
     cudaStream_t stream) {
     if (slots_to_write == 0) {
         return current_threshold;
@@ -710,8 +711,9 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
         slots_to_write, m_max_batch_size,
         "WorldTreeCUDA: Suggestions too large to add.");
     // Determine the Global Pruning Threshold
-    const float effective_threshold = get_prune_threshold(
-        scores_batch, indices_batch, slots_to_write, current_threshold, stream);
+    const float effective_threshold =
+        get_prune_threshold(scores_batch, indices_batch, slots_to_write,
+                            current_threshold, keep_fraction, stream);
     // Remove old items that are strictly worse than the new global pruning
     // threshold.
     prune_on_overload(effective_threshold, stream);
@@ -759,10 +761,11 @@ float WorldTreeCUDA<FoldTypeCUDA>::prepare_scored_batch(
     cuda::std::span<const uint32_t> indices,
     SizeType count,
     float threshold,
+    double keep_fraction,
     cudaStream_t stream) {
     if (count > calculate_space_left()) {
-        threshold =
-            get_prune_threshold(scores, indices, count, threshold, stream);
+        threshold = get_prune_threshold(scores, indices, count, threshold,
+                                        keep_fraction, stream);
         prune_on_overload(threshold, stream);
     }
     return threshold;
@@ -881,6 +884,7 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_prune_threshold(
     cuda::std::span<const uint32_t> indices_batch,
     SizeType slots_to_write,
     float current_threshold,
+    double keep_fraction,
     cudaStream_t stream) {
     if (slots_to_write == 0) {
         return current_threshold;
@@ -915,15 +919,20 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_prune_threshold(
         cudaStreamSynchronize(stream),
         "cudaStreamSynchronize get_prune_threshold failed");
     const float kth = m_scratch_scores[total_capacity - 1];
-    // Median score for severity (restricted range)
-    const float mid = m_scratch_scores[total_candidates / 2];
+    // Severity: keep at most keep_fraction of the pool, so that a trim leaves
+    // room for the batches after it (0.5: the median of the pool).
+    const auto keep_rank =
+        std::min(total_candidates - 1,
+                 static_cast<SizeType>(keep_fraction *
+                                       static_cast<double>(total_candidates)));
+    const float mid = m_scratch_scores[keep_rank];
     // To break ties, we use the next representable value greater than the
-    // topk and median scores.
+    // topk and severity scores.
     const float topk_threshold =
         std::nextafter(kth, std::numeric_limits<float>::max());
-    const float median_threshold =
+    const float severity_threshold =
         std::nextafter(mid, std::numeric_limits<float>::max());
-    return std::max({current_threshold, topk_threshold, median_threshold});
+    return std::max({current_threshold, topk_threshold, severity_threshold});
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
