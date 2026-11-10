@@ -40,6 +40,7 @@ def cmd_new(args: argparse.Namespace) -> int:
 def cmd_tutorial(args: argparse.Namespace) -> int:
     from loki_survey.tutorial import SOURCES, write_tutorial  # noqa: PLC0415
 
+    require_loki()
     root = args.rundir
     written = write_tutorial(root, seed=args.seed)
     print(f"wrote {len(written)} simulated series in {root / 'data'}, and")
@@ -56,6 +57,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     from loki_survey.plan import candidate_options  # noqa: PLC0415
     from loki_survey.unit import versions  # noqa: PLC0415
 
+    require_loki()
     run = RunDir.at(args.rundir)
     resolved = resolve(run)
     buffer_gb = candidate_options(resolved).memory_gb
@@ -338,6 +340,7 @@ def cmd_run_unit(args: argparse.Namespace) -> int:
     )
     from loki_survey.unit import run_unit  # noqa: PLC0415
 
+    require_loki()
     summary = run_unit(run, args.unit, args.attempt)
     found, seconds = summary["n_candidates"], summary["total_s"]
     print(f"{args.unit}: {found} candidates in {seconds:.1f} s")
@@ -417,6 +420,44 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+LOKI_MISSING = (
+    "loki-survey needs loki's Python module, loki.libloki, built from "
+    "https://github.com/pravirkr/loki (the package named 'loki' on PyPI is a "
+    "different project)"
+)
+# The newest loki features loki-survey uses; a loki without one is too old.
+LOKI_FEATURES = (
+    "io.TimeSeries",
+    "psr_utils.leaf_phase",
+    "fold.fold_phase",
+    "configs.CandidateOptions.max_per_cell",
+)
+
+
+class LokiTooOldError(RuntimeError):
+    """The loki that imports lacks a feature loki-survey uses."""
+
+
+def require_loki() -> None:
+    """Fail early, and say why, when the loki that imports is too old."""
+    import loki  # noqa: PLC0415
+    from loki import libloki  # noqa: PLC0415
+
+    missing = []
+    for feature in LOKI_FEATURES:
+        obj: object = libloki
+        for name in feature.split("."):
+            obj = getattr(obj, name, None)
+        if obj is None:
+            missing.append(f"libloki.{feature}")
+    if missing:
+        msg = (
+            f"the loki at {Path(loki.__file__).parent} is too old for loki-survey: "
+            f"it has no {', '.join(missing)}. {LOKI_MISSING}"
+        )
+        raise LokiTooOldError(msg)
+
+
 def main(argv: list[str] | None = None) -> int:
     # A watcher's output often goes to a file; show each line as it happens.
     if hasattr(sys.stdout, "reconfigure"):
@@ -433,6 +474,12 @@ def main(argv: list[str] | None = None) -> int:
         SubmitError,
         IncompleteRunError,
         FileExistsError,
+        LokiTooOldError,
     ) as exc:
         print(f"loki-survey: {exc}", file=sys.stderr)
+        return 2
+    except ImportError as exc:
+        if exc.name not in {"loki", "loki.libloki"}:
+            raise
+        print(f"loki-survey: {LOKI_MISSING}: {exc}", file=sys.stderr)
         return 2

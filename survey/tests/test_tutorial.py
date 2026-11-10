@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -70,3 +71,28 @@ def test_tutorial_signal_has_its_snr(source: Source) -> None:
     wave = signal(source, 10.0, t)
     # Matched filter on unit-variance noise: S/N = sqrt(sum of squares).
     assert np.sqrt(np.sum(wave**2)) == pytest.approx(10.0)
+
+
+def test_a_missing_loki_is_named(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """PyPI's 'loki' is another project; say which loki loki-survey needs."""
+    monkeypatch.setitem(sys.modules, "loki", None)
+    assert main(["tutorial", str(tmp_path / "tutorial")]) == 2
+    assert "github.com/pravirkr/loki" in capsys.readouterr().err
+
+
+def test_a_loki_too_old_is_named(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from loki import libloki  # noqa: PLC0415
+
+    monkeypatch.delattr(libloki.psr_utils, "leaf_phase")
+    assert main(["tutorial", str(tmp_path / "tutorial")]) == 2
+    err = capsys.readouterr().err
+    assert "too old for loki-survey" in err
+    assert "libloki.psr_utils.leaf_phase" in err
