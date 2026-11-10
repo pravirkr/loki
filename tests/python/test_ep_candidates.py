@@ -327,6 +327,65 @@ def test_ep_graph_memory_exhaustion_preserves_previous_product(product, tmp_path
         assert len(result["candidates/id"]) >= 1000
 
 
+def test_ep_cell_cap_publishes_a_search_too_large_to_group(product, tmp_path):
+    path, _, _, _ = product
+    spool, output = tmp_path / "many-tracks.h5", tmp_path / "capped.h5"
+    spool.write_bytes(path.read_bytes())
+    rng = np.random.default_rng(5)
+    with h5py.File(spool, "r+") as handle:
+        source = handle["search/sources/run_path"].asstr()[0]
+        run = handle[source]
+        leaf = run["param_sets"][0]
+        leaves = np.repeat(leaf[None, :, :], 1000, axis=0)
+        leaves[:, 0, 0] = np.linspace(-10, 10, 1000)
+        leaves[:, 1, 0] = rng.uniform(140.0, 145.0, 1000)
+        scores = rng.uniform(8.0, 20.0, 1000).astype(np.float32)
+        width = run["width"][0]
+        for name in ("param_sets", "scores", "scores_ep", "width"):
+            del run[name]
+        run["param_sets"] = leaves
+        run["scores"] = scores
+        run["scores_ep"] = scores
+        run["width"] = np.full(1000, width, dtype=np.uint32)
+    opts = options()
+    opts.memory_gb = 1e-3  # about 135 tracks
+    with pytest.raises(RuntimeError, match="transitive track index"):
+        libloki.prune.EPFreqSweep.publish_candidates(spool, output, candidates=opts)
+    opts.cluster = False
+    libloki.prune.EPFreqSweep.publish_candidates(spool, output, candidates=opts)
+    with h5py.File(output) as result:
+        total = result.attrs["n_detections"]
+        snr_min = result["processing"].attrs["snr_min"]
+    # The same budget holds the strongest leaf of each cell.
+    log_width = 2e-3
+    opts.cluster = True
+    opts.max_per_cell = 1
+    opts.cell_log_width = log_width
+    libloki.prune.EPFreqSweep.publish_candidates(spool, output, candidates=opts)
+    best: dict[int, float] = {}
+    with h5py.File(spool) as handle:
+        for run_path in handle["search/sources/run_path"].asstr()[:]:
+            run_scores = handle[f"{run_path}/scores"][:]
+            freqs = handle[f"{run_path}/param_sets"][:, -3, 0]  # the freq row
+            for cell, score in zip(
+                np.floor(np.log(freqs) / log_width), run_scores, strict=True
+            ):
+                if score >= snr_min:
+                    best[int(cell)] = max(best.get(int(cell), score), score)
+    with h5py.File(output) as result:
+        kept = result.attrs["n_detections"]
+        assert kept + result.attrs["n_cell_dropped"] == total
+        assert result["processing"].attrs["max_per_cell"] == 1
+        cells = np.floor(np.log(result["detections/f0"][:]) / log_width)
+        assert kept == len(best) == len(np.unique(cells))
+        for cell, snr in zip(cells, result["detections/snr"][:], strict=True):
+            assert snr == best[int(cell)]
+        check_graph(result)
+    opts.cell_log_width = 0
+    with pytest.raises(ValueError, match="cell_log_width"):
+        opts.validate()
+
+
 @pytest.mark.parametrize("nparams", [3, 4])
 def test_ep_reported_taylor_derivatives_are_normalized_without_truncation(
     product, tmp_path, nparams

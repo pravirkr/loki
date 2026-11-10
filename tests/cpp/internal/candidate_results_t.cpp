@@ -1,5 +1,6 @@
 #include "lib/io/candidate_results.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include "loki/io/observation.hpp"
 #include "loki/search/candidates.hpp"
 
+#include "lib/search/candidate_processing.hpp"
 #include "lib/search/cands.hpp"
 
 namespace {
@@ -264,4 +266,110 @@ TEST_CASE(
             REQUIRE_FALSE(file.exist("detections"));
         }
     }
+}
+
+TEST_CASE("A cell cap keeps the strongest trials of each frequency cell",
+          "[candidates][hdf5]") {
+    Files files;
+    const auto raw = files.directory / "raw.h5";
+    // Frequencies 10, 11, 12 and 13 Hz in turn, S/N 6 to 125.
+    spool(raw, 120);
+    loki::search::CandidateOptions options;
+    options.max_per_cell   = 2;
+    options.cell_log_width = 1e-3; // one frequency per cell
+    std::vector<float> first_snr;
+    for (const double memory_gb : {0.0001, 0.01}) {
+        CAPTURE(memory_gb);
+        options.memory_gb = memory_gb;
+        const auto out    = files.directory / "out.h5";
+        loki::io::detail::write_candidate_results(raw, out, {}, options);
+        const HighFive::File file(out.string(), HighFive::File::ReadOnly);
+        std::uint64_t kept    = 0;
+        std::uint64_t dropped = 0;
+        file.getAttribute("n_detections").read(kept);
+        file.getAttribute("n_cell_dropped").read(dropped);
+        REQUIRE(kept == 8);
+        REQUIRE(dropped == 112);
+        const auto snr = column<float>(file, "detections/snr");
+        REQUIRE(snr ==
+                std::vector<float>{125, 124, 123, 122, 121, 120, 119, 118});
+        REQUIRE(column<std::uint64_t>(file, "clusters/member_count") ==
+                std::vector<std::uint64_t>(4, 2));
+        std::uint64_t max_per_cell = 0;
+        double width               = 0;
+        file.getGroup("processing")
+            .getAttribute("max_per_cell")
+            .read(max_per_cell);
+        file.getGroup("processing").getAttribute("cell_log_width").read(width);
+        REQUIRE(max_per_cell == 2);
+        REQUIRE(width == options.cell_log_width);
+        std::filesystem::remove(out);
+    }
+    // One cell holds every frequency: only the three strongest trials stay.
+    options.max_per_cell   = 3;
+    options.cell_log_width = 1;
+    options.memory_gb      = 0.01;
+    const auto wide        = files.directory / "wide.h5";
+    loki::io::detail::write_candidate_results(raw, wide, {}, options);
+    const HighFive::File file(wide.string(), HighFive::File::ReadOnly);
+    REQUIRE(column<float>(file, "detections/snr") ==
+            std::vector<float>{125, 124, 123});
+}
+
+TEST_CASE("A cell cap keeps the same trials in any arrival order",
+          "[candidates]") {
+    loki::search::CandidateOptions options;
+    options.max_per_cell   = 3;
+    options.cell_log_width = 0.05;
+    std::mt19937_64 rng(7);
+    std::uniform_real_distribution<double> freq(10, 12);
+    std::uniform_int_distribution<int> snr(7, 12); // ties are common
+    std::vector<loki::search::Candidate> trials(500);
+    for (std::size_t i = 0; i < trials.size(); ++i) {
+        auto& c          = trials[i];
+        c.derivatives[0] = freq(rng);
+        c.parameters[0]  = c.derivatives[0];
+        c.snr            = static_cast<float>(snr(rng));
+        c.width          = 1;
+        c.nbins          = 10;
+        c.id             = i;
+    }
+    const auto kept = [&](const std::vector<loki::search::Candidate>& in) {
+        loki::search::detail::CellCap cap(options);
+        for (const auto& c : in) {
+            cap.add(c);
+        }
+        REQUIRE(cap.dropped() > 0);
+        auto out = cap.take();
+        std::vector<std::uint64_t> ids;
+        for (const auto& c : out) {
+            ids.push_back(c.id);
+        }
+        std::ranges::sort(ids);
+        return ids;
+    };
+    const auto reference = kept(trials);
+    // ln(f) from 10 to 12 Hz spans four cells of width 0.05.
+    REQUIRE(reference.size() == 12);
+    for (int shuffle = 0; shuffle < 5; ++shuffle) {
+        std::ranges::shuffle(trials, rng);
+        REQUIRE(kept(trials) == reference);
+    }
+}
+
+TEST_CASE("A cell cap is bounded by the candidate memory budget",
+          "[candidates][hdf5]") {
+    Files files;
+    const auto raw = files.directory / "raw.h5";
+    spool(raw, 120);
+    loki::search::CandidateOptions options;
+    options.max_per_cell   = 120;
+    options.cell_log_width = 1;
+    options.memory_gb      = 0.0001;
+    REQUIRE_THROWS_WITH(
+        loki::io::detail::write_candidate_results(raw, files.directory / "o.h5",
+                                                  {}, options),
+        Catch::Matchers::ContainsSubstring("cell index exceeds"));
+    options.cell_log_width = 0;
+    REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);
 }

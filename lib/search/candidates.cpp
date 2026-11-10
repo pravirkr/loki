@@ -193,6 +193,14 @@ void CandidateOptions::validate() const {
         throw std::invalid_argument(
             "candidate phase_radius must be finite and nonnegative");
     }
+    if (!utils::is_finite(cell_log_width) || cell_log_width < 0) {
+        throw std::invalid_argument(
+            "candidate cell_log_width must be finite and nonnegative");
+    }
+    if (max_per_cell != 0 && cell_log_width == 0) {
+        throw std::invalid_argument(
+            "candidate max_per_cell requires a positive cell_log_width");
+    }
     positive(memory_gb, "candidate memory_gb must be finite and positive");
     if (memory_gb < 0.0001 || memory_gb > 1.0e6) {
         throw std::invalid_argument(
@@ -256,6 +264,68 @@ bool candidate_brighter(const Candidate& a, const Candidate& b) {
         return a.nbins > b.nbins;
     }
     return a.id < b.id;
+}
+
+CellCap::CellCap(const CandidateOptions& options, std::size_t reserved_bytes)
+    : m_max(options.max_per_cell),
+      m_width(options.cell_log_width),
+      m_memory_gb(options.memory_gb -
+                  static_cast<double>(reserved_bytes) / utils::kBytesPerGB) {
+    options.validate();
+    if (m_max == 0) {
+        throw std::invalid_argument("candidate cell cap needs max_per_cell");
+    }
+    if (m_memory_gb <= 0) {
+        throw std::runtime_error(
+            "candidate source index exhausts the host memory budget");
+    }
+}
+
+void CellCap::add(const Candidate& c) {
+    c.validate();
+    const double cell = std::floor(std::log(c.derivatives[0]) / m_width);
+    if (!(std::abs(cell) <
+          static_cast<double>(std::numeric_limits<std::int64_t>::max()))) {
+        throw std::invalid_argument(
+            "candidate frequency cell exceeds the cell index range");
+    }
+    auto& kept = m_cells[static_cast<std::int64_t>(cell)];
+    if (kept.size() < m_max) {
+        // A kept trial is held by its cell, whose growth may double it, and
+        // once more by take(); a cell adds its hash node and buckets.
+        constexpr std::size_t kBytesPerTrial = 3 * sizeof(Candidate);
+        constexpr std::size_t kBytesPerCell =
+            sizeof(std::vector<Candidate>) + 128;
+        const double required =
+            static_cast<double>(m_kept + 1) * kBytesPerTrial +
+            static_cast<double>(m_cells.size()) * kBytesPerCell;
+        if (required > m_memory_gb * utils::kBytesPerGB / 2) {
+            throw std::runtime_error(
+                "candidate cell index exceeds host memory budget; increase "
+                "candidate memory_gb or cell_log_width");
+        }
+        kept.push_back(c);
+        std::ranges::push_heap(kept, candidate_brighter);
+        ++m_kept;
+        return;
+    }
+    ++m_dropped;
+    if (candidate_brighter(c, kept.front())) {
+        std::ranges::pop_heap(kept, candidate_brighter);
+        kept.back() = c;
+        std::ranges::push_heap(kept, candidate_brighter);
+    }
+}
+
+std::vector<Candidate> CellCap::take() {
+    std::vector<Candidate> out;
+    out.reserve(m_kept);
+    for (auto it = m_cells.begin(); it != m_cells.end();
+         it      = m_cells.erase(it)) {
+        out.insert(out.end(), it->second.begin(), it->second.end());
+    }
+    m_kept = 0;
+    return out;
 }
 
 CandidateClusterer::CandidateClusterer(double tobs,
