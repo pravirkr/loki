@@ -6,16 +6,23 @@ search and observation metadata) into a compact output with the run's
 provenance, keeps the full file only for a sampled fraction of units, and
 renames the output into ``out/``. The summary JSON is written last, so its
 presence means the unit is done.
+
+When loki finishes the search but its candidate step fails (most often for
+want of memory), loki keeps the search as a spool. The unit then publishes
+the spool again with its whole loki budget, since no search runs any more. A
+spool an earlier attempt kept, for the same search, is published by the next
+attempt without searching again.
 """
 
 from __future__ import annotations
 
 import os
 import platform
+import re
 import resource
 import shutil
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +30,7 @@ import h5py
 import numpy as np
 
 import loki_survey
-from loki_survey.config import Resolved, load_resolved
+from loki_survey.config import Resolved, load_resolved, science_dict
 from loki_survey.plan import (
     Unit,
     build_ep_plan,
@@ -32,7 +39,7 @@ from loki_survey.plan import (
     plan_cache_path,
     search_config,
 )
-from loki_survey.prep import load_arrays
+from loki_survey.prep import load_arrays, load_manifest
 from loki_survey.rundir import (
     RunDir,
     atomic_write_json,
@@ -46,6 +53,10 @@ from loki_survey.rundir import (
 # full result file.
 COMMON_GROUPS = ("observation", "processing", "search", "candidates", "clusters")
 RESULT_SUFFIX = {"ffa": "_ffa_results.h5", "ep": "_ep_results.h5"}
+SPOOL_SUFFIX = {"ffa": "_ffa_spool.h5", "ep": "_ep_spool.h5"}
+# Written into the work directory before the search: what the search depends
+# on, so a later attempt can tell whether a spool kept there is still its own.
+SEARCH_JSON = "search.json"
 
 
 def keeps_raw(unit_id: str, raw_fraction: float) -> bool:
@@ -82,8 +93,86 @@ def observation(manifest: dict[str, Any]) -> Any:  # noqa: ANN401
     return obs
 
 
-def search(run: RunDir, resolved: Resolved, unit: Unit, workdir: Path) -> Path:
-    """Run loki on the unit's series; return loki's result file."""
+def search_sha256(resolved: Resolved, unit: Unit, manifest: dict[str, Any]) -> str:
+    """Hash what a unit's search depends on, apart from its candidate step."""
+    survey = replace(resolved.survey, candidates={}, raw_fraction=0.0)
+    return sha256_text(
+        canonical_json(
+            {
+                "science": science_dict(survey),
+                "unit": asdict(unit),
+                "arrays_sha256": manifest["arrays"][str(unit.downsample)],
+            },
+        ),
+    )
+
+
+def publish_spool(
+    resolved: Resolved,
+    unit: Unit,
+    spool: Path,
+    result: Path,
+    obs: Any,  # noqa: ANN401
+) -> None:
+    """Publish a search loki kept, with the unit's whole loki budget."""
+    from loki import libloki  # noqa: PLC0415
+
+    options = candidate_options(resolved)
+    options.memory_gb = resolved.site.loki_memory_gb
+    sweep = (
+        libloki.ffa.FFAFreqSweep if unit.kind == "ffa" else libloki.prune.EPFreqSweep
+    )
+    try:
+        sweep.publish_candidates(
+            str(spool),
+            str(result),
+            candidates=options,
+            observation=obs,
+        )
+    except RuntimeError as exc:
+        msg = (
+            f"{unit.id}: loki's candidate step failed with the unit's whole "
+            f"{options.memory_gb:g} GB: {exc}. The search is kept in {spool}. "
+            "Keep fewer trials with [candidates] max_per_cell and "
+            "cell_log_width in survey.toml."
+        )
+        raise RuntimeError(msg) from exc
+
+
+def kept_spool(run: RunDir, unit: Unit, key: str) -> Path | None:
+    """Return the newest complete spool an earlier attempt kept for this search."""
+    if not run.quarantine_dir.is_dir():
+        return None
+    # Quarantined work directories: <unit>.<attempt>, or with a time after it.
+    name = re.compile(rf"{re.escape(unit.id)}\.\d+(\.\d+)?")
+    found = []
+    for directory in run.quarantine_dir.iterdir():
+        spool = directory / f"{unit.id}{SPOOL_SUFFIX[unit.kind]}"
+        marker = directory / SEARCH_JSON
+        if not (name.fullmatch(directory.name) and spool.is_file()):
+            continue
+        if not marker.is_file() or read_json(marker).get("search_sha256") != key:
+            continue
+        try:
+            with h5py.File(spool, "r") as handle:
+                complete = int(handle.attrs.get("complete", 0)) == 1
+        except OSError:
+            complete = False
+        if complete:
+            found.append(spool)
+    return max(found, key=lambda p: p.stat().st_mtime, default=None)
+
+
+def search(
+    run: RunDir,
+    resolved: Resolved,
+    unit: Unit,
+    workdir: Path,
+) -> tuple[Path, bool]:
+    """Run loki on the unit's series; return loki's result file.
+
+    The flag says whether the candidate step ran again from loki's spool.
+    """
     from loki import libloki  # noqa: PLC0415
 
     site = resolved.site
@@ -93,6 +182,7 @@ def search(run: RunDir, resolved: Resolved, unit: Unit, workdir: Path) -> Path:
     cfg = search_config(resolved, unit)
     candidates = candidate_options(resolved)
     obs = observation(manifest)
+    extra: dict[str, Any] = {}
     if unit.kind == "ffa":
         sweep = libloki.ffa.FFAFreqSweep(
             cfg,
@@ -101,14 +191,7 @@ def search(run: RunDir, resolved: Resolved, unit: Unit, workdir: Path) -> Path:
             device=site.device,
             candidates=candidates,
         )
-        sweep.execute(
-            ts_e,
-            ts_v,
-            str(workdir),
-            unit.id,
-            config_toml=canonical_json(asdict(unit)),
-            observation=obs,
-        )
+        extra["config_toml"] = canonical_json(asdict(unit))
     else:
         if unit.plan_key is None:
             msg = f"{unit.id} has no EP plan"
@@ -127,12 +210,26 @@ def search(run: RunDir, resolved: Resolved, unit: Unit, workdir: Path) -> Path:
             device=site.device,
             candidates=candidates,
         )
-        sweep.execute(ts_e, ts_v, str(workdir), unit.id, observation=obs)
     result = workdir / f"{unit.id}{RESULT_SUFFIX[unit.kind]}"
+    republished = False
+    try:
+        sweep.execute(ts_e, ts_v, str(workdir), unit.id, observation=obs, **extra)
+    except RuntimeError as exc:
+        spool = workdir / f"{unit.id}{SPOOL_SUFFIX[unit.kind]}"
+        if not spool.is_file():
+            raise
+        # The search is done, so its memory is free for the candidate step.
+        del sweep
+        print(
+            f"{unit.id}: loki's candidate step failed after the search ({exc}); "
+            f"publishing the search again with {site.loki_memory_gb:g} GB",
+        )
+        publish_spool(resolved, unit, spool, result, obs)
+        republished = True
     if not result.is_file():
         msg = f"loki wrote no result file {result.name}"
         raise RuntimeError(msg)
-    return result
+    return result, republished
 
 
 def candidate_leaves(src: h5py.File) -> np.ndarray | None:
@@ -217,10 +314,19 @@ def run_unit(run: RunDir, unit_id: str, attempt: int) -> dict[str, Any]:
         run.quarantine_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(str(workdir), str(target))
     workdir.mkdir(parents=True)
+    manifest = load_manifest(run, unit.series)
+    key = search_sha256(resolved, unit, manifest)
+    atomic_write_json(workdir / SEARCH_JSON, {"search_sha256": key})
     started = time.time()
-    result = search(run, resolved, unit, workdir)
+    spool = kept_spool(run, unit, key)
+    if spool is None:
+        result, republished = search(run, resolved, unit, workdir)
+    else:
+        print(f"{unit_id}: publishing the search kept in {spool}, without searching")
+        result = workdir / f"{unit.id}{RESULT_SUFFIX[unit.kind]}"
+        publish_spool(resolved, unit, spool, result, observation(manifest))
+        republished = True
     searched = time.time()
-    _, _, manifest = load_arrays(run, unit.series, unit.downsample)
     provenance = {
         "unit": asdict(unit),
         "science_sha256": resolved.science_sha256,
@@ -232,6 +338,8 @@ def run_unit(run: RunDir, unit_id: str, attempt: int) -> dict[str, Any]:
         "backend": resolved.site.backend,
         "threads": resolved.site.unit_threads,
         "loki_memory_gb": resolved.site.loki_memory_gb,
+        "candidates_republished": republished,
+        "resumed_from": str(spool) if spool is not None else None,
     }
     staged = workdir / f"{unit_id}.h5"
     counts = compact(result, staged, provenance)
@@ -250,6 +358,8 @@ def run_unit(run: RunDir, unit_id: str, attempt: int) -> dict[str, Any]:
         "n_candidates": counts.get("candidates", 0),
         "n_clusters": counts.get("clusters", 0),
         "raw_kept": raw_kept,
+        "candidates_republished": republished,
+        "resumed_from": str(spool) if spool is not None else None,
         "output_sha256": sha256_file(run.unit_output(unit_id)),
         "science_sha256": resolved.science_sha256,
     }

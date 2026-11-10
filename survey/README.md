@@ -53,7 +53,11 @@ Within a unit, loki groups the trials above `snr_min` into candidates, as
 millions of trials, more than loki can group in its candidate memory
 (`[unit] candidate_memory_gb`, reserved within the unit's loki budget). Set
 `max_per_cell` and `cell_log_width` to keep only the strongest trials of
-each frequency cell.
+each frequency cell. When the candidate step fails after the search, loki
+keeps the search as a spool, and the unit publishes it again with its whole
+loki budget, since no search runs any more. If that fails too, the spool
+stays in `quarantine/` and the next attempt of the unit (`submit`) publishes
+it without searching again.
 
 The local executor packs units within the site's memory and threads. A unit
 above its memory reservation is stopped and run again with more memory, up
