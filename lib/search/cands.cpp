@@ -1111,6 +1111,8 @@ void PruneResultWriter::write_run_results(
             static_cast<std::uint64_t>(reduced->retained.size()));
         run_group.createAttribute("max_cell_dropped_snr",
                                   reduced->max_cell_dropped_snr);
+        run_group.createAttribute("max_per_cell_used",
+                                  reduced->max_per_cell_used);
         // The options the search reduced with: publication must use them.
         const auto& o = reduction->options;
         run_group.createAttribute("reduced_max_per_cell", o.max_per_cell);

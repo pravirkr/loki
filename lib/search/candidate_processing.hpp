@@ -21,7 +21,9 @@ namespace loki::search::detail {
 /// Cells are cell_bins Fourier bins or cell_log_width in ln(frequency) wide.
 /// Trials arrive in any order; candidate_brighter is a total order, so the
 /// kept set does not depend on it. The kept trials are charged against
-/// CandidateOptions::memory_gb until take() moves them out.
+/// CandidateOptions::memory_gb until take() moves them out: when they would
+/// exceed it, every cell's keep is halved (max_per_cell_used()), which keeps
+/// the kept set independent of the arrival order.
 class CellCap {
 public:
     CellCap(const CandidateOptions& options,
@@ -33,6 +35,11 @@ public:
     [[nodiscard]] std::uint64_t dropped() const noexcept { return m_dropped; }
     /// Trials held since the last take().
     [[nodiscard]] std::uint64_t kept() const noexcept { return m_kept; }
+    /// Trials each cell keeps since the last take(): max_per_cell, or less
+    /// when the memory budget forced it lower.
+    [[nodiscard]] std::uint64_t max_per_cell_used() const noexcept {
+        return m_cap;
+    }
     /// Highest S/N dropped since the last take(); zero when none was.
     [[nodiscard]] float max_dropped_snr() const noexcept {
         return m_max_dropped_snr;
@@ -51,7 +58,9 @@ private:
                 k.region);
         }
     };
+    void add_to_full(std::vector<Candidate>& kept, const Candidate& c);
     std::uint64_t m_max;
+    std::uint64_t m_cap; ///< Current per-cell keep, at most m_max.
     bool m_log;
     double m_scale;
     double m_memory_gb;
@@ -113,6 +122,7 @@ struct RunLeafReduction {
     std::uint64_t cell_dropped{};
     std::uint64_t dominated{};
     float max_cell_dropped_snr{};
+    std::uint64_t max_per_cell_used{};   ///< Below max_per_cell: memory bound.
     std::vector<std::uint32_t> retained; ///< Leaf indices kept, ascending.
 };
 

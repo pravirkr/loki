@@ -326,6 +326,7 @@ CellCap::CellCap(const CandidateOptions& options,
                  double tobs,
                  std::size_t reserved_bytes)
     : m_max(options.max_per_cell),
+      m_cap(options.max_per_cell),
       m_log(options.cell_log_width > 0),
       m_scale(m_log ? 1 / options.cell_log_width : tobs / options.cell_bins),
       m_memory_gb(options.memory_gb -
@@ -354,25 +355,51 @@ void CellCap::add(const Candidate& c) {
             "candidate frequency cell exceeds the cell index range");
     }
     auto& kept = m_cells[{c.source_region, static_cast<std::int64_t>(cell)}];
-    if (kept.size() < m_max) {
+    if (kept.size() < m_cap) {
         // A kept trial is held by its cell, whose growth may double it, and
         // once more by take(); a cell adds its hash node and buckets.
         constexpr std::size_t kBytesPerTrial = 3 * sizeof(Candidate);
         constexpr std::size_t kBytesPerCell =
             sizeof(std::vector<Candidate>) + 128;
-        const double required =
-            static_cast<double>(m_kept + 1) * kBytesPerTrial +
-            static_cast<double>(m_cells.size()) * kBytesPerCell;
-        if (required > m_memory_gb * utils::kBytesPerGB / 2) {
-            throw std::runtime_error(
-                "candidate cell index exceeds host memory budget; increase "
-                "candidate memory_gb or the cell width");
+        const auto required = [&] {
+            return (static_cast<double>(m_kept + 1) * kBytesPerTrial) +
+                   (static_cast<double>(m_cells.size()) * kBytesPerCell);
+        };
+        // Over budget, every cell keeps fewer trials: halving the cap of all
+        // cells keeps the same trials whatever the arrival order, since the
+        // kept count only grows and the strongest m/2 of a cell's strongest
+        // m are its strongest m/2.
+        while (required() > m_memory_gb * utils::kBytesPerGB / 2) {
+            if (m_cap == 1) {
+                throw std::runtime_error(
+                    "candidate cells exceed host memory budget with one trial "
+                    "each; increase candidate memory_gb or the cell width");
+            }
+            m_cap /= 2;
+            for (auto& [key, trials] : m_cells) {
+                while (trials.size() > m_cap) {
+                    std::ranges::pop_heap(trials, candidate_brighter);
+                    m_max_dropped_snr =
+                        std::max(m_max_dropped_snr, trials.back().snr);
+                    trials.pop_back();
+                    --m_kept;
+                    ++m_dropped;
+                }
+            }
+        }
+        if (kept.size() >= m_cap) {
+            add_to_full(kept, c);
+            return;
         }
         kept.push_back(c);
         std::ranges::push_heap(kept, candidate_brighter);
         ++m_kept;
         return;
     }
+    add_to_full(kept, c);
+}
+
+void CellCap::add_to_full(std::vector<Candidate>& kept, const Candidate& c) {
     ++m_dropped;
     if (candidate_brighter(c, kept.front())) {
         std::ranges::pop_heap(kept, candidate_brighter);
@@ -528,7 +555,13 @@ RunLeafReduction reduce_run_leaves(
     }
     out.max_cell_dropped_snr = cap.max_dropped_snr();
     out.cell_dropped         = cap.dropped();
-    auto kept                = cap.take();
+    out.max_per_cell_used    = cap.max_per_cell_used();
+    if (out.max_per_cell_used < spec.options.max_per_cell) {
+        spdlog::warn("EP run cells kept {} leaves each instead of {} to fit "
+                     "candidate memory_gb",
+                     out.max_per_cell_used, spec.options.max_per_cell);
+    }
+    auto kept = cap.take();
     if (spec.options.dominance_kappa > 0) {
         out.dominated = DominanceReducer(spec.tobs, spec.options).reduce(kept);
     }
@@ -549,6 +582,7 @@ std::vector<Candidate> CellCap::take() {
     }
     m_kept            = 0;
     m_max_dropped_snr = 0;
+    m_cap             = m_max;
     return out;
 }
 

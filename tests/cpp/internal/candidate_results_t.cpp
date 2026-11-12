@@ -513,12 +513,84 @@ TEST_CASE("A cell cap is bounded by the candidate memory budget",
     spool(raw, 120);
     loki::search::CandidateOptions options;
     options.max_per_cell   = 120;
-    options.cell_log_width = 1;
+    options.cell_log_width = 1; // one cell holds every trial
     options.memory_gb      = 0.0001;
-    REQUIRE_THROWS_WITH(
-        loki::io::detail::write_candidate_results(raw, dir / "o.h5", {},
-                                                  options),
-        Catch::Matchers::ContainsSubstring("cell index exceeds"));
+    // 120 trials do not fit the budget: the cell keeps 60, its strongest.
+    const auto out = dir / "o.h5";
+    loki::io::detail::write_candidate_results(raw, out, {}, options);
+    {
+        const HighFive::File file(out.string(), HighFive::File::ReadOnly);
+        const auto snr = column<float>(file, "detections/snr");
+        REQUIRE(snr.size() == 60);
+        REQUIRE(snr.front() == 125);
+        REQUIRE(snr.back() == 66);
+    }
     options.cell_log_width = 0;
     REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);
+}
+
+TEST_CASE("Over the memory budget, every cell keeps fewer trials in any order",
+          "[candidates]") {
+    loki::search::CandidateOptions options;
+    options.max_per_cell = 64;
+    options.cell_bins    = 1; // 0.1 Hz cells over tobs = 10 s
+    options.memory_gb    = 0.0001;
+    std::mt19937_64 rng(11);
+    std::uniform_real_distribution<double> freq(10, 11); // ten cells
+    std::uniform_int_distribution<int> snr(7, 40);
+    std::vector<loki::search::Candidate> trials(2000);
+    for (std::size_t i = 0; i < trials.size(); ++i) {
+        auto& c          = trials[i];
+        c.derivatives[0] = freq(rng);
+        c.parameters[0]  = c.derivatives[0];
+        c.snr            = static_cast<float>(snr(rng));
+        c.width          = 1;
+        c.nbins          = 10;
+        c.id             = i;
+    }
+    std::uint64_t used = 0;
+    const auto kept    = [&](const std::vector<loki::search::Candidate>& in) {
+        loki::search::detail::CellCap cap(options, 10);
+        for (const auto& c : in) {
+            cap.add(c);
+        }
+        used     = cap.max_per_cell_used();
+        auto out = cap.take();
+        REQUIRE(cap.max_per_cell_used() == options.max_per_cell); // reset
+        std::vector<std::uint64_t> ids;
+        for (const auto& c : out) {
+            ids.push_back(c.id);
+        }
+        std::ranges::sort(ids);
+        return ids;
+    };
+    const auto reference = kept(trials);
+    // Ten cells of 64 do not fit about 96 trials: the keep is halved to 8.
+    REQUIRE(used == 8);
+    REQUIRE(reference.size() == 80);
+    for (int shuffle = 0; shuffle < 5; ++shuffle) {
+        std::ranges::shuffle(trials, rng);
+        REQUIRE(kept(trials) == reference);
+        REQUIRE(used == 8);
+    }
+    // The same as a cap of 8 from the start.
+    options.max_per_cell = 8;
+    options.memory_gb    = 1;
+    REQUIRE(kept(trials) == reference);
+    // With one trial per cell still over budget, the cap gives up.
+    options.max_per_cell = 64;
+    options.memory_gb    = 0.0001;
+    std::uniform_real_distribution<double> wide(10, 100); // 900 cells
+    for (auto& c : trials) {
+        c.derivatives[0] = wide(rng);
+        c.parameters[0]  = c.derivatives[0];
+    }
+    loki::search::detail::CellCap cap(options, 10);
+    REQUIRE_THROWS_WITH(
+        [&] {
+            for (const auto& c : trials) {
+                cap.add(c);
+            }
+        }(),
+        Catch::Matchers::ContainsSubstring("one trial each"));
 }

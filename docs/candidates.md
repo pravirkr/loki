@@ -60,6 +60,7 @@ the attributes
 | `n_dominated` | Absorbed by a stronger leaf of the run |
 | `n_leaves_retained` | Retained: the run's rows, and its detections |
 | `max_cell_dropped_snr` | Highest S/N the cell cap dropped (0 when none) |
+| `max_per_cell_used` | Leaves each cell kept: `max_per_cell`, or less when `memory_gb` forced it lower |
 
 so `n_leaves_above_snr_min = n_cell_dropped + n_dominated +
 n_leaves_retained`.
@@ -372,8 +373,13 @@ sort and the grouping see at most `max_per_cell` trials per cell. EP runs are
 capped one at a time, so the cap holds the kept trials of a single run. Dropped
 trials are not detections of the product: they are not in `/detections`, and
 the root attribute `n_cell_dropped` counts them (`n_detections` counts the
-kept ones). The cells' index is charged against `memory_gb` like the grouping
-index. The cap applies to EP and FFA alike, and to `publish_candidates`.
+kept ones). The kept trials are charged against `memory_gb` like the
+grouping index. When the kept trials of a run (of the whole search, for
+FFA) would exceed it, every cell keeps half as many, as often as needed, and the log warns; the kept set
+is still independent of the order the trials arrive in, and the same as a
+smaller `max_per_cell` from the start. Only when one trial per cell does not
+fit does the cap fail. The cap applies to EP and FFA alike, and to
+`publish_candidates`.
 
 ### Absorbing trials a stronger trial explains
 

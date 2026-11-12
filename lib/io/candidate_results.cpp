@@ -180,6 +180,7 @@ struct RunReduction {
     std::uint64_t cell_dropped{};
     std::uint64_t dominated{};
     float max_cell_dropped_snr{};
+    std::uint64_t max_per_cell_used{};   ///< Below max_per_cell: memory bound.
     std::vector<std::uint32_t> retained; ///< Spool rows kept, ascending.
 };
 
@@ -321,6 +322,8 @@ void copy_ep_chunks(const HighFive::File& raw,
                     static_cast<std::uint64_t>(reduction.retained.size()));
                 dst_run.createAttribute("max_cell_dropped_snr",
                                         reduction.max_cell_dropped_snr);
+                dst_run.createAttribute("max_per_cell_used",
+                                        reduction.max_per_cell_used);
                 // The options of the reduction: republishing this product
                 // needs them, as for a spool the search reduced.
                 dst_run.createAttribute("reduced_max_per_cell",
@@ -934,12 +937,19 @@ void publish_candidate_results(const std::filesystem::path& spool,
             return;
         }
         const float max_cell_dropped = cap->max_dropped_snr();
+        const auto used              = cap->max_per_cell_used();
+        if (used < options.max_per_cell) {
+            spdlog::warn("Candidate cells kept {} trials each instead of {} "
+                         "to fit candidate memory_gb",
+                         used, options.max_per_cell);
+        }
         auto kept                    = cap->take();
         const std::uint64_t absorbed = dominance ? dominance->reduce(kept) : 0;
         dominated += absorbed;
         if (run != nullptr) {
             run->dominated            = absorbed;
             run->max_cell_dropped_snr = max_cell_dropped;
+            run->max_per_cell_used    = used;
             run->retained.reserve(kept.size());
             for (const auto& c : kept) {
                 run->retained.push_back(c.source_index);
@@ -1008,6 +1018,10 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 run.max_cell_dropped_snr = std::max(
                     run.max_cell_dropped_snr,
                     group.getAttribute("max_cell_dropped_snr").read<float>());
+                if (group.hasAttribute("max_per_cell_used")) {
+                    run.max_per_cell_used = std::min(run.max_per_cell_used,
+                                                     get("max_per_cell_used"));
+                }
             }
         }
     } else {
