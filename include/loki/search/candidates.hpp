@@ -63,6 +63,9 @@ struct Candidate {
     std::array<double, 6> parameters{};
     std::array<double, 6> parameter_errors{};
     bool has_parameter_errors{false};
+    /// EP: a parameter other than frequency lies outside its chunk's
+    /// configured limits at the reported epoch (the observation midpoint).
+    bool outside_prior{false};
     std::uint64_t id{};
     std::uint32_t source_region{};
     std::uint32_t source_index{};

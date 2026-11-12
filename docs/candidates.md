@@ -85,6 +85,18 @@ one written with `--no-candidates`, reduces it then: a 10 GB spool of 83
 million leaves gave a 1.5 MB result. With `max_per_cell = 0` the run groups
 are copied whole, as before.
 
+EP limits on acceleration, jerk and higher derivatives (from `[search]` or
+`[search.orbit]`) apply at the epoch of each run's reference segment, while
+leaves are reported at the observation midpoint. A leaf's reported
+parameters can therefore lie outside the box: for a jerk search,
+`|a| <= a_max + j_max * T / 2` (tested in
+`tests/cpp/api/ep_outside_prior_t.cpp`), and correspondingly for higher
+orders. Such leaves are kept, not vetoed, since a real system near the edge
+of the prior lands there, and every table row carries `outside_prior` (1 when
+a non-frequency parameter lies outside its chunk's limits, recorded in the
+chunk's `param_limits`, `(nparams, 2)` as `[min, max]` in `param_names`
+order). It is 0 for FFA rows and for spools written before `param_limits`.
+
 The candidate score is the existing run `scores` value: maximum boxcar S/N of
 the final reintegrated fold. `scores_ep` remains the pruning-score diagnostic.
 Candidate options and S/N selection do not change pruning thresholds, survivor
@@ -440,7 +452,7 @@ parameter uncertainties.
 `f0`, `f1`, `f2` are frequency, frequency derivative and second frequency
 derivative in Hz, Hz/s and Hz/s². Other columns include `snr`, `width`, `nbins`,
 `duty_cycle`, `member_count`, `phase_extent`, `parent_cluster_id`, `harmonic_numerator`,
-`harmonic_denominator`, and `selected`. Nonapplicable relationship fields are
+`harmonic_denominator`, `selected` and `outside_prior`. Nonapplicable relationship fields are
 zero/-1. On raw detection rows, only `cluster_id` encodes membership; `phase_extent` is zero and cluster
 counts, relationships and selection must be read from `/clusters`.
 

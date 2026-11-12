@@ -73,6 +73,19 @@ void initialize_ep_results(
         chunk_group.createDataSet("scoring_widths",
                                   chunk.cfg.get_scoring_widths());
         chunk_group.createDataSet("branching_pattern", chunk.branching_pattern);
+        // The parameter box of the chunk, in param_names order, [min, max]
+        // per parameter. It applies at the pruning's reference segment, so a
+        // leaf reported at the midpoint can lie outside it (outside_prior).
+        std::vector<double> limits;
+        for (const auto& limit : chunk.cfg.get_param_limits()) {
+            limits.push_back(limit.min);
+            limits.push_back(limit.max);
+        }
+        chunk_group
+            .createDataSet("param_limits",
+                           HighFive::DataSpace({limits.size() / 2, 2}),
+                           HighFive::create_datatype<double>())
+            .write_raw(limits.data());
     }
     main_h5.createAttribute("total_pruning_gflops", 0.0);
 }

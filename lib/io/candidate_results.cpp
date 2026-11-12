@@ -496,6 +496,15 @@ std::vector<Candidate> read_ep_candidates(const HighFive::File& file,
         leaf_index.resize(count);
         run.getDataSet("leaf_index").select({start}, {count}).read(leaf_index);
     }
+    // The chunk's parameter box, when the spool records it.
+    std::vector<double> limits;
+    if (file.getGroup(chunk_path).exist("param_limits")) {
+        const auto ds = file.getGroup(chunk_path).getDataSet("param_limits");
+        if (ds.getDimensions() == std::vector<std::size_t>{nparams, 2}) {
+            limits.resize(2 * nparams);
+            ds.read_raw(limits.data());
+        }
+    }
     const std::size_t stride = (nparams + 2) * 2;
     std::vector<Candidate> records;
     records.reserve(count);
@@ -511,15 +520,25 @@ std::vector<Candidate> read_ep_candidates(const HighFive::File& file,
             throw std::overflow_error(
                 "EP leaf index exceeds detection identity capacity");
         }
-        records.push_back(search::detail::ep_leaf_candidate(
+        auto c = search::detail::ep_leaf_candidate(
             std::span<const double>(leaves).subspan(i * stride, stride),
             nparams, scores[i], widths[i], nbins, run_id,
-            static_cast<std::uint32_t>(leaf)));
+            static_cast<std::uint32_t>(leaf));
+        // Frequency (the last parameter) is not part of the prior box.
+        for (std::size_t k = 0; !limits.empty() && k + 1 < nparams; ++k) {
+            if (c.parameters[k] < limits[2 * k] ||
+                c.parameters[k] > limits[(2 * k) + 1]) {
+                c.outside_prior = true;
+            }
+        }
+        records.push_back(c);
     }
     return records;
 }
 
 static_assert(std::is_trivially_copyable_v<Candidate>);
+// docs/candidates.md and docs/memory.md quote the sort record size.
+static_assert(sizeof(Candidate) == 184);
 void write_record(std::ostream& out, const Candidate& c) {
     out.write(reinterpret_cast<const char*>(&c), sizeof(c));
     if (!out) {
@@ -682,6 +701,7 @@ public:
         create<std::uint32_t>("harmonic_denominator");
         create<std::uint8_t>("selected");
         create<std::uint8_t>("has_parameter_errors");
+        create<std::uint8_t>("outside_prior");
         HighFive::DataSetCreateProps props;
         props.add(HighFive::Chunking({batch_size, nparams}));
         props.add(HighFive::Shuffle());
@@ -756,6 +776,9 @@ public:
                              [](const auto& c) { return c.selected ? 1 : 0; });
         column<std::uint8_t>("has_parameter_errors", [](const auto& c) {
             return c.representative.has_parameter_errors ? 1 : 0;
+        });
+        column<std::uint8_t>("outside_prior", [](const auto& c) {
+            return c.representative.outside_prior ? 1 : 0;
         });
         append_column("cluster_id", m_ids);
         std::vector<double> params;
