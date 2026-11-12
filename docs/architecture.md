@@ -331,8 +331,21 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   `LOKI_FORCE_CURAND_RNG`. The CUDA `DynamicThresholdScheme` numbers its work
   items per batch, so its results are reproducible per (seed, `batch_size`).
 - On the GPU, the time-domain brute fold accumulates with float `atomicAdd`
-  and is not bit-reproducible run to run (rule 6). Every other path is
+  and is not bit-reproducible run to run (rule 6). The CUDA EP search in the
+  Fourier domain is not bit-reproducible on real data either: two identical
+  runs of a 2^26-sample jerk search (2026-11, L40) gave final-leaf S/N that
+  differed by up to 7.6e-6 (absolute, below 1e-6 relative), and so slightly
+  different leaf sets near `snr_min`; the cause has not been investigated.
+  Production needs statistical, not bit, reproducibility: the same
+  detections, with S/N within 1e-4 relative. Every other path is
   deterministic for a fixed seed.
+- Candidate postprocessing (sorting, the per-run reduction, grouping and
+  selection) is deterministic: given the same final leaves it gives the same
+  product, bit for bit, in any thread count. Ties are broken by S/N, then the
+  frequency derivatives (lower first, frequency first), then the narrower
+  duty cycle, then the larger `nbins`, then the identity `(run << 32) | leaf`
+  (`candidate_brighter`). A near-tie that run-to-run
+  jitter reverses can still change which leaf represents a cluster.
 - The CUDA `FFAFreqSweep` merges the last FFA level(s) on chip with the
   boxcar scorer. In the time domain this is bit-identical to storing the
   levels and calling `score_and_filter_cuda_d`

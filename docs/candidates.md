@@ -512,6 +512,15 @@ scheduling, not search results, and change from run to run:
 | `n_runs`, `n_runs_overloaded`, `n_overloads` | EP: runs, runs with at least one world-tree overload, and overloads summed over `level_stats` |
 | `plan_peak_memory_gb` | EP: the largest chunk `chunk_memory_gb` of the plan (device memory on CUDA) |
 | `leaves_dropped` | Trials the candidate reduction dropped: root `n_cell_dropped` plus `n_dominated` |
+| `max_cell_dropped_snr` | EP: the highest S/N the cell cap dropped in any run (runs' `max_cell_dropped_snr`) |
+| `loki_version`, `loki_commit` | The build that wrote the statistics: release and `git describe --always --dirty` at build time (`unknown` outside a git checkout) |
+| `config_hash` | `fnv1a64:` and the 64-bit FNV-1a hash, in hex, of the root `config_effective` text; equal hashes mean the same effective configuration |
+| `input_path` | The input time series (`/observation@input_path`) |
+
+The reduction has no S/N floor (it keeps the strongest leaves of every
+frequency cell, whatever their S/N), so there is no `snr_floor_used`;
+`max_cell_dropped_snr` says how strong the strongest dropped leaf was. Per-run
+overload counts stay in each run's `level_stats` (`n_overloads`).
 
 With a `/detections` table, `detections_per_nbins/nbins` and `count` give
 the detections per profile bin count, which is one row per octave group.

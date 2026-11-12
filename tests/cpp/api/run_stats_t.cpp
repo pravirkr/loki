@@ -86,6 +86,11 @@ TEST_CASE("write_run_stats records timings and EP run counts",
     const auto product = outdir / "product_ep_results.h5";
     EPFreqSweep::publish_candidates(diag, product, options,
                                     loki::io::ObservationMetadata{}, 0.0);
+    {
+        // The CLI records the effective configuration before /run_stats.
+        HighFive::File h5(product.string(), HighFive::File::ReadWrite);
+        h5.createAttribute("config_effective", std::string("abc"));
+    }
     loki::search::write_run_stats(product, {});
     const HighFive::File h5(product.string(), HighFive::File::ReadOnly);
     const auto g = h5.getGroup("run_stats");
@@ -101,6 +106,13 @@ TEST_CASE("write_run_stats records timings and EP run counts",
     CHECK(g.getDataSet("detections_per_nbins/nbins")
               .read<std::vector<std::uint32_t>>() ==
           std::vector<std::uint32_t>{32});
+    // Provenance: this build, and FNV-1a 64 of the configuration text.
+    CHECK_FALSE(g.getAttribute("loki_version").read<std::string>().empty());
+    CHECK_FALSE(g.getAttribute("loki_commit").read<std::string>().empty());
+    CHECK(g.getAttribute("config_hash").read<std::string>() ==
+          "fnv1a64:e71fa2190541574b");
+    CHECK(g.hasAttribute("input_path"));
+    CHECK(g.getAttribute("max_cell_dropped_snr").read<float>() >= 0.0F);
     CHECK(g.getAttribute("leaves_dropped").read<std::uint64_t>() ==
           h5.getAttribute("n_cell_dropped").read<std::uint64_t>() +
               h5.getAttribute("n_dominated").read<std::uint64_t>());

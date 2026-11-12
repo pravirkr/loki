@@ -15,6 +15,8 @@
 #include <highfive/H5File.hpp>
 #include <highfive/highfive.hpp>
 
+#include "lib/generated/git_commit.hpp"
+
 namespace loki::search {
 
 namespace {
@@ -81,6 +83,65 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
     out.createAttribute("n_runs_overloaded", n_overloaded);
     out.createAttribute("n_overloads", n_overloads);
     out.createAttribute("plan_peak_memory_gb", plan_peak_memory_gb);
+}
+
+/// FNV-1a, 64 bit: a stable hash of the effective configuration text, to
+/// group runs made with the same configuration.
+std::uint64_t fnv1a64(std::string_view text) {
+    std::uint64_t hash = 0xcbf29ce484222325ULL;
+    for (const char c : text) {
+        hash ^= static_cast<unsigned char>(c);
+        hash *= 0x100000001b3ULL;
+    }
+    return hash;
+}
+
+/// Version and commit of this build, and the configuration hash and input
+/// path of the run when the file records them.
+void write_provenance_summary(HighFive::File& file, HighFive::Group& out) {
+    out.createAttribute("loki_version", std::string(LOKI_PRODUCER_VERSION));
+    out.createAttribute("loki_commit", std::string(LOKI_GIT_COMMIT));
+    if (file.hasAttribute("config_effective")) {
+        const auto config =
+            file.getAttribute("config_effective").read<std::string>();
+        out.createAttribute("config_hash",
+                            fmt::format("fnv1a64:{:016x}", fnv1a64(config)));
+    }
+    if (file.exist("observation") &&
+        file.getGroup("observation").hasAttribute("input_path")) {
+        out.createAttribute("input_path", file.getGroup("observation")
+                                              .getAttribute("input_path")
+                                              .read<std::string>());
+    }
+}
+
+/// The highest S/N the cell cap dropped in any reduced EP run.
+void write_max_cell_dropped_snr(HighFive::File& file, HighFive::Group& out) {
+    if (!file.exist("chunks")) {
+        return;
+    }
+    bool any          = false;
+    float most        = 0;
+    const auto chunks = file.getGroup("chunks");
+    for (const auto& chunk_name : chunks.listObjectNames()) {
+        const auto chunk = chunks.getGroup(chunk_name);
+        if (!chunk.exist("runs")) {
+            continue;
+        }
+        const auto runs = chunk.getGroup("runs");
+        for (const auto& run_name : runs.listObjectNames()) {
+            const auto run = runs.getGroup(run_name);
+            if (run.hasAttribute("max_cell_dropped_snr")) {
+                any  = true;
+                most = std::max(
+                    most,
+                    run.getAttribute("max_cell_dropped_snr").read<float>());
+            }
+        }
+    }
+    if (any) {
+        out.createAttribute("max_cell_dropped_snr", most);
+    }
 }
 
 void write_detections_per_nbins(HighFive::File& file, HighFive::Group& out) {
@@ -160,6 +221,8 @@ void write_run_stats(const std::filesystem::path& results_file,
         out.createAttribute("peak_rss_gb", *stats.peak_rss_gb);
     }
     write_ep_run_counts(file, out);
+    write_provenance_summary(file, out);
+    write_max_cell_dropped_snr(file, out);
     if (file.hasAttribute("n_cell_dropped") &&
         file.hasAttribute("n_dominated")) {
         std::uint64_t cell      = 0;

@@ -195,10 +195,17 @@ void EPFreqSweep::execute(std::span<const float> ts_e,
         std::filesystem::rename(spool, kept, error);
         if (!error) {
             cleanup();
-            spdlog::error("EP candidate postprocessing {}; completed runs are "
-                          "kept in '{}'. Retry with "
-                          "EPFreqSweep::publish_candidates.",
-                          reason, kept.string());
+            std::error_code size_error;
+            const auto bytes = std::filesystem::file_size(kept, size_error);
+            spdlog::error(
+                "EP candidate postprocessing {}; the completed search is kept "
+                "in '{}' ({:.1f} MB). Publish it with the same candidate "
+                "options, e.g. in Python "
+                "libloki.prune.EPFreqSweep.publish_candidates('{}', "
+                "'{}_ep_results.h5', candidates=...)",
+                reason, kept.string(),
+                size_error ? 0.0 : static_cast<double>(bytes) / 1.0e6,
+                kept.string(), file_prefix);
         } else {
             spdlog::error("EP candidate postprocessing {}; completed runs "
                           "remain in '{}' ({})",
