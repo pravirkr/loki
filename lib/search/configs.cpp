@@ -2323,13 +2323,14 @@ remove_harmonics = false
 harmonic_denominator_max = 100
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
-# Strongest trials kept per frequency cell of each run, before grouping; 0
-# keeps all. Set exactly one cell width with max_per_cell.
-max_per_cell = 0
-# cell_bins = <cell width in Fourier bins (1/tobs)>
+# Per-run reduction of the final leaves, before grouping: keep the
+# max_per_cell strongest leaves of each frequency cell of each run, then absorb
+# leaves a stronger leaf of the run explains (dominance_kappa; 0 disables).
+# max_per_cell = 0 keeps every leaf. Set exactly one cell width.
+max_per_cell = 32
+cell_bins = 64.0 # cell width in Fourier bins (1/tobs)
 # cell_log_width = <cell width in ln(frequency)>
-# Absorb trials a stronger trial of the run explains; 0 disables.
-dominance_kappa = 0.0
+dominance_kappa = 1.5
 max_candidates = 0
 # Separate host candidate budget; reserved before CPU chunk planning.
 memory_gb = 1.0

@@ -181,9 +181,10 @@ remove_harmonics = false
 harmonic_denominator_max = 100
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
-max_per_cell = 0
+max_per_cell = 0 # EP: 32
 # cell_bins or cell_log_width: exactly one is required with max_per_cell
-dominance_kappa = 0.0
+# cell_bins = 64.0 # EP default
+dominance_kappa = 0.0 # EP: 1.5
 max_candidates = 0
 memory_gb = 1.0
 # temporary_directory = "/scratch/loki"
@@ -297,11 +298,26 @@ track in its index, so such a search exhausts `memory_gb` long before
 detection order above, are sorted, grouped and written. Zero `max_per_cell`
 keeps every trial.
 
+**EP searches reduce their final leaves by default**: `search ep` and
+`EPFreqSweep.publish_candidates` start from
+`CandidateOptions::ep_defaults()` (`libloki.configs.CandidateOptions.ep_defaults()`
+in Python), which keeps 32 leaves per cell of 64 Fourier bins (`max_per_cell
+= 32`, `cell_bins = 64`) and absorbs dominated leaves (`dominance_kappa =
+1.5`, below). `max_per_cell = 0` in `[candidates]` (or `--max-per-cell 0`)
+keeps every leaf and gives the full, unreduced product. FFA searches and a
+default-constructed `CandidateOptions` keep every trial.
+
+On searches with known pulsars and injections, these defaults kept every
+source's best S/N and every run that detected it, while publishing 2
+percent of the leaves above `snr_min` or fewer; a search of 734,590 leaves
+that took more than 30 minutes to postprocess unreduced published in about
+a second.
+
 A cell is a frequency interval of one source: one EP run, or one FFA search
 region (`source_region`). Cells of different runs never compete, so a bright
 source that fills a cell in its strongest runs does not displace its weaker
 detections in the other runs, and the number of runs that detect a source is
-kept. Set exactly one cell width with `max_per_cell`; neither has a default:
+kept. Set exactly one cell width with `max_per_cell` (EP sets `cell_bins`):
 
 - `cell_bins`: a trial at frequency f is in cell `floor(f * tobs / cell_bins)`,
   a width of `cell_bins` Fourier bins;
@@ -321,7 +337,7 @@ index. The cap applies to EP and FFA alike, and to `publish_candidates`.
 Most trials a cell keeps are still responses to the same pulse: the same
 track at a slightly different acceleration or frequency, or a track that
 crosses the pulse for part of the observation. With `dominance_kappa`
-positive (it requires `max_per_cell`), each run's kept trials are visited in
+positive, each run's cell-capped trials are visited in
 detection order, and a trial is absorbed by a stronger kept trial of the same
 run that explains it:
 
@@ -337,8 +353,9 @@ run that explains it:
 Only kept trials within two cell widths in frequency are compared. Absorbed
 trials are not detections of the product; the root attribute `n_dominated`
 counts them. A second source on a nearby track is kept whenever its S/N is
-more than `dominance_kappa` times what the stronger pulse explains. Zero, the
-default, disables the stage.
+more than `dominance_kappa` times what the stronger pulse explains. Zero
+disables the stage (the default outside EP), and it runs only within the cell
+cap: with `max_per_cell = 0` it has no effect.
 
 ## Common HDF5 schema 1.0
 

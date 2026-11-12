@@ -44,6 +44,8 @@ void bind_configs(py::module_& m) {
         .def_readwrite("cell_bins", &CO::cell_bins)
         .def_readwrite("cell_log_width", &CO::cell_log_width)
         .def_readwrite("dominance_kappa", &CO::dominance_kappa)
+        .def_static("ep_defaults", &CO::ep_defaults,
+                    "Options of EP searches: per-run reduction on")
         .def_readwrite("max_candidates", &CO::max_candidates)
         .def_readwrite("memory_gb", &CO::memory_gb)
         .def_readwrite("temporary_directory", &CO::temporary_directory)

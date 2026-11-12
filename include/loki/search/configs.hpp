@@ -367,6 +367,10 @@ private:
  * the FFA and the EP searches. Unknown and removed keys are rejected.
  */
 struct EPTomlConfig : FFATomlConfig {
+    /// EP searches reduce their final leaves per run by default
+    /// (CandidateOptions::ep_defaults()); FFA searches keep every trial.
+    EPTomlConfig() { candidates = CandidateOptions::ep_defaults(); }
+
     // [ep]
     /// Entropic information limit for EP only; empty selects the search
     /// default.

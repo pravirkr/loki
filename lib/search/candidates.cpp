@@ -222,6 +222,14 @@ double phase_span(const Candidate& a,
 }
 } // namespace
 
+CandidateOptions CandidateOptions::ep_defaults() {
+    CandidateOptions options;
+    options.max_per_cell    = 32;
+    options.cell_bins       = 64;
+    options.dominance_kappa = 1.5;
+    return options;
+}
+
 void CandidateOptions::validate() const {
     if (grouping != "transitive" && grouping != "anchored") {
         throw std::invalid_argument(
@@ -243,10 +251,6 @@ void CandidateOptions::validate() const {
     if (!utils::is_finite(dominance_kappa) || dominance_kappa < 0) {
         throw std::invalid_argument(
             "candidate dominance_kappa must be finite and nonnegative");
-    }
-    if (dominance_kappa > 0 && max_per_cell == 0) {
-        throw std::invalid_argument(
-            "candidate dominance_kappa requires max_per_cell");
     }
     if (max_per_cell != 0 && (cell_bins > 0) == (cell_log_width > 0)) {
         throw std::invalid_argument(
@@ -384,8 +388,9 @@ DominanceReducer::DominanceReducer(double tobs, const CandidateOptions& options)
       m_reach(m_bins ? 2 * options.cell_bins / tobs
                      : 2 * options.cell_log_width) {
     options.validate();
-    if (options.dominance_kappa <= 0) {
-        throw std::invalid_argument("candidate dominance needs a kappa");
+    if (options.dominance_kappa <= 0 || options.max_per_cell == 0) {
+        throw std::invalid_argument(
+            "candidate dominance needs a kappa and the cell cap");
     }
     if (!utils::is_finite(tobs) || tobs <= 0) {
         throw std::invalid_argument(

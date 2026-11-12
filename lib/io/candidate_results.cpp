@@ -752,7 +752,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
         cap.emplace(options, tobs, 2 * source_bytes);
     }
     std::optional<search::detail::DominanceReducer> dominance;
-    if (options.dominance_kappa > 0) {
+    if (cap && options.dominance_kappa > 0) {
         dominance.emplace(tobs, options);
     }
     std::uint64_t dominated = 0;

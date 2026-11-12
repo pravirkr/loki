@@ -42,12 +42,17 @@ struct CandidateOptions {
     /// trial of the same run explains: one whose phase track stays within the
     /// suppression radius of it, or whose S/N is at most dominance_kappa
     /// times what the stronger trial's pulse would give along its track.
-    /// Zero disables it; it requires max_per_cell.
+    /// Zero disables it. It runs only within the cell cap: with max_per_cell
+    /// zero it has no effect.
     double dominance_kappa{0};
     std::uint64_t max_candidates{0}; ///< Zero means unlimited.
     double memory_gb{1.0};           ///< Additional host memory, GB (2^30).
     std::filesystem::path temporary_directory;
     void validate() const;
+    /// Defaults of EP searches: their final leaves are reduced per run, with
+    /// max_per_cell 32 in cells of 64 Fourier bins and dominance_kappa 1.5.
+    /// max_per_cell = 0 keeps every leaf.
+    [[nodiscard]] static CandidateOptions ep_defaults();
 };
 
 /// Normalized Taylor trial at the midpoint of the searched interval.

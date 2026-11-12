@@ -468,9 +468,12 @@ TEST_CASE("Dominance absorbs trials a stronger trial of the run explains",
                                              trial(50.1, 0, 1.5F, 0, 1)};
     REQUIRE(loki::search::detail::DominanceReducer(tobs, options).reduce(far) ==
             0);
-    // Dominance needs the cell cap.
+    // Dominance runs only within the cell cap: without it, kappa is valid
+    // but has no effect.
     options.max_per_cell = 0;
-    REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);
+    REQUIRE_NOTHROW(options.validate());
+    REQUIRE_THROWS_AS(loki::search::detail::DominanceReducer(tobs, options),
+                      std::invalid_argument);
 }
 
 TEST_CASE("Dominance publishes one detection per explained group",

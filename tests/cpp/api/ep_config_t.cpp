@@ -488,3 +488,32 @@ TEST_CASE("EPSearchConfig TOML helpers round-trip", "[config][ep]") {
     loki::search::EPSearchConfig::write_default_toml(path);
     REQUIRE(std::filesystem::exists(path));
 }
+
+TEST_CASE("EP configs reduce final leaves per run by default", "[config]") {
+    using loki::search::CandidateOptions;
+    const auto ep = CandidateOptions::ep_defaults();
+    REQUIRE(ep.max_per_cell == 32);
+    REQUIRE(ep.cell_bins == 64);
+    REQUIRE(ep.dominance_kappa == 1.5);
+    REQUIRE_NOTHROW(ep.validate());
+    // A default-constructed CandidateOptions and FFA configs keep every trial.
+    REQUIRE(CandidateOptions{}.max_per_cell == 0);
+    REQUIRE(loki::search::FFATomlConfig{}.candidates.max_per_cell == 0);
+    REQUIRE(
+        loki::search::FFATomlConfig::from_string("").candidates.max_per_cell ==
+        0);
+    const auto empty = loki::search::EPTomlConfig::from_string("");
+    REQUIRE(empty.candidates.max_per_cell == ep.max_per_cell);
+    REQUIRE(empty.candidates.cell_bins == ep.cell_bins);
+    REQUIRE(empty.candidates.dominance_kappa == ep.dominance_kappa);
+    const auto tmpl = loki::search::EPTomlConfig::from_string(
+        loki::search::EPTomlConfig::default_toml_string());
+    REQUIRE(tmpl.candidates.max_per_cell == ep.max_per_cell);
+    REQUIRE(tmpl.candidates.cell_bins == ep.cell_bins);
+    REQUIRE(tmpl.candidates.dominance_kappa == ep.dominance_kappa);
+    // max_per_cell = 0 alone turns the reduction off.
+    const auto off = loki::search::EPTomlConfig::from_string(
+        "[candidates]\nmax_per_cell = 0\n");
+    REQUIRE(off.candidates.max_per_cell == 0);
+    REQUIRE_NOTHROW(off.candidates.validate());
+}

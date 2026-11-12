@@ -86,10 +86,12 @@ public:
 
     /// Retry postprocessing of a completed EP spool without searching again.
     /// With no override, snr_min is read from the saved search configuration.
+    /// Candidates default to the EP defaults (per-run reduction on).
     static void
     publish_candidates(const std::filesystem::path& spool,
                        const std::filesystem::path& output,
-                       const search::CandidateOptions& candidates = {},
+                       const search::CandidateOptions& candidates =
+                           search::CandidateOptions::ep_defaults(),
                        const io::ObservationMetadata& observation = {},
                        std::optional<double> snr_min = std::nullopt);
 
