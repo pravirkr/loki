@@ -261,8 +261,8 @@ TEST_CASE(
 
 TEST_CASE("A cell cap keeps the strongest trials of each frequency cell",
           "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     // Frequencies 10, 11, 12 and 13 Hz in turn, S/N 6 to 125.
     spool(raw, 120);
     loki::search::CandidateOptions options;
@@ -272,7 +272,7 @@ TEST_CASE("A cell cap keeps the strongest trials of each frequency cell",
     for (const double memory_gb : {0.0001, 0.01}) {
         CAPTURE(memory_gb);
         options.memory_gb = memory_gb;
-        const auto out    = files.directory / "out.h5";
+        const auto out    = dir / "out.h5";
         loki::io::detail::write_candidate_results(raw, out, {}, options);
         const HighFive::File file(out.string(), HighFive::File::ReadOnly);
         std::uint64_t kept    = 0;
@@ -300,7 +300,7 @@ TEST_CASE("A cell cap keeps the strongest trials of each frequency cell",
     options.max_per_cell   = 3;
     options.cell_log_width = 1;
     options.memory_gb      = 0.01;
-    const auto wide        = files.directory / "wide.h5";
+    const auto wide        = dir / "wide.h5";
     loki::io::detail::write_candidate_results(raw, wide, {}, options);
     const HighFive::File file(wide.string(), HighFive::File::ReadOnly);
     REQUIRE(column<float>(file, "detections/snr") ==
@@ -350,16 +350,16 @@ TEST_CASE("A cell cap keeps the same trials in any arrival order",
 
 TEST_CASE("A cell cap is bounded by the candidate memory budget",
           "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     spool(raw, 120);
     loki::search::CandidateOptions options;
     options.max_per_cell   = 120;
     options.cell_log_width = 1;
     options.memory_gb      = 0.0001;
     REQUIRE_THROWS_WITH(
-        loki::io::detail::write_candidate_results(raw, files.directory / "o.h5",
-                                                  {}, options),
+        loki::io::detail::write_candidate_results(raw, dir / "o.h5", {},
+                                                  options),
         Catch::Matchers::ContainsSubstring("cell index exceeds"));
     options.cell_log_width = 0;
     REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);

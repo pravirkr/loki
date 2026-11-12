@@ -386,7 +386,6 @@ def test_ep_cell_cap_publishes_a_search_too_large_to_group(product, tmp_path):
         opts.validate()
 
 
-@pytest.mark.parametrize("nparams", [3, 4])
 @pytest.mark.parametrize("nparams", [3, 4, 5])
 def test_ep_reported_taylor_derivatives_are_normalized_without_truncation(
     product, tmp_path, nparams
