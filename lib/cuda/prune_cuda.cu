@@ -31,6 +31,7 @@
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/dynamic_cuda.cuh"
 #include "lib/cuda/ffa_cuda.cuh"
+#include "lib/cuda/interrupt_cuda.cuh"
 #include "lib/cuda/world_tree_cuda.cuh"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/nvtx.hpp"
@@ -186,6 +187,7 @@ public:
 
         SizeType iterations_completed = 0;
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
+            loki::interrupt::check(m_stream);
             execute_iteration(ffa_fold, m_stream);
             iterations_completed = iter + 1;
             // Check for early termination (no survivors)
@@ -1297,6 +1299,7 @@ private:
             m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get(),
             sink);
         for (const auto ref_seg : ref_segs_to_process) {
+            loki::interrupt::check(m_execution_stream.get());
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
                           /*task_id=*/0);

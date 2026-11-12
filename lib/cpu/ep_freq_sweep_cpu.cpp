@@ -130,6 +130,8 @@ public:
             (outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix))
                 .lexically_normal();
         std::filesystem::create_directories(tmp_dir, ec);
+        // Removed on every exit, including an interrupt or a failed chunk.
+        const detail::RemoveOnExit remove_tmp_dir(tmp_dir);
 
         const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
         const SizeType nchunks = chunk_cfgs.size();
@@ -230,9 +232,6 @@ public:
         const double accumulated_flops = detail::merge_ep_sweep_results(
             tmp_dir, result_file, chunk_cfgs, m_base_cfg, m_min_pd,
             m_poly_basis, m_ref_ducy, total_runtime);
-
-        // Clean up temporary chunk output directory on successful completion
-        std::filesystem::remove_all(tmp_dir, ec);
 
         spdlog::info(
             "EPFreqSweep complete: {} chunks processed in {:.2f} seconds "

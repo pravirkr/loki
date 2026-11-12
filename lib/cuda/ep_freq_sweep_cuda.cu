@@ -32,6 +32,7 @@
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/interrupt_cuda.cuh"
 #include "lib/cuda/prune_cuda.cuh"
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
@@ -230,6 +231,8 @@ public:
             (outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix))
                 .lexically_normal();
         std::filesystem::create_directories(tmp_dir, ec);
+        // Removed on every exit, including an interrupt or a failed chunk.
+        const detail::RemoveOnExit remove_tmp_dir(tmp_dir);
 
         // The inputs stay on the device for the whole sweep.
         const cudaStream_t stream = m_stream.get();
@@ -346,6 +349,7 @@ public:
             };
 
             for (SizeType i = group.begin; i < group.end; ++i) {
+                loki::interrupt::check(stream);
                 const nvtx::Range chunk_range("ep sweep: chunk");
                 const auto& chunk = chunk_cfgs[i];
                 spdlog::debug("EPFreqSweep: processing chunk {}/{} - nominal "
@@ -383,9 +387,6 @@ public:
 
         // Wait for all snapshots to reach the final HDF5 file.
         const double accumulated_flops = result_writer.finish(total_runtime);
-
-        // Clean up temporary chunk output directory on successful completion
-        std::filesystem::remove_all(tmp_dir, ec);
 
         spdlog::info(
             "EPFreqSweep complete: {} chunks processed in {:.2f} seconds "

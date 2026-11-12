@@ -15,7 +15,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "loki/algorithms/ep_regions.hpp"
@@ -26,6 +28,26 @@
 #include "lib/search/cands.hpp"
 
 namespace loki::pipelines::detail {
+
+/// Removes a directory tree when it goes out of scope, on success and when
+/// an exception (an interrupt, a failed chunk) unwinds the sweep. Errors are
+/// ignored: cleanup must not mask the exception in flight.
+class RemoveOnExit {
+public:
+    explicit RemoveOnExit(std::filesystem::path path)
+        : m_path(std::move(path)) {}
+    ~RemoveOnExit() {
+        std::error_code error;
+        std::filesystem::remove_all(m_path, error);
+    }
+    RemoveOnExit(const RemoveOnExit&)            = delete;
+    RemoveOnExit& operator=(const RemoveOnExit&) = delete;
+    RemoveOnExit(RemoveOnExit&&)                 = delete;
+    RemoveOnExit& operator=(RemoveOnExit&&)      = delete;
+
+private:
+    std::filesystem::path m_path;
+};
 
 /**
  * @brief Merges the per-chunk result files in @p tmp_dir into @p result_file.
@@ -64,7 +86,8 @@ struct EPResultPayload {
 /// operations run on the writer thread until finish() joins it.
 /// Writes the sweep's results from one background thread. They go to
 /// `<result_file>.partial`, which finish() renames to @p result_file, so an
-/// aborted sweep never leaves a file that looks complete.
+/// aborted sweep never leaves a file that looks complete. A writer destroyed
+/// before finish() published its file removes the partial file.
 class EPSweepWriter {
 public:
     EPSweepWriter(const std::filesystem::path& result_file,
@@ -85,6 +108,7 @@ private:
     std::filesystem::path m_partial_file;
     SizeType m_nchunks;
     bool m_finished{false};
+    bool m_published{false};
     std::mutex m_mutex;
     std::condition_variable m_ready;
     std::optional<EPResultPayload> m_pending;

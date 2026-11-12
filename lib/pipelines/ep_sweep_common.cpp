@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -155,6 +156,10 @@ EPSweepWriter::~EPSweepWriter() {
     if (m_thread.joinable()) {
         m_thread.join();
     }
+    if (!m_published) {
+        std::error_code error;
+        std::filesystem::remove(m_partial_file, error);
+    }
 }
 
 void EPSweepWriter::submit(EPResultPayload payload) {
@@ -231,6 +236,7 @@ double EPSweepWriter::finish(float runtime) {
         file.getAttribute("complete").write(1);
     }
     std::filesystem::rename(m_partial_file, m_file);
+    m_published = true;
     return m_gflops;
 }
 

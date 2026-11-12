@@ -14,6 +14,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "loki/common/interrupt.hpp"
+
 #include "lib/detail/utils.hpp"
 #include "lib/search/candidate_processing.hpp"
 
@@ -441,6 +443,7 @@ void CandidateClusterer::finish() {
                          work);
         }
         for (std::size_t h = 0; h < clusters.size(); ++h) {
+            loki::check_interrupt();
             auto& child    = clusters[h];
             const auto& hc = child.representative;
             for (std::size_t f = 0; f < h; ++f) {

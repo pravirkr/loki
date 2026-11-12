@@ -14,12 +14,15 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
+#include "loki/common/interrupt.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/candidates.hpp"
 
@@ -51,6 +54,68 @@ struct ScratchDirectory {
         std::error_code error;
         std::filesystem::remove_all(path, error);
     }
+};
+
+/// Interrupt checkpoints and periodic progress for postprocessing, which can
+/// run for minutes on a bright source. tick() is one atomic load plus, every
+/// 4096 calls, a clock read; it logs at most every kInterval.
+class PostProgress {
+public:
+    void phase(std::string name, std::uint64_t total) {
+        m_phase = std::move(name);
+        m_total = total;
+        m_done  = 0;
+    }
+    void tick(std::uint64_t done_increment = 1) {
+        loki::check_interrupt();
+        m_done += done_increment;
+        maybe_log();
+    }
+    /// One record rewritten by a sort merge (counted separately).
+    void tick_merge() {
+        loki::check_interrupt();
+        ++m_merged;
+        maybe_log();
+    }
+    /// Forces the next tick() to consider logging (after a slow step).
+    void poke() { m_calls = 4095; }
+
+private:
+    void maybe_log() {
+        if (++m_calls % 4096 != 0) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - m_last < kInterval) {
+            return;
+        }
+        m_last = now;
+        const double elapsed =
+            std::chrono::duration<double>(now - m_started).count();
+        const auto merged = m_merged == 0
+                                ? std::string()
+                                : fmt::format(", {} records merged", m_merged);
+        if (m_total != 0) {
+            spdlog::info("Candidate postprocessing: {} {}/{} ({:.0f}%){}, "
+                         "{:.0f} s elapsed",
+                         m_phase, m_done, m_total,
+                         100.0 * static_cast<double>(m_done) /
+                             static_cast<double>(m_total),
+                         merged, elapsed);
+        } else {
+            spdlog::info("Candidate postprocessing: {}{}, {:.0f} s elapsed",
+                         m_phase, merged, elapsed);
+        }
+    }
+    static constexpr std::chrono::seconds kInterval{30};
+    std::chrono::steady_clock::time_point m_started{
+        std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point m_last{m_started};
+    std::string m_phase;
+    std::uint64_t m_total{};
+    std::uint64_t m_done{};
+    std::uint64_t m_merged{};
+    std::uint64_t m_calls{};
 };
 
 void copy_object(const HighFive::File& source,
@@ -97,6 +162,48 @@ void copy_attributes(const HighFive::Group& source,
         H5Aclose(dst);
         if (wr < 0) {
             throw std::runtime_error("cannot copy search attribute");
+        }
+    }
+}
+
+/// Copies the spool's `chunks` tree one run at a time, with a checkpoint
+/// between runs: a single H5Ocopy of a multi-GB tree cannot be interrupted.
+/// The copied groups, datasets and attributes are those of one H5Ocopy.
+void copy_ep_chunks(const HighFive::File& raw,
+                    HighFive::File& result,
+                    PostProgress& progress) {
+    const auto src_chunks  = raw.getGroup("chunks");
+    auto dst_chunks        = result.createGroup("chunks");
+    const auto chunk_names = src_chunks.listObjectNames();
+    std::uint64_t n_runs   = 0;
+    for (const auto& chunk_name : chunk_names) {
+        const auto chunk = src_chunks.getGroup(chunk_name);
+        if (chunk.exist("runs")) {
+            n_runs += chunk.getGroup("runs").getNumberObjects();
+        }
+    }
+    copy_attributes(src_chunks, dst_chunks);
+    progress.phase("copying run diagnostics", n_runs);
+    for (const auto& chunk_name : chunk_names) {
+        const auto chunk_path = "chunks/" + chunk_name;
+        const auto src_chunk  = raw.getGroup(chunk_path);
+        auto dst_chunk        = dst_chunks.createGroup(chunk_name);
+        copy_attributes(src_chunk, dst_chunk);
+        for (const auto& name : src_chunk.listObjectNames()) {
+            if (name != "runs" ||
+                src_chunk.getObjectType(name) != HighFive::ObjectType::Group) {
+                copy_object(raw, chunk_path + "/" + name, dst_chunk, name);
+                continue;
+            }
+            const auto src_runs = src_chunk.getGroup("runs");
+            auto dst_runs       = dst_chunk.createGroup("runs");
+            copy_attributes(src_runs, dst_runs);
+            for (const auto& run : src_runs.listObjectNames()) {
+                // A run can be hundreds of MB: consider logging every run.
+                progress.poke();
+                progress.tick();
+                copy_object(raw, chunk_path + "/runs/" + run, dst_runs, run);
+            }
         }
     }
 }
@@ -300,7 +407,8 @@ bool read_record(std::istream& in, Candidate& c) {
 
 // Bounded fan-in; caller stores only a logarithmic number of pending runs.
 void merge_runs(std::span<const std::filesystem::path> inputs,
-                const std::filesystem::path& output) {
+                const std::filesystem::path& output,
+                PostProgress& progress) {
     struct Item {
         Candidate record;
         std::size_t source;
@@ -323,6 +431,7 @@ void merge_runs(std::span<const std::filesystem::path> inputs,
         throw std::runtime_error("cannot create candidate merge run");
     }
     while (!heap.empty()) {
+        progress.tick_merge();
         const auto item = heap.top();
         heap.pop();
         write_record(out, item.record);
@@ -339,8 +448,9 @@ void merge_runs(std::span<const std::filesystem::path> inputs,
 
 class ExternalSort {
 public:
-    explicit ExternalSort(std::filesystem::path directory)
-        : m_directory(std::move(directory)) {}
+    ExternalSort(std::filesystem::path directory, PostProgress& progress)
+        : m_directory(std::move(directory)),
+          m_progress(&progress) {}
     void add(std::vector<Candidate>& records) {
         std::ranges::sort(records, search::detail::candidate_brighter);
         auto path = next_path();
@@ -370,7 +480,7 @@ public:
             }
             const auto merged = next_path();
             const std::array inputs{m_levels[level], path};
-            merge_runs(inputs, merged);
+            merge_runs(inputs, merged, *m_progress);
             for (const auto& input : inputs) {
                 std::filesystem::remove(input);
             }
@@ -390,7 +500,7 @@ public:
             } else {
                 const auto merged = next_path();
                 const std::array inputs{result, path};
-                merge_runs(inputs, merged);
+                merge_runs(inputs, merged, *m_progress);
                 for (const auto& input : inputs) {
                     std::filesystem::remove(input);
                 }
@@ -405,6 +515,7 @@ private:
         return m_directory / (std::to_string(m_serial++) + ".run");
     }
     std::filesystem::path m_directory;
+    PostProgress* m_progress;
     std::uint64_t m_serial{};
     std::vector<std::filesystem::path> m_levels;
 };
@@ -582,6 +693,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
     options.validate();
     observation.validate();
     const auto started = std::chrono::steady_clock::now();
+    PostProgress progress;
     ScratchDirectory scratch(options.temporary_directory.empty()
                                  ? (output.parent_path().empty()
                                         ? std::filesystem::path(".")
@@ -632,13 +744,17 @@ void publish_candidate_results(const std::filesystem::path& spool,
                65536,
                static_cast<std::size_t>(options.memory_gb * utils::kBytesPerGB /
                                         (32 * sizeof(Candidate)))));
-    ExternalSort sort(scratch.path);
+    ExternalSort sort(scratch.path, progress);
     if (ep) {
+        progress.phase("reading and sorting runs", sources.size());
         for (std::size_t run_id = 0; run_id < sources.size(); ++run_id) {
+            progress.poke();
+            progress.tick();
             const auto count = raw.getGroup(sources[run_id].path)
                                    .getDataSet("scores")
                                    .getDimensions()[0];
             for (std::size_t start = 0; start < count; start += batch) {
+                loki::check_interrupt();
                 auto records = read_ep_candidates(
                     raw, sources[run_id], static_cast<std::uint32_t>(run_id),
                     start, std::min(batch, count - start), nparams, snr_min);
@@ -650,12 +766,16 @@ void publish_candidate_results(const std::filesystem::path& spool,
         }
     } else {
         nrows = raw.getDataSet("snr").getDimensions()[0];
+        progress.phase("reading and sorting detections", nrows);
         for (std::size_t start = 0; start < nrows; start += batch) {
+            progress.poke();
+            progress.tick(std::min(batch, nrows - start));
             auto records = read_candidates(
                 raw, start, std::min(batch, nrows - start), nparams);
             sort.add(records);
         }
     }
+    progress.phase("merging sorted runs", 0);
     const auto sorted = sort.finish();
     // The atomic publication file must live beside the destination, even if
     // scratch sorting is explicitly placed on another filesystem.
@@ -739,7 +859,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 copy_object(raw, "timer_stats", search_group, "timer_stats");
             }
             if (ep) {
-                copy_object(raw, "chunks", result.getGroup("/"), "chunks");
+                copy_ep_chunks(raw, result, progress);
                 copy_attributes(raw.getGroup("/"), result, true);
                 config.createAttribute("snr_min", snr_min);
                 config.createAttribute(
@@ -776,10 +896,14 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                    batch);
             const bool singleton_stream =
                 !options.cluster && !options.flag_harmonics;
+            progress.phase(singleton_stream ? "writing detections"
+                                            : "clustering detections",
+                           nrows);
             if (!sorted.empty()) {
                 std::ifstream in(sorted, std::ios::binary);
                 Candidate c;
                 while (read_record(in, c)) {
+                    progress.tick();
                     std::uint64_t id = 0;
                     if (singleton_stream) {
                         id = cluster_count++;
@@ -805,6 +929,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 result.unlink("_discarded");
             }
             if (!singleton_stream) {
+                progress.phase("finishing clusters", 0);
                 processor.finish();
                 // Transitive append IDs are provisional: a later bridge can
                 // join earlier groups. Remap only after the graph is complete,
@@ -812,9 +937,12 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 if (options.retain_detections && options.cluster &&
                     options.grouping == "transitive") {
                     auto dataset = result.getDataSet("detections/cluster_id");
+                    progress.phase("remapping cluster ids", nrows);
                     for (std::size_t start = 0; start < nrows; start += batch) {
                         const auto count = std::min(batch, nrows - start);
-                        auto ids         = read_rows<std::uint64_t>(
+                        progress.poke();
+                        progress.tick(count);
+                        auto ids = read_rows<std::uint64_t>(
                             result, "detections/cluster_id", start, count);
                         for (auto& id : ids) {
                             id = processor.cluster_id(id);

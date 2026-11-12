@@ -14,6 +14,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/backend.hpp"
+#include "loki/common/interrupt.hpp"
 #include "loki/search/configs.hpp"
 
 #include "lib/common/dispatch.hpp"
@@ -128,20 +129,22 @@ void FFAFreqSweep::execute(std::span<const float> ts_e,
     } catch (...) {
         // The search finished: keep its detections so post-processing can be
         // retried without searching again.
+        const std::string_view reason =
+            loki::interrupt_requested() ? "was interrupted" : "failed";
         const auto kept = outdir / (std::string(file_prefix) + "_ffa_spool.h5");
         std::error_code error;
         std::filesystem::rename(spool, kept, error);
         if (error) {
-            spdlog::error("FFA post-processing failed and the search spool "
+            spdlog::error("FFA post-processing {} and the search spool "
                           "could not be kept ({}); it remains in '{}'",
-                          error.message(), staging.string());
+                          reason, error.message(), staging.string());
         } else {
             discard_staging();
             spdlog::error(
-                "FFA post-processing failed; the search's detections are kept "
+                "FFA post-processing {}; the search's detections are kept "
                 "in '{}'. Retry with FFAFreqSweep::publish_candidates (Python: "
                 "libloki.ffa.FFAFreqSweep.publish_candidates).",
-                kept.string());
+                reason, kept.string());
         }
         throw;
     }

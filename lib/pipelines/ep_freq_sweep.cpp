@@ -15,6 +15,7 @@
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/backend.hpp"
+#include "loki/common/interrupt.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -177,25 +178,33 @@ void EPFreqSweep::execute(std::span<const float> ts_e,
         throw;
     }
     const auto spool = staging / "spool_ep_results.h5";
-    try {
-        publish_candidates(
-            spool, outdir / (std::string(file_prefix) + "_ep_results.h5"),
-            *m_impl->candidates, observation);
-    } catch (...) {
+    // The search finished: keep its runs so postprocessing can be retried
+    // without searching again, and remove the staging directory.
+    const auto keep_spool = [&](std::string_view reason) {
         const auto kept = outdir / (std::string(file_prefix) + "_ep_spool.h5");
         std::error_code error;
         std::filesystem::rename(spool, kept, error);
         if (!error) {
             cleanup();
-            spdlog::error(
-                "EP candidate postprocessing failed; completed runs are kept "
-                "in '{}'. Retry with EPFreqSweep::publish_candidates.",
-                kept.string());
+            spdlog::error("EP candidate postprocessing {}; completed runs are "
+                          "kept in '{}'. Retry with "
+                          "EPFreqSweep::publish_candidates.",
+                          reason, kept.string());
         } else {
-            spdlog::error("EP candidate postprocessing failed; completed runs "
+            spdlog::error("EP candidate postprocessing {}; completed runs "
                           "remain in '{}' ({})",
-                          staging.string(), error.message());
+                          reason, staging.string(), error.message());
         }
+    };
+    try {
+        publish_candidates(
+            spool, outdir / (std::string(file_prefix) + "_ep_results.h5"),
+            *m_impl->candidates, observation);
+    } catch (const loki::Interrupted&) {
+        keep_spool("was interrupted");
+        throw;
+    } catch (...) {
+        keep_spool("failed");
         throw;
     }
     cleanup();

@@ -249,8 +249,14 @@ pipe or a batch job's log gets plain lines. `NO_COLOR=1` turns colour off,
 `off`) overrides the progress bars.
 
 Exit status: 0 success, 1 failure, 130 stopped by Ctrl-C, 143 stopped by
-SIGTERM (e.g. Slurm's `scancel`); any other value is an invalid command
-line.
+SIGTERM (e.g. Slurm's `scancel` or HTCondor's `condor_rm`); any other value
+is an invalid command line. A search stops within seconds of the signal, in
+pruning (CPU or CUDA) or in candidate postprocessing, and removes its staging
+and scratch directories. If the search had already finished, its runs are
+kept as `<prefix>_ep_spool.h5` (`<prefix>_ffa_spool.h5`) for a retry without
+searching again (see [Candidate products](docs/candidates.md)). SIGKILL cannot
+be handled: it can leave a `.loki-ep-*` / `.loki-ffa-*` staging directory in
+the output directory.
 
 ---
 

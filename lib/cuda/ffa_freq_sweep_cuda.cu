@@ -27,6 +27,7 @@
 #include "lib/cuda/ffa_cuda.cuh"
 #include "lib/cuda/ffa_score_cuda.cuh"
 #include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/interrupt_cuda.cuh"
 #include "lib/cuda/score_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/detail/error_check.hpp"
@@ -213,6 +214,7 @@ public:
         std::optional<InFlight> prev;
         std::vector<SizeType> redo;
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
+            loki::interrupt::check(stream);
             const search::FFASearchConfig& cfg_cur = ffa_regions_cfgs[i];
             const auto& freq_limits = cfg_cur.get_param_limits().back();
             spdlog::debug("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
