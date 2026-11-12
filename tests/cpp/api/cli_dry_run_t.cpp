@@ -11,6 +11,8 @@
 #include "loki/common/types.hpp"
 #include "loki/io/timeseries.hpp"
 
+#include "temp_dir.hpp"
+
 #ifndef LOKI_APP_PATH
 #define LOKI_APP_PATH ""
 #endif
@@ -20,9 +22,7 @@ TEST_CASE("FFA CLI dry run plans with the input header", "[cli]") {
     if (app_path.empty()) {
         SKIP("loki_app was not built (LOKI_APP_PATH undefined)");
     }
-    const auto base =
-        std::filesystem::temp_directory_path() / "loki_cli_dry_run_header";
-    std::filesystem::create_directories(base);
+    const loki::test::TempDir base("loki-cli-dry-run-header");
 
     // 2^20 samples of 64 us: tobs 67.11 s. The config sets neither nsamps nor
     // tsamp, so only the header can give these.

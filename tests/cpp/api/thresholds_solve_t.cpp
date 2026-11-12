@@ -13,6 +13,8 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 
+#include "temp_dir.hpp"
+
 // DynamicThresholdScheme::solve() of modes "shared" and "robust": the schedule
 // to use, with the Pd and cost of exactly those thresholds measured on fresh
 // samples.
@@ -157,8 +159,7 @@ TEST_CASE("The guided beam needs a positive width and reach", "[thresholds]") {
 
 TEST_CASE("save works in every mode, with the solution after solve()",
           "[thresholds][solve][slow]") {
-    const auto dir = std::filesystem::temp_directory_path() / "loki_solve_save";
-    std::filesystem::remove_all(dir);
+    const test::TempDir dir("loki-solve-save");
     for (const std::string_view mode :
          {"legacy", "improved", "shared", "robust"}) {
         CAPTURE(mode);
@@ -175,7 +176,6 @@ TEST_CASE("save works in every mode, with the solution after solve()",
                     std::filesystem::file_size(before));
         }
     }
-    std::filesystem::remove_all(dir);
 }
 
 } // namespace loki

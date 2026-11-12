@@ -26,6 +26,8 @@
 #include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
 
+#include "temp_dir.hpp"
+
 using Catch::Approx;
 using loki::Backend;
 using loki::ComplexType;
@@ -239,12 +241,10 @@ template <typename FoldType>
 std::filesystem::path run_ep(EPMultiPass<FoldType>& ep,
                              const PulsarSearchConfig& cfg,
                              const EPInputs& in,
+                             const std::filesystem::path& outdir,
                              const std::string& prefix) {
     const auto ts_e = make_noise(cfg.get_nsamps(), 99);
     const std::vector<float> ts_v(cfg.get_nsamps(), 1.0F);
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_workspace_handle_ep";
-    std::filesystem::create_directories(outdir);
     ep.execute(ts_e, ts_v, outdir, prefix);
     return outdir / fmt::format("{}_pruning_nstages_{}_results.h5", prefix,
                                 in.nsegments);
@@ -257,14 +257,12 @@ void check_ep_shared_matches_owned(bool use_fourier, Exec exec) {
     const int nthreads = exec.backend == Backend::kCPU ? 2 : 1;
     const auto cfg     = make_ep_cfg(use_fourier, nthreads);
     const auto in      = make_ep_inputs(cfg);
+    const loki::test::TempDir outdir("loki-workspace-handle-ep");
 
     EPMultiPass<FoldType> owned(cfg, in.thresholds, std::nullopt, in.ref_segs,
                                 {}, kEPMaxSugg, kEPBatchSize, "taylor",
                                 /*show_progress=*/false, {}, exec);
-    // ctest runs test cases in parallel processes: keep file names distinct.
-    const auto tag        = fmt::format("{}_{}", loki::to_string(exec.backend),
-                                        use_fourier ? "fourier" : "time");
-    const auto owned_path = run_ep(owned, cfg, in, tag + "_owned");
+    const auto owned_path = run_ep(owned, cfg, in, outdir.path(), "owned");
 
     std::vector<EPWorkspace<FoldType>> workspaces;
     workspaces.reserve(static_cast<std::size_t>(nthreads));
@@ -275,7 +273,7 @@ void check_ep_shared_matches_owned(bool use_fourier, Exec exec) {
     EPMultiPass<FoldType> shared(ws_view, cfg, in.thresholds, std::nullopt,
                                  in.ref_segs, {}, kEPMaxSugg, kEPBatchSize,
                                  "taylor", /*show_progress=*/false, {}, exec);
-    const auto shared_path = run_ep(shared, cfg, in, tag + "_shared");
+    const auto shared_path = run_ep(shared, cfg, in, outdir.path(), "shared");
 
     const auto owned_ds  = read_ep_datasets(owned_path);
     const auto shared_ds = read_ep_datasets(shared_path);

@@ -283,7 +283,8 @@ public:
                    double validation_significance     = 5.0,
                    bool use_conservative_tile         = false,
                    bool use_boxcar_kadane             = false,
-                   std::optional<double> target_snr   = std::nullopt);
+                   std::optional<double> target_snr   = std::nullopt,
+                   double overflow_keep_fraction      = 0.5);
 
     explicit EPSearchConfig(FFASearchConfig ffa_cfg,
                             SizeType prune_poly_order        = 3,
@@ -293,7 +294,8 @@ public:
                             double propagator_significance   = 2.0,
                             double validation_significance   = 5.0,
                             bool use_conservative_tile       = false,
-                            std::optional<double> target_snr = std::nullopt);
+                            std::optional<double> target_snr = std::nullopt,
+                            double overflow_keep_fraction    = 0.5);
 
     ~EPSearchConfig() override;
     EPSearchConfig(EPSearchConfig&&) noexcept;
@@ -314,6 +316,11 @@ public:
     double get_validation_significance() const noexcept;
     bool get_use_conservative_tile() const noexcept override;
     double get_x_mass_const() const noexcept;
+    /// Fraction of the pool (the stage's survivors so far and the batch) that
+    /// the world tree keeps when a batch overflows it, in (0, 1]. 0.5 keeps
+    /// the upper half; 1 keeps every leaf that fits, at the cost of a trim
+    /// for nearly every later batch of the stage.
+    double get_overflow_keep_fraction() const noexcept;
 
     /// Same as FFASearchConfig::get_updated_config, but keeps the EP fields.
     /// A distinct name, so it never hides the base overloads: through an
@@ -378,6 +385,8 @@ struct EPTomlConfig : FFATomlConfig {
     double propagator_significance{2.0};
     double validation_significance{5.0};
     bool use_conservative_tile{false};
+    /// Share of the pool a full world tree keeps on overflow, in (0, 1]
+    double overflow_keep_fraction{0.5};
 
     // [output]
     /// Plan cache file. Used by `search ep --plan-only` and by a search that

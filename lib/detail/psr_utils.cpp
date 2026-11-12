@@ -1,6 +1,7 @@
 #include "lib/detail/psr_utils.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <span>
 #include <stdexcept>
@@ -13,6 +14,7 @@
 #include "loki/common/types.hpp"
 #include "loki/utils/psr_utils.hpp"
 
+#include "lib/core/circular.hpp"
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/math.hpp"
@@ -321,6 +323,77 @@ float phase_index(double proper_time,
 std::tuple<std::vector<double>, double>
 shift_taylor_params_d_f(std::span<const double> param_vec, double delta_t) {
     return core::shift_taylor_params_d_f(param_vec, delta_t);
+}
+
+LeafModel leaf_phase(std::span<const double> leaf,
+                     SizeType n_params,
+                     std::span<const double> times,
+                     double t_ref,
+                     std::span<double> phase,
+                     double propagator_significance) {
+    constexpr SizeType kParamStride = 2U;
+    constexpr SizeType kCircParams  = 5U;
+    constexpr SizeType kMaxDerivs   = kCircParams - 1U;
+    error_check::check(n_params >= 1 && n_params <= kCircParams,
+                       "leaf_phase: n_params must be 1 to 5");
+    error_check::check_equal(leaf.size(), (n_params + 2) * kParamStride,
+                             "leaf_phase: leaf must hold (n_params + 2) rows "
+                             "of (value, error)");
+    error_check::check_equal(phase.size(), times.size(),
+                             "leaf_phase: phase and times sizes differ");
+    const double freq = leaf[(n_params - 1) * kParamStride];
+    // The derivatives from the acceleration (m/s^2) upward; the leaf stores
+    // them highest first.
+    std::array<double, kMaxDerivs> deriv{};
+    for (SizeType k = 0; k + 1 < n_params; ++k) {
+        deriv[k] = leaf[(n_params - 2 - k) * kParamStride];
+    }
+    const double accel = deriv[0];
+    const double jerk  = deriv[1];
+
+    // A five-parameter search propagates each leaf as a circular orbit or as
+    // a polynomial; decide as it does.
+    auto model      = LeafModel::kTaylor;
+    double omega_sq = 0.0;
+    if (n_params == kCircParams) {
+        const auto [idx_snap, idx_crackle, idx_taylor] =
+            core::get_circ_taylor_mask(leaf, 1, n_params,
+                                       propagator_significance);
+        if (!idx_snap.empty()) {
+            model    = LeafModel::kCircularSnap;
+            omega_sq = -deriv[2] / accel;
+        } else if (!idx_crackle.empty()) {
+            model    = LeafModel::kCircularCrackle;
+            omega_sq = -deriv[3] / jerk;
+        }
+    }
+
+    if (model == LeafModel::kTaylor) {
+        // D = sum_k p_k dt^k / k!, k >= 2, by Horner's rule.
+        for (SizeType i = 0; i < times.size(); ++i) {
+            const double dt = times[i] - t_ref;
+            double delay    = 0.0;
+            for (SizeType k = n_params - 1; k-- > 0;) {
+                delay = (delay + deriv[k]) * dt / static_cast<double>(k + 2);
+            }
+            delay *= dt;
+            phase[i] = freq * (dt - (delay * utils::kInvCval));
+        }
+        return model;
+    }
+    // The search's circular propagation with the velocity gauged to zero:
+    // a(dt) = a cos(w dt) + (j / w) sin(w dt) and
+    // D(dt) = -(a(dt) - a) / w^2 + (j / w^2) dt.
+    const double omega = std::sqrt(omega_sq);
+    for (SizeType i = 0; i < times.size(); ++i) {
+        const double dt    = times[i] - t_ref;
+        const double a_new = (accel * std::cos(omega * dt)) +
+                             (jerk * std::sin(omega * dt) / omega);
+        const double delay =
+            (-(a_new - accel) / omega_sq) + ((jerk / omega_sq) * dt);
+        phase[i] = freq * (dt - (delay * utils::kInvCval));
+    }
+    return model;
 }
 
 } // namespace loki::psr_utils

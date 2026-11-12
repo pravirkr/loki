@@ -437,7 +437,7 @@ private:
 
         std::vector<std::uint32_t> widths_report_h;
         // RFI control is rejected on GPU, so it is never active here.
-        if (m_poly_basis == "taylor" && m_cfg.get_nparams() <= 4) {
+        if (m_poly_basis == "taylor") {
             widths_report_h.resize(n_leaves);
             const auto folds   = world_tree.get_folds_circular_view();
             auto& scratch      = ws.prune;
@@ -674,7 +674,8 @@ private:
         const auto seg_idx_cur = m_snail_scheme.get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
-        const auto n_branches = world_tree.get_size_old();
+        const auto n_branches  = world_tree.get_size_old();
+        const auto n_overloads = world_tree.overload_count();
 
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats,
                                   stream);
@@ -694,6 +695,7 @@ private:
             .n_leaves      = stats.n_leaves,
             .n_leaves_phy  = stats.n_leaves_phy,
             .n_leaves_surv = world_tree.get_size(),
+            .n_overloads   = world_tree.overload_count() - n_overloads,
         };
         m_pstats.update_stats(pstats_cur);
 
@@ -914,7 +916,8 @@ private:
                 current_threshold = world_tree.prepare_scored_batch(
                     cuda_utils::as_span(prune_ws.branched_scores_d),
                     cuda_utils::as_span(prune_ws.passing_indices_d),
-                    n_leaves_passing, current_threshold, stream);
+                    n_leaves_passing, current_threshold,
+                    m_cfg.get_overflow_keep_fraction(), stream);
                 // Keep parents readable until every accepted child's fold
                 // has been recomputed with the existing shift-add arithmetic.
                 const auto stride = world_tree.get_leaves_stride();
@@ -971,7 +974,8 @@ private:
                             cuda_utils::as_span(prune_ws.branched_folds_d),
                             scores,
                             cuda_utils::as_span(prune_ws.passing_indices_d),
-                            current_threshold, passing, stream);
+                            current_threshold, passing,
+                            m_cfg.get_overflow_keep_fraction(), stream);
                     }
                     if (passing < selected ||
                         world_tree.get_space_left() == 0) {

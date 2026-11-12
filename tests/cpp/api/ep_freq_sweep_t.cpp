@@ -9,7 +9,6 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -26,6 +25,8 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "temp_dir.hpp"
+
 using loki::Backend;
 using loki::Exec;
 using loki::ParamLimit;
@@ -33,6 +34,7 @@ using loki::SizeType;
 using loki::algorithms::EPRegionPlanner;
 using loki::pipelines::EPFreqSweep;
 using loki::search::PulsarSearchConfig;
+using loki::test::TempDir;
 
 namespace {
 
@@ -175,10 +177,8 @@ TEST_CASE("EPRegionPlanner wide band covers two regions and reports maxima",
 
 TEST_CASE("EPRegionPlanner rejects a stale plan cache version",
           "[ep_freq_sweep]") {
-    const auto cache_file =
-        std::filesystem::temp_directory_path() / "loki_test_ep_plan_stale.h5";
-    std::error_code ec;
-    std::filesystem::remove(cache_file, ec);
+    const TempDir dir("loki-ep-plan-stale");
+    const auto cache_file = dir / "ep_plan_stale.h5";
 
     const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
     {
@@ -192,16 +192,12 @@ TEST_CASE("EPRegionPlanner rejects a stale plan cache version",
     CHECK_THROWS_AS(
         EPRegionPlanner<float>(cfg, 0.1F, "taylor", 0.1F, cache_file),
         std::invalid_argument);
-    std::filesystem::remove(cache_file, ec);
 }
 
 TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
           "[ep_freq_sweep]") {
-    const auto outdir     = std::filesystem::temp_directory_path();
+    const TempDir outdir("loki-ep-plan-cache");
     const auto cache_file = outdir / "loki_test_ep_plan_cache_fast.h5";
-
-    std::error_code ec;
-    std::filesystem::remove(cache_file, ec);
 
     const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
     const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
@@ -255,7 +251,6 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         const auto bad = make_modified_cache("cache_bad_mem.h5",
                                              "max_process_memory_gb", 8.0);
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
-        std::filesystem::remove(bad, ec);
     }
 
     // 2. Mismatched frequency range
@@ -263,7 +258,6 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         const auto bad =
             make_modified_cache("cache_bad_fmin.h5", "f_min", 130.0);
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
-        std::filesystem::remove(bad, ec);
     }
 
     // 3. Mismatched min_pd
@@ -271,7 +265,6 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         const auto bad =
             make_modified_cache("cache_bad_minpd.h5", "min_pd", 0.5F);
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
-        std::filesystem::remove(bad, ec);
     }
 
     // 4. Mismatched poly_basis
@@ -279,7 +272,6 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         const auto bad = make_modified_cache("cache_bad_poly.h5", "poly_basis",
                                              std::string("chebyshev"));
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
-        std::filesystem::remove(bad, ec);
     }
 
     // 4b. Mismatched propagator_significance and validation_significance
@@ -287,12 +279,10 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         const auto bad_prop = make_modified_cache(
             "cache_bad_prop_sig.h5", "propagator_significance", 3.5);
         CHECK_THROWS_AS(reloaded.load_cache(bad_prop), std::invalid_argument);
-        std::filesystem::remove(bad_prop, ec);
 
         const auto bad_val = make_modified_cache(
             "cache_bad_val_sig.h5", "validation_significance", 7.0);
         CHECK_THROWS_AS(reloaded.load_cache(bad_val), std::invalid_argument);
-        std::filesystem::remove(bad_val, ec);
     }
 
     // 5. Non-existent file
@@ -304,7 +294,6 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         const auto bad = make_modified_cache("cache_bad_model.h5",
                                              "ep_memory_model_version", 1U);
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
-        std::filesystem::remove(bad, ec);
     }
     {
         // The memory-model kind is informational: a plan from the other
@@ -312,13 +301,11 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         const auto other = make_modified_cache(
             "cache_other_kind.h5", "ep_memory_model_kind", std::string("cuda"));
         CHECK_NOTHROW(reloaded.load_cache(other));
-        std::filesystem::remove(other, ec);
     }
     {
         const auto bad = make_modified_cache(
             "cache_bad_workers.h5", "n_workers", cfg.get_nthreads() + 1);
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
-        std::filesystem::remove(bad, ec);
     }
     {
         loki::algorithms::PruneRFIConfig harvest_rfi;
@@ -351,10 +338,7 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
                 .write(SizeType{1} << 30U);
         }
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::runtime_error);
-        std::filesystem::remove(bad, ec);
     }
-
-    std::filesystem::remove(cache_file, ec);
 }
 
 TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",
@@ -391,8 +375,8 @@ TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",
     // omega * tobs / 4 < pi / 2 here, so the sine is not capped.
     const double drift =
         2.0 * v_amp * std::sin(omega * tobs / 4.0) / 299792458.0;
-    const auto cache_file = std::filesystem::temp_directory_path() /
-                            "loki_test_ep_plan_five_params.h5";
+    const TempDir dir("loki-ep-plan-five-params");
+    const auto cache_file = dir / "ep_plan_five_params.h5";
     EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
                                    /*ref_ducy=*/0.1F, cache_file);
     REQUIRE(planner.get_nchunks() > 0);
@@ -409,8 +393,6 @@ TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",
         f.getAttribute("p_orb_min").write(20.0 * tobs);
     }
     CHECK_THROWS_AS(planner.load_cache(cache_file), std::invalid_argument);
-    std::error_code ec;
-    std::filesystem::remove(cache_file, ec);
 
     // The default p_orb_min allows orbits faster than light.
     CHECK_THROWS_AS(EPRegionPlanner<float>(make_cfg(1e-5), /*min_pd=*/0.1F,
@@ -420,11 +402,8 @@ TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",
 
 TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
           "[ep_freq_sweep]") {
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_sweep_test";
+    const TempDir outdir("loki-ep-sweep-test");
     const auto* const file_prefix = "test_sweep";
-    std::error_code ec;
-    std::filesystem::remove_all(outdir, ec);
 
     // One FFA region. The two-region split is checked on the planner above.
     constexpr double kFMin  = 140.0;
@@ -440,7 +419,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
                       /*plan_cache_file=*/std::nullopt,
                       /*n_runs=*/std::nullopt, test_ref_segs);
 
-    sweep.execute(ts_e, ts_v, outdir, file_prefix);
+    sweep.execute(ts_e, ts_v, outdir.path(), file_prefix);
 
     const auto result_file =
         outdir / fmt::format("{}_ep_results.h5", file_prefix);
@@ -484,8 +463,6 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     // Verify temporary per-chunk directory was cleaned up
     const auto tmp_dir = outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix);
     CHECK(!std::filesystem::exists(tmp_dir));
-
-    std::filesystem::remove_all(outdir, ec);
 }
 
 // ---------------------------------------------------------------------------
@@ -516,13 +493,9 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
     if (!cuda_available()) {
         SKIP("needs a CUDA build");
     }
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_sweep_cuda_test";
+    const TempDir outdir("loki-ep-sweep-cuda-test");
     const auto cache_file    = outdir / "plan_cuda.h5";
     const auto* const prefix = "cuda_sweep";
-    std::error_code ec;
-    std::filesystem::remove_all(outdir, ec);
-    std::filesystem::create_directories(outdir);
 
     const auto cfg          = make_test_cfg(4.0, 140.0, 142.0);
     const auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps());
@@ -530,7 +503,7 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
 
     EPFreqSweep sweep(cfg, false, 0.1F, "taylor", 0.1F, {}, cache_file,
                       std::nullopt, ref_segs, Exec::cuda(0));
-    sweep.execute(ts_e, ts_v, outdir, prefix);
+    sweep.execute(ts_e, ts_v, outdir.path(), prefix);
 
     const auto result_file = outdir / fmt::format("{}_ep_results.h5", prefix);
     REQUIRE(std::filesystem::exists(result_file));
@@ -561,7 +534,7 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
         // threshold simulation.
         EPFreqSweep again(cfg, false, 0.1F, "taylor", 0.1F, {}, cache_file,
                           std::nullopt, ref_segs, Exec::cuda(0));
-        again.execute(ts_e, ts_v, outdir, "cuda_sweep_again");
+        again.execute(ts_e, ts_v, outdir.path(), "cuda_sweep_again");
         CHECK(
             std::filesystem::exists(outdir / "cuda_sweep_again_ep_results.h5"));
 
@@ -570,8 +543,6 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
         CHECK_NOTHROW(EPFreqSweep(cfg, false, 0.1F, "taylor", 0.1F, {},
                                   cache_file, std::nullopt, ref_segs));
     }
-
-    std::filesystem::remove_all(outdir, ec);
 }
 
 TEST_CASE("EPFreqSweep CUDA rejects an active RFI config",
@@ -593,12 +564,8 @@ TEST_CASE("EPFreqSweep CUDA runs both bin groups within the device budget",
     if (!cuda_available()) {
         SKIP("needs a CUDA build");
     }
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_sweep_cuda_groups";
+    const TempDir outdir("loki-ep-sweep-cuda-groups");
     const auto cache_file = outdir / "plan.h5";
-    std::error_code ec;
-    std::filesystem::remove_all(outdir, ec);
-    std::filesystem::create_directories(outdir);
 
     // 70-145 Hz: 32 and 64 bins, so two chunk groups. The plan is cached so
     // the sweep below does not simulate the thresholds again.
@@ -633,7 +600,7 @@ TEST_CASE("EPFreqSweep CUDA runs both bin groups within the device budget",
     const std::vector<SizeType> ref_segs{4U};
     EPFreqSweep sweep(cfg, false, 0.1F, "taylor", 0.1F, {}, cache_file,
                       std::nullopt, ref_segs, Exec::cuda(0));
-    sweep.execute(ts_e, ts_v, outdir, "groups");
+    sweep.execute(ts_e, ts_v, outdir.path(), "groups");
 
     const HighFive::File h5((outdir / "groups_ep_results.h5").string(),
                             HighFive::File::ReadOnly);
@@ -649,7 +616,6 @@ TEST_CASE("EPFreqSweep CUDA runs both bin groups within the device budget",
         CHECK(grp.exist("runs"));
     }
     CHECK(written == std::set<SizeType>{32U, 64U});
-    std::filesystem::remove_all(outdir, ec);
 }
 
 TEST_CASE("EPFreqSweep CUDA matches the CPU sweep on the same plan",
@@ -657,11 +623,7 @@ TEST_CASE("EPFreqSweep CUDA matches the CPU sweep on the same plan",
     if (!cuda_available()) {
         SKIP("needs a CUDA build");
     }
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_sweep_parity_test";
-    std::error_code ec;
-    std::filesystem::remove_all(outdir, ec);
-    std::filesystem::create_directories(outdir);
+    const TempDir outdir("loki-ep-sweep-parity-test");
 
     const auto cfg    = make_test_cfg(4.0, 140.0, 142.0, /*n_threads=*/1);
     auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps());
@@ -683,12 +645,12 @@ TEST_CASE("EPFreqSweep CUDA matches the CPU sweep on the same plan",
     {
         EPFreqSweep cpu(cfg, false, 0.1F, "taylor", 0.1F, {}, cache_file,
                         std::nullopt, ref_segs);
-        cpu.execute(ts_e, ts_v, outdir, "cpu");
+        cpu.execute(ts_e, ts_v, outdir.path(), "cpu");
     }
     {
         EPFreqSweep gpu(cfg, false, 0.1F, "taylor", 0.1F, {}, cache_file,
                         std::nullopt, ref_segs, Exec::cuda(0));
-        gpu.execute(ts_e, ts_v, outdir, "gpu");
+        gpu.execute(ts_e, ts_v, outdir.path(), "gpu");
     }
 
     const HighFive::File cpu_h5((outdir / "cpu_ep_results.h5").string(),
@@ -726,8 +688,6 @@ TEST_CASE("EPFreqSweep CUDA matches the CPU sweep on the same plan",
     const auto gpu_max = *std::ranges::max_element(gpu_scores);
     CHECK(gpu_max == Catch::Approx(cpu_max).epsilon(0.05));
     CHECK(cpu_max > 8.0F);
-
-    std::filesystem::remove_all(outdir, ec);
 }
 
 TEST_CASE("EPFreqSweep CUDA sweeps with Fourier folds",
@@ -735,10 +695,7 @@ TEST_CASE("EPFreqSweep CUDA sweeps with Fourier folds",
     if (!cuda_available()) {
         SKIP("needs a CUDA build");
     }
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_sweep_cuda_fourier";
-    std::error_code ec;
-    std::filesystem::remove_all(outdir, ec);
+    const TempDir outdir("loki-ep-sweep-cuda-fourier");
 
     const auto cfg          = make_test_cfg(4.0, 140.0, 142.0, /*n_threads=*/0,
                                             /*use_fourier=*/true);
@@ -747,18 +704,13 @@ TEST_CASE("EPFreqSweep CUDA sweeps with Fourier folds",
     // model) throw on a drift, so a clean sweep checks the Fourier model.
     EPFreqSweep sweep(cfg, false, 0.1F, "taylor", 0.1F, {}, std::nullopt,
                       std::nullopt, std::vector<SizeType>{4U}, Exec::cuda(0));
-    CHECK_NOTHROW(sweep.execute(ts_e, ts_v, outdir, "fourier"));
+    CHECK_NOTHROW(sweep.execute(ts_e, ts_v, outdir.path(), "fourier"));
     CHECK(std::filesystem::exists(outdir / "fourier_ep_results.h5"));
-    std::filesystem::remove_all(outdir, ec);
 }
 
 TEST_CASE("EPRegionPlanner accepts a plan cache written on the other backend",
           "[ep_freq_sweep]") {
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_cross_backend";
-    std::error_code ec;
-    std::filesystem::remove_all(outdir, ec);
-    std::filesystem::create_directories(outdir);
+    const TempDir outdir("loki-ep-cross-backend");
     const auto cache_file = outdir / "plan_cpu.h5";
 
     const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
@@ -775,17 +727,11 @@ TEST_CASE("EPRegionPlanner accepts a plan cache written on the other backend",
     REQUIRE(reloaded.get_nchunks() == planner.get_nchunks());
     CHECK(reloaded.get_stats().get_max_memory_gb() ==
           planner.get_stats().get_max_memory_gb());
-
-    std::filesystem::remove_all(outdir, ec);
 }
 
 TEST_CASE("EPFreqSweep handles non-power-of-two nsamps without empty segments",
           "[ep_freq_sweep]") {
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_non_pow2";
-    std::error_code ec;
-    std::filesystem::remove_all(outdir, ec);
-    std::filesystem::create_directories(outdir);
+    const TempDir outdir("loki-ep-non-pow2");
 
     const std::vector<ParamLimit> limits{
         {.min = -10.0, .max = 10.0},
@@ -810,7 +756,6 @@ TEST_CASE("EPFreqSweep handles non-power-of-two nsamps without empty segments",
     const auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps());
     EPFreqSweep sweep(cfg, false, 0.1F, "taylor", 0.1F, {}, std::nullopt,
                       /*n_runs=*/2U);
-    CHECK_NOTHROW(sweep.execute(ts_e, ts_v, outdir, "np2"));
+    CHECK_NOTHROW(sweep.execute(ts_e, ts_v, outdir.path(), "np2"));
     CHECK(std::filesystem::exists(outdir / "np2_ep_results.h5"));
-    std::filesystem::remove_all(outdir, ec);
 }

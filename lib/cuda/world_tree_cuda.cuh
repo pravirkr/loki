@@ -58,6 +58,7 @@ public:
                                cuda::std::span<const uint32_t> indices,
                                SizeType count,
                                float threshold,
+                               double keep_fraction,
                                cudaStream_t stream);
 
     SizeType overload_count() const noexcept { return m_overload_count; }
@@ -202,6 +203,7 @@ public:
                         cuda::std::span<const uint32_t> indices_batch,
                         float current_threshold,
                         SizeType slots_to_write,
+                        double keep_fraction,
                         cudaStream_t stream);
 
     // Validation
@@ -292,12 +294,14 @@ private:
      * @brief Get prune threshold in current region
      *
      * find a threshold in (Buffer + Batch) so that keeping only scores strictly
-     * above it yields at most total_capacity items.
+     * above it yields at most total_capacity items, and at most keep_fraction
+     * of the pooled items (0.5: the median of the pool).
      */
     float get_prune_threshold(cuda::std::span<const float> scores_batch,
                               cuda::std::span<const uint32_t> indices_batch,
                               SizeType slots_to_write,
                               float current_threshold,
+                              double keep_fraction,
                               cudaStream_t stream);
 
     /**

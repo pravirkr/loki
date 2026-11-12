@@ -104,6 +104,7 @@ HighFive::CompoundType create_compound_prune_stats() {
         {"n_leaves_masked", HighFive::create_datatype<SizeType>()},
         {"n_leaves_vetoed", HighFive::create_datatype<SizeType>()},
         {"n_harvested", HighFive::create_datatype<SizeType>()},
+        {"n_overloads", HighFive::create_datatype<SizeType>()},
     };
 }
 
@@ -274,6 +275,9 @@ std::string PruneStats::get_summary() const {
     if (n_leaves_masked > 0 || n_leaves_vetoed > 0 || n_harvested > 0) {
         summary += fmt::format(", masked: {}, vetoed: {}, harvested: {}",
                                n_leaves_masked, n_leaves_vetoed, n_harvested);
+    }
+    if (n_overloads > 0) {
+        summary += fmt::format(", overloads: {}", n_overloads);
     }
     summary += '\n';
     return summary;

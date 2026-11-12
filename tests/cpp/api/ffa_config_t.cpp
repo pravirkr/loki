@@ -1,6 +1,5 @@
 #include <filesystem>
 #include <optional>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -15,35 +14,10 @@
 #include "loki/io/preprocess.hpp"
 #include "loki/search/configs.hpp"
 
+#include "temp_dir.hpp"
+
 using Catch::Matchers::WithinAbs;
-
-namespace {
-
-class TempDir {
-public:
-    TempDir() {
-        std::mt19937_64 rng{std::random_device{}()};
-        const auto root =
-            std::filesystem::temp_directory_path() / "loki-config-tests";
-        std::filesystem::create_directories(root);
-        m_path = root / std::to_string(rng());
-        std::filesystem::create_directories(m_path);
-    }
-
-    ~TempDir() { std::filesystem::remove_all(m_path); }
-
-    TempDir(const TempDir&)            = delete;
-    TempDir& operator=(const TempDir&) = delete;
-    TempDir(TempDir&&)                 = delete;
-    TempDir& operator=(TempDir&&)      = delete;
-
-    [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
-
-private:
-    std::filesystem::path m_path;
-};
-
-} // namespace
+using loki::test::TempDir;
 
 TEST_CASE("FFASearchConfig standard construction and getters",
           "[config][ffa]") {
@@ -320,7 +294,7 @@ TEST_CASE("FFATomlConfig default generation and parsing", "[config][toml]") {
 
 TEST_CASE("FFATomlConfig file roundtrip in temporary directory",
           "[config][toml]") {
-    const TempDir tmp;
+    const TempDir tmp("loki-config-tests");
     const auto config_path = tmp.path() / "test_ffa_config.toml";
 
     // Write default TOML to file

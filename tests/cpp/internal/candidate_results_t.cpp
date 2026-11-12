@@ -4,7 +4,6 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -18,15 +17,9 @@
 #include "lib/search/candidate_processing.hpp"
 #include "lib/search/cands.hpp"
 
+#include "temp_dir.hpp"
+
 namespace {
-// A directory of its own per test: ctest runs the cases in parallel.
-struct Files {
-    std::filesystem::path directory =
-        std::filesystem::temp_directory_path() / "loki-candidate-results-test" /
-        std::to_string(std::mt19937_64{std::random_device{}()}());
-    Files() { std::filesystem::create_directories(directory); }
-    ~Files() { std::filesystem::remove_all(directory); }
-};
 void spool(const std::filesystem::path& path, std::size_t count) {
     loki::search::FFAResultWriter writer(path);
     loki::search::FFAResultMetadata meta;
@@ -57,8 +50,8 @@ std::vector<T> column(const HighFive::File& file, const std::string& path) {
 
 TEST_CASE("Candidate external sorting is independent of batch size",
           "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     spool(raw, 120);
     loki::io::ObservationMetadata obs;
     obs.dm              = 42;
@@ -67,11 +60,11 @@ TEST_CASE("Candidate external sorting is independent of batch size",
     obs.original_nsamps = 1234;
     loki::search::CandidateOptions small;
     small.memory_gb  = 0.0001;
-    const auto first = files.directory / "first.h5";
+    const auto first = dir / "first.h5";
     loki::io::detail::write_candidate_results(raw, first, obs, small);
     auto large        = small;
     large.memory_gb   = 0.01;
-    const auto second = files.directory / "second.h5";
+    const auto second = dir / "second.h5";
     loki::io::detail::write_candidate_results(raw, second, obs, large);
     const HighFive::File a(first.string(), HighFive::File::ReadOnly);
     const HighFive::File b(second.string(), HighFive::File::ReadOnly);
@@ -96,13 +89,13 @@ TEST_CASE("Candidate external sorting is independent of batch size",
 
 TEST_CASE("Candidate retention selection and failed publication",
           "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     spool(raw, 120);
     loki::search::CandidateOptions options;
     options.retain_detections = false;
     options.max_candidates    = 2;
-    const auto output         = files.directory / "out.h5";
+    const auto output         = dir / "out.h5";
     loki::io::detail::write_candidate_results(raw, output, {}, options);
     {
         const HighFive::File file(output.string(), HighFive::File::ReadOnly);
@@ -120,8 +113,7 @@ TEST_CASE("Candidate retention selection and failed publication",
     REQUIRE(preserved.getDataSet("candidates/snr").getDimensions()[0] == 2);
     // The partial file lives in a scratch directory beside the output; a failed
     // publication removes it.
-    for (const auto& entry :
-         std::filesystem::directory_iterator(files.directory)) {
+    for (const auto& entry : std::filesystem::directory_iterator(dir.path())) {
         CAPTURE(entry.path().string());
         REQUIRE_FALSE(
             entry.path().filename().string().starts_with("loki-candidates-"));
@@ -129,8 +121,8 @@ TEST_CASE("Candidate retention selection and failed publication",
 }
 
 TEST_CASE("Abandoned raw writers do not publish", "[candidates][hdf5]") {
-    Files files;
-    const auto path = files.directory / "aborted.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto path = dir / "aborted.h5";
     {
         loki::search::FFAResultWriter writer(path);
         loki::search::FFAResultMetadata meta;
@@ -142,14 +134,14 @@ TEST_CASE("Abandoned raw writers do not publish", "[candidates][hdf5]") {
 }
 
 TEST_CASE("Incomplete search spools are not published", "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     spool(raw, 4);
     {
         HighFive::File file(raw.string(), HighFive::File::ReadWrite);
         file.getAttribute("complete").write(0);
     }
-    const auto out = files.directory / "out.h5";
+    const auto out = dir / "out.h5";
     REQUIRE_THROWS_WITH(
         loki::io::detail::write_candidate_results(raw, out, {}, {}),
         "search spool is incomplete");
@@ -158,15 +150,15 @@ TEST_CASE("Incomplete search spools are not published", "[candidates][hdf5]") {
 
 TEST_CASE("Spools outside the kinematic Taylor convention are rejected",
           "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     spool(raw, 4);
     {
         HighFive::File file(raw.string(), HighFive::File::ReadWrite);
         file.getAttribute("param_names")
             .write(std::vector<std::string>{"freq", "accel"});
     }
-    const auto out = files.directory / "out.h5";
+    const auto out = dir / "out.h5";
     REQUIRE_THROWS_WITH(
         loki::io::detail::write_candidate_results(raw, out, {}, {}),
         "unsupported native parameter convention");
@@ -174,10 +166,10 @@ TEST_CASE("Spools outside the kinematic Taylor convention are rejected",
 
 TEST_CASE("Empty common candidate files have valid zero-row tables",
           "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     spool(raw, 0);
-    const auto out = files.directory / "out.h5";
+    const auto out = dir / "out.h5";
     loki::io::detail::write_candidate_results(raw, out, {}, {});
     const HighFive::File file(out.string(), HighFive::File::ReadOnly);
     REQUIRE(file.getDataSet("candidates/snr").getDimensions()[0] == 0);
@@ -186,8 +178,8 @@ TEST_CASE("Empty common candidate files have valid zero-row tables",
 
 TEST_CASE("Candidate products preserve optional EP-style native uncertainties",
           "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     spool(raw, 1);
     {
         HighFive::File file(raw.string(), HighFive::File::ReadWrite);
@@ -196,7 +188,7 @@ TEST_CASE("Candidate products preserve optional EP-style native uncertainties",
         file.createDataSet("has_parameter_errors",
                            std::vector<std::uint8_t>{1});
     }
-    const auto out = files.directory / "out.h5";
+    const auto out = dir / "out.h5";
     loki::io::detail::write_candidate_results(raw, out, {}, {});
     const HighFive::File file(out.string(), HighFive::File::ReadOnly);
     REQUIRE(column<std::uint8_t>(file, "candidates/has_parameter_errors") ==
@@ -208,14 +200,14 @@ TEST_CASE("Candidate products preserve optional EP-style native uncertainties",
 
 TEST_CASE("Unclustered non-harmonic results stream beyond the index budget",
           "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "raw.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
     spool(raw, 120);
     loki::search::CandidateOptions options;
     options.cluster        = false;
     options.memory_gb      = 0.0001;
     options.max_candidates = 3;
-    const auto out         = files.directory / "out.h5";
+    const auto out         = dir / "out.h5";
     loki::io::detail::write_candidate_results(raw, out, {}, options);
     const HighFive::File file(out.string(), HighFive::File::ReadOnly);
     REQUIRE(file.getDataSet("clusters/snr").getDimensions()[0] == 120);
@@ -227,8 +219,8 @@ TEST_CASE("Unclustered non-harmonic results stream beyond the index budget",
 TEST_CASE(
     "Disk candidate publication remaps provisional IDs after a late bridge",
     "[candidates][hdf5]") {
-    Files files;
-    const auto raw = files.directory / "bridge.h5";
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "bridge.h5";
     {
         loki::search::FFAResultWriter writer(raw);
         loki::search::FFAResultMetadata meta;
@@ -245,8 +237,7 @@ TEST_CASE(
     options.memory_gb = .0001; // one record per sort and serialization batch
     for (const bool retain : {true, false}) {
         options.retain_detections = retain;
-        const auto out =
-            files.directory / (retain ? "bridge-out.h5" : "bridge-no-raw.h5");
+        const auto out = dir / (retain ? "bridge-out.h5" : "bridge-no-raw.h5");
         loki::io::detail::write_candidate_results(raw, out, {}, options);
         const HighFive::File file(out.string(), HighFive::File::ReadOnly);
         REQUIRE(column<float>(file, "candidates/snr") ==

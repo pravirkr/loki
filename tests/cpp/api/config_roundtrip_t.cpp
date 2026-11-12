@@ -14,6 +14,8 @@
 #include "loki/search/configs.hpp"
 #include "loki/search/provenance.hpp"
 
+#include "temp_dir.hpp"
+
 using loki::search::EPTomlConfig;
 using loki::search::FFATomlConfig;
 
@@ -264,8 +266,8 @@ TEST_CASE("The default templates survive to_toml_string", "[config]") {
 
 TEST_CASE("write_run_provenance writes and replaces root attributes",
           "[config][provenance]") {
-    const auto path =
-        std::filesystem::temp_directory_path() / "loki_provenance_t.h5";
+    const loki::test::TempDir dir("loki-provenance");
+    const auto path = dir / "provenance.h5";
     {
         HighFive::File file(path.string(), HighFive::File::Overwrite);
         file.createAttribute("config_toml", std::string("raw = 1"));

@@ -693,8 +693,7 @@ ep_candidate_planning_config(const loki::search::EPTomlConfig& config,
                              const loki::search::PulsarSearchConfig& input,
                              loki::Exec exec) {
     auto cfg = input;
-    if (config.candidates.enabled && config.poly_basis == "taylor" &&
-        cfg.get_nparams() <= 4) {
+    if (config.candidates.enabled && config.poly_basis == "taylor") {
         config.candidates.validate();
         if (exec.backend == loki::Backend::kCPU) {
             const auto remaining =
@@ -1016,18 +1015,17 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     }
 
     const auto cache = prepare_ep_plan_cache(toml_cfg, ep_cfg, exec);
-    const bool common_candidates = toml_cfg.candidates.enabled &&
-                                   toml_cfg.poly_basis == "taylor" &&
-                                   ep_cfg.get_nparams() <= 4;
-    auto sweep                   = common_candidates
-                                       ? loki::pipelines::EPFreqSweep(
-                                             ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
-                                             toml_cfg.poly_basis, toml_cfg.ref_ducy, {}, cache,
-                                             toml_cfg.n_runs, toml_cfg.ref_segs, exec)
-                                       : loki::pipelines::EPFreqSweep(
-                                             ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
-                                             toml_cfg.ref_ducy, {}, cache, toml_cfg.n_runs,
-                                             toml_cfg.ref_segs, exec);
+    const bool common_candidates =
+        toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor";
+    auto sweep = common_candidates
+                     ? loki::pipelines::EPFreqSweep(
+                           ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
+                           toml_cfg.poly_basis, toml_cfg.ref_ducy, {}, cache,
+                           toml_cfg.n_runs, toml_cfg.ref_segs, exec)
+                     : loki::pipelines::EPFreqSweep(
+                           ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
+                           toml_cfg.ref_ducy, {}, cache, toml_cfg.n_runs,
+                           toml_cfg.ref_segs, exec);
     if (toml_cfg.candidates.enabled && !common_candidates) {
         SPDLOG_WARN("Common EP candidates currently support polynomial Taylor "
                     "only; writing run diagnostics");
@@ -1952,6 +1950,10 @@ int main(int argc, char** argv) {
         "--conservative-tile,!--no-conservative-tile",
         ep_cfg.use_conservative_tile,
         "Use the conservative tile of the Fourier search (default: off)");
+    ep_grp_pruning->add_option(
+        "--overflow-keep-fraction", ep_cfg.overflow_keep_fraction,
+        "Fraction of the stage's survivors and batch a full world tree keeps "
+        "when a batch overflows it, in (0, 1] (default: 0.5)");
 
     auto* ep_grp_perf = ep->add_option_group("Performance & Limits");
     ep_grp_perf->add_option(

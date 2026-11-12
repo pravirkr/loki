@@ -142,6 +142,48 @@ def test_ep_freq_sweep_recovers_with_five_parameters(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+def test_five_parameter_search_publishes_candidates(
+    tmp_path: Path, backend: str
+) -> None:
+    """A circular search writes widths and the common candidate tables."""
+    if backend == "cuda" and not _cuda_built():
+        pytest.skip("CUDA backend not built")
+    ts_e, ts_v = _make_injected()
+    orbit = {"p_orb_min": 1000.0 * NSAMPS * DT, "m_c_max": 0.05, "m_p_min": 1.2}
+    limits = libloki.configs.circular_param_limits(140.0, 145.0, poly_order=5, **orbit)
+    cfg = _search_config(limits, **orbit)
+    sweep = libloki.prune.EPFreqSweep(
+        cfg,
+        min_pd=0.5,
+        show_progress=False,
+        ref_segs=[4],
+        candidates=libloki.configs.CandidateOptions(),
+        backend=backend,
+    )
+    sweep.execute(ts_e, ts_v, str(tmp_path), "five")
+    with h5py.File(tmp_path / "five_ep_results.h5", "r") as handle:
+        names = [
+            n.decode() if isinstance(n, bytes) else n
+            for n in handle.attrs["param_names"]
+        ]
+        assert names == ["crackle", "snap", "jerk", "accel", "freq"]
+        cands = handle["candidates"]
+        f0, snr = cands["f0"][:], cands["snr"][:]
+        native = cands["param_sets"][:]
+        assert native.shape[1] == 5
+        assert np.all(cands["width"][:] >= 1)
+        # f1 and f2 follow the reported accel and jerk at the midpoint.
+        np.testing.assert_allclose(cands["f1"][:], -f0 * native[:, 3] / 299792458.0)
+        np.testing.assert_allclose(cands["f2"][:], -f0 * native[:, 2] / 299792458.0)
+        for source in handle["search/sources/run_path"].asstr()[:]:
+            run = handle[source]
+            assert run["width"].shape == run["scores"].shape
+    near = np.abs(f0 - TRUE_FREQ) <= FREQ_TOL
+    assert near.any()
+    assert snr[near].max() >= RECOVER_SNR_MIN
+
+
 @pytest.mark.parametrize("poly_basis", ["taylor", "chebyshev"])
 @pytest.mark.parametrize("backend", ["cpu", "cuda"])
 def test_ep_freq_sweep_recovers_non_power_of_two_nsamps(
