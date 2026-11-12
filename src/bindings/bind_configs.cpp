@@ -40,6 +40,8 @@ void bind_configs(py::module_& m) {
                        &CO::harmonic_denominator_max)
         .def_readwrite("harmonic_phase_distance", &CO::harmonic_phase_distance)
         .def_readwrite("harmonic_snr_distance", &CO::harmonic_snr_distance)
+        .def_readwrite("max_per_cell", &CO::max_per_cell)
+        .def_readwrite("cell_log_width", &CO::cell_log_width)
         .def_readwrite("max_candidates", &CO::max_candidates)
         .def_readwrite("memory_gb", &CO::memory_gb)
         .def_readwrite("temporary_directory", &CO::temporary_directory)

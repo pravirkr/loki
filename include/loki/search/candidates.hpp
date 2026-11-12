@@ -27,6 +27,13 @@ struct CandidateOptions {
     std::uint32_t harmonic_denominator_max{100};
     double harmonic_phase_distance{1.0};
     double harmonic_snr_distance{3.0};
+    /// Keep at most this many of the strongest trials in each frequency
+    /// cell, before grouping. Zero keeps every trial.
+    std::uint64_t max_per_cell{0};
+    /// Width of a frequency cell in natural-log frequency: a trial at
+    /// frequency f is in cell floor(ln(f) / cell_log_width). Required with
+    /// max_per_cell.
+    double cell_log_width{0};
     std::uint64_t max_candidates{0}; ///< Zero means unlimited.
     double memory_gb{1.0};           ///< Additional host memory, GB (2^30).
     std::filesystem::path temporary_directory;
