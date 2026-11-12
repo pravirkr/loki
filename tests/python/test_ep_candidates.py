@@ -479,3 +479,45 @@ def test_disabled_candidates_write_the_earlier_run_diagnostics(tmp_path, series)
         libloki.prune.EPFreqSweep.publish_candidates(
             products["off"], tmp_path / "x.h5", candidates=disabled
         )
+
+
+def test_ep_reduced_runs_keep_retained_leaves_and_their_spool_rows(product, tmp_path):
+    path, _, _, _ = product
+    reduced, full = tmp_path / "reduced.h5", tmp_path / "full.h5"
+    # The default options of EP reduce each run's leaves.
+    libloki.prune.EPFreqSweep.publish_candidates(path, reduced)
+    off = libloki.configs.CandidateOptions.ep_defaults()
+    off.max_per_cell = 0
+    libloki.prune.EPFreqSweep.publish_candidates(path, full, candidates=off)
+    with h5py.File(path) as spool, h5py.File(reduced) as r, h5py.File(full) as f:
+        assert r["processing"].attrs["max_per_cell"] == 32
+        runs = r["search/sources/run_path"].asstr()[:]
+        region = r["detections/source_region"][:]
+        index = r["detections/source_index"][:]
+        retained = 0
+        for k, run in enumerate(runs):
+            g, a = r[run], r[run].attrs
+            rows = g["leaf_index"][:]
+            assert np.array_equal(rows, np.sort(index[region == k]))
+            assert a["n_leaves_retained"] == len(rows) == len(g["scores"])
+            assert a["n_final_leaves"] == len(spool[f"{run}/scores"])
+            assert (
+                a["n_leaves_above_snr_min"]
+                == a["n_cell_dropped"] + a["n_dominated"] + a["n_leaves_retained"]
+            )
+            for name in ("param_sets", "scores", "scores_ep", "width"):
+                assert np.array_equal(g[name][:], spool[f"{run}/{name}"][:][rows])
+            assert np.array_equal(g["level_stats"][:], spool[f"{run}/level_stats"][:])
+            retained += len(rows)
+        assert retained == r.attrs["n_detections"]
+        assert (
+            r.attrs["n_detections"] + r.attrs["n_cell_dropped"] + r.attrs["n_dominated"]
+            == f.attrs["n_detections"]
+        )
+        # Without the reduction every run is copied whole.
+        for run in runs:
+            assert "leaf_index" not in f[run]
+            assert np.array_equal(f[f"{run}/scores"][:], spool[f"{run}/scores"][:])
+        # The strongest candidate is the same.
+        assert r["candidates/snr"][0] == f["candidates/snr"][0]
+        check_graph(r)

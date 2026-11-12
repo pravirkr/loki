@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -132,8 +133,8 @@ void copy_object(const HighFive::File& source,
 
 // The source is a group, not a file: HDF5 1.10 cannot count the attributes
 // of a file ID (H5Aget_num_attrs), so pass the root group "/" instead.
-template <typename Target>
-void copy_attributes(const HighFive::Group& source,
+template <typename Source, typename Target>
+void copy_attributes(const Source& source,
                      const Target& target,
                      bool skip_selection_counts = false) {
     for (const auto& name : source.listAttributeNames()) {
@@ -167,12 +168,84 @@ void copy_attributes(const HighFive::Group& source,
     }
 }
 
+struct EPSource {
+    std::string path;
+    std::uint64_t chunk;
+};
+
+/// What the per-run reduction did to one EP run.
+struct RunReduction {
+    std::uint64_t final_leaves{};  ///< Rows of the run in the spool.
+    std::uint64_t above_snr_min{}; ///< Rows read as trials.
+    std::uint64_t cell_dropped{};
+    std::uint64_t dominated{};
+    float max_cell_dropped_snr{};
+    std::vector<std::uint32_t> retained; ///< Spool rows kept, ascending.
+};
+
+/// Final-leaf datasets of an EP run: one row per leaf.
+constexpr std::array kLeafDatasets{"param_sets", "scores", "scores_ep",
+                                   "width"};
+
+/// Writes the rows @p rows (ascending) of the leaf datasets of the spool run
+/// @p src_path into @p dst, reading runs of consecutive rows at once.
+void copy_leaf_rows(const HighFive::File& raw,
+                    const std::string& src_path,
+                    HighFive::Group& dst,
+                    std::span<const std::uint32_t> rows) {
+    const auto src = raw.getGroup(src_path);
+    for (const auto* name : kLeafDatasets) {
+        const auto in    = src.getDataSet(name);
+        const auto type  = in.getDataType();
+        auto dims        = in.getDimensions();
+        std::size_t cols = 1;
+        for (std::size_t d = 1; d < dims.size(); ++d) {
+            cols *= dims[d];
+        }
+        const std::size_t row_bytes = cols * type.getSize();
+        std::vector<unsigned char> buffer(rows.size() * row_bytes);
+        for (std::size_t i = 0; i < rows.size();) {
+            std::size_t j = i + 1;
+            while (j < rows.size() && rows[j] == rows[j - 1] + 1) {
+                ++j;
+            }
+            std::vector<std::size_t> offset(dims.size(), 0);
+            std::vector<std::size_t> count(dims);
+            offset[0] = rows[i];
+            count[0]  = j - i;
+            in.select(offset, count)
+                .read_raw(buffer.data() + i * row_bytes, type);
+            i = j;
+        }
+        dims[0]  = rows.size();
+        auto out = dst.createDataSet(name, HighFive::DataSpace(dims), type);
+        copy_attributes(in, out);
+        if (!rows.empty()) {
+            out.write_raw(buffer.data(), type);
+        }
+    }
+    dst.createDataSet("leaf_index",
+                      std::vector<std::uint32_t>(rows.begin(), rows.end()))
+        .createAttribute("description",
+                         std::string("row of each leaf in the search spool's "
+                                     "run; detections' source_index"));
+}
+
 /// Copies the spool's `chunks` tree one run at a time, with a checkpoint
 /// between runs: a single H5Ocopy of a multi-GB tree cannot be interrupted.
 /// The copied groups, datasets and attributes are those of one H5Ocopy.
+/// With @p reductions (one per source), a run keeps only its retained
+/// leaves, with their spool rows in `leaf_index` and the reduction's counts
+/// as attributes; its other objects are copied whole.
 void copy_ep_chunks(const HighFive::File& raw,
                     HighFive::File& result,
-                    PostProgress& progress) {
+                    PostProgress& progress,
+                    std::span<const EPSource> sources,
+                    std::span<const RunReduction> reductions) {
+    std::unordered_map<std::string, std::size_t> ordinal;
+    for (std::size_t i = 0; i < reductions.size(); ++i) {
+        ordinal.emplace(sources[i].path, i);
+    }
     const auto src_chunks  = raw.getGroup("chunks");
     auto dst_chunks        = result.createGroup("chunks");
     const auto chunk_names = src_chunks.listObjectNames();
@@ -203,7 +276,36 @@ void copy_ep_chunks(const HighFive::File& raw,
                 // A run can be hundreds of MB: consider logging every run.
                 progress.poke();
                 progress.tick();
-                copy_object(raw, chunk_path + "/runs/" + run, dst_runs, run);
+                const auto run_path = chunk_path + "/runs/" + run;
+                const auto found    = ordinal.find(run_path);
+                if (found == ordinal.end()) {
+                    copy_object(raw, run_path, dst_runs, run);
+                    continue;
+                }
+                const auto& reduction = reductions[found->second];
+                const auto src_run    = raw.getGroup(run_path);
+                auto dst_run          = dst_runs.createGroup(run);
+                copy_attributes(src_run, dst_run);
+                for (const auto& object : src_run.listObjectNames()) {
+                    if (std::ranges::find(kLeafDatasets, object) ==
+                        kLeafDatasets.end()) {
+                        copy_object(raw, run_path + "/" + object, dst_run,
+                                    object);
+                    }
+                }
+                copy_leaf_rows(raw, run_path, dst_run, reduction.retained);
+                dst_run.createAttribute("n_final_leaves",
+                                        reduction.final_leaves);
+                dst_run.createAttribute("n_leaves_above_snr_min",
+                                        reduction.above_snr_min);
+                dst_run.createAttribute("n_cell_dropped",
+                                        reduction.cell_dropped);
+                dst_run.createAttribute("n_dominated", reduction.dominated);
+                dst_run.createAttribute(
+                    "n_leaves_retained",
+                    static_cast<std::uint64_t>(reduction.retained.size()));
+                dst_run.createAttribute("max_cell_dropped_snr",
+                                        reduction.max_cell_dropped_snr);
             }
         }
     }
@@ -273,11 +375,6 @@ std::vector<Candidate> read_candidates(const HighFive::File& file,
     }
     return records;
 }
-
-struct EPSource {
-    std::string path;
-    std::uint64_t chunk;
-};
 
 std::vector<EPSource> ep_sources(const HighFive::File& file,
                                  const search::CandidateOptions& options) {
@@ -756,15 +853,27 @@ void publish_candidate_results(const std::filesystem::path& spool,
         dominance.emplace(tobs, options);
     }
     std::uint64_t dominated = 0;
+    // Per-run accounting of a reduced EP spool; the result keeps only the
+    // retained leaves of each run.
+    std::vector<RunReduction> reductions(ep && cap ? sources.size() : 0);
     // Cells belong to one source, so an EP run's kept trials can be reduced
     // and sorted as soon as it is read: the cap then holds one run at a time.
-    const auto drain = [&] {
+    const auto drain = [&](RunReduction* run) {
         if (!cap) {
             return;
         }
-        auto kept = cap->take();
-        if (dominance) {
-            dominated += dominance->reduce(kept);
+        const float max_cell_dropped = cap->max_dropped_snr();
+        auto kept                    = cap->take();
+        const std::uint64_t absorbed = dominance ? dominance->reduce(kept) : 0;
+        dominated += absorbed;
+        if (run != nullptr) {
+            run->dominated            = absorbed;
+            run->max_cell_dropped_snr = max_cell_dropped;
+            run->retained.reserve(kept.size());
+            for (const auto& c : kept) {
+                run->retained.push_back(c.source_index);
+            }
+            std::ranges::sort(run->retained);
         }
         nrows += kept.size();
         for (std::size_t start = 0; start < kept.size(); start += batch) {
@@ -798,9 +907,17 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 auto records = read_ep_candidates(
                     raw, sources[run_id], static_cast<std::uint32_t>(run_id),
                     start, std::min(batch, count - start), nparams, snr_min);
+                if (!reductions.empty()) {
+                    reductions[run_id].above_snr_min += records.size();
+                }
                 keep(records);
             }
-            drain();
+            if (!reductions.empty()) {
+                auto& run        = reductions[run_id];
+                run.final_leaves = count;
+                run.cell_dropped = run.above_snr_min - cap->kept();
+            }
+            drain(reductions.empty() ? nullptr : &reductions[run_id]);
         }
     } else {
         const auto count = raw.getDataSet("snr").getDimensions()[0];
@@ -813,7 +930,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
             keep(records);
         }
     }
-    drain();
+    drain(nullptr);
     const std::uint64_t cell_dropped = cap ? cap->dropped() : 0;
     cap.reset();
     progress.phase("merging sorted runs", 0);
@@ -906,7 +1023,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 copy_object(raw, "timer_stats", search_group, "timer_stats");
             }
             if (ep) {
-                copy_ep_chunks(raw, result, progress);
+                copy_ep_chunks(raw, result, progress, sources, reductions);
                 copy_attributes(raw.getGroup("/"), result, true);
                 config.createAttribute("snr_min", snr_min);
                 config.createAttribute(

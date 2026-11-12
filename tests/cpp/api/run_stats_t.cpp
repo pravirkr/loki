@@ -79,8 +79,9 @@ TEST_CASE("write_run_stats records timings and EP run counts",
         CHECK_FALSE(g.exist("detections_per_nbins"));
     }
 
-    // A common product: the per-nbins counts add up to the detections.
-    loki::search::CandidateOptions options;
+    // A common product of the EP defaults: the per-nbins counts add up to
+    // the detections, and leaves_dropped to the reduction's counts.
+    auto options       = loki::search::CandidateOptions::ep_defaults();
     options.memory_gb  = 0.05;
     const auto product = outdir / "product_ep_results.h5";
     EPFreqSweep::publish_candidates(diag, product, options,
@@ -100,4 +101,7 @@ TEST_CASE("write_run_stats records timings and EP run counts",
     CHECK(g.getDataSet("detections_per_nbins/nbins")
               .read<std::vector<std::uint32_t>>() ==
           std::vector<std::uint32_t>{32});
+    CHECK(g.getAttribute("leaves_dropped").read<std::uint64_t>() ==
+          h5.getAttribute("n_cell_dropped").read<std::uint64_t>() +
+              h5.getAttribute("n_dominated").read<std::uint64_t>());
 }

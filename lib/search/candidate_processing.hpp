@@ -30,6 +30,12 @@ public:
     /// Moves the kept trials out, in no particular order.
     [[nodiscard]] std::vector<Candidate> take();
     [[nodiscard]] std::uint64_t dropped() const noexcept { return m_dropped; }
+    /// Trials held since the last take().
+    [[nodiscard]] std::uint64_t kept() const noexcept { return m_kept; }
+    /// Highest S/N dropped since the last take(); zero when none was.
+    [[nodiscard]] float max_dropped_snr() const noexcept {
+        return m_max_dropped_snr;
+    }
 
 private:
     struct Key {
@@ -52,6 +58,7 @@ private:
     std::unordered_map<Key, std::vector<Candidate>, KeyHash> m_cells;
     std::uint64_t m_kept{};
     std::uint64_t m_dropped{};
+    float m_max_dropped_snr{};
 };
 
 /// Second stage of the per-run reduction, after CellCap: within each source

@@ -160,6 +160,14 @@ void write_run_stats(const std::filesystem::path& results_file,
         out.createAttribute("peak_rss_gb", *stats.peak_rss_gb);
     }
     write_ep_run_counts(file, out);
+    if (file.hasAttribute("n_cell_dropped") &&
+        file.hasAttribute("n_dominated")) {
+        std::uint64_t cell      = 0;
+        std::uint64_t dominated = 0;
+        file.getAttribute("n_cell_dropped").read(cell);
+        file.getAttribute("n_dominated").read(dominated);
+        out.createAttribute("leaves_dropped", cell + dominated);
+    }
     write_detections_per_nbins(file, out);
     file.flush();
 }

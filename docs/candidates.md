@@ -30,17 +30,42 @@ with processing off.
 Taylor EP sweeps can publish the same common candidate tables after every
 independent run has finished and the run files have been merged. CPU runs
 remain independent and may execute concurrently. Postprocessing reads their
-final leaves across all runs/chunks, applies `snr_min`, then uses the same
-phase-track grouping and selection as FFA. Every surviving leaf contributes
-one winning boxcar width. There is no expansion into multiple width trials,
-and no early suppression of a weaker run's leaves before transitive closure.
+final leaves across all runs/chunks, applies `snr_min`, reduces each run's
+leaves (by default; see [Keeping the strongest trials per frequency
+cell](#keeping-the-strongest-trials-per-frequency-cell)), then uses the same
+phase-track grouping and selection as FFA. Every retained leaf contributes
+one winning boxcar width. There is no expansion into multiple width trials.
+The reduction works within each run, so it never suppresses a weaker run's
+leaves in favour of a stronger run's.
 
 The result remains `<prefix>_ep_results.h5`. Existing `/chunks/.../runs/...`
 diagnostics and search attributes are preserved alongside `/observation`,
 `/processing`, `/search`, `/detections`, `/clusters` and `/candidates`.
-`retain_detections = false` removes the common raw table; the original run
+`retain_detections = false` removes the common raw table; the run
 diagnostics remain available. Root compatibility arrays refer to selected
 candidates, as for FFA.
+
+With the reduction on, a run group keeps only its retained leaves: its
+`param_sets`, `scores`, `scores_ep` and `width` hold one row per retained leaf,
+in spool order, and `leaf_index` gives each row's row in the search spool,
+which is the `source_index` of its detection. Its other datasets
+(`level_stats`, `snail_scheme`) and attributes are copied whole, and it gains
+the attributes
+
+| Attribute | Meaning |
+| --- | --- |
+| `n_final_leaves` | Leaves of the run in the spool |
+| `n_leaves_above_snr_min` | Of those, leaves at or above `snr_min` |
+| `n_cell_dropped` | Dropped by the cell cap |
+| `n_dominated` | Absorbed by a stronger leaf of the run |
+| `n_leaves_retained` | Retained: the run's rows, and its detections |
+| `max_cell_dropped_snr` | Highest S/N the cell cap dropped (0 when none) |
+
+so `n_leaves_above_snr_min = n_cell_dropped + n_dominated +
+n_leaves_retained`. The result then holds a few thousand leaves where the
+spool may hold tens of millions: a 10 GB spool of 83 million leaves gave a
+1.5 MB result. With `max_per_cell = 0` the run groups are copied whole, as
+before.
 
 The candidate score is the existing run `scores` value: maximum boxcar S/N of
 the final reintegrated fold. `scores_ep` remains the pruning-score diagnostic.
@@ -462,6 +487,7 @@ scheduling, not search results, and change from run to run:
 | `peak_rss_gb` | Peak resident set size of the process, GB of 2^30 bytes (`getrusage` `ru_maxrss`) |
 | `n_runs`, `n_runs_overloaded`, `n_overloads` | EP: runs, runs with at least one world-tree overload, and overloads summed over `level_stats` |
 | `plan_peak_memory_gb` | EP: the largest chunk `chunk_memory_gb` of the plan (device memory on CUDA) |
+| `leaves_dropped` | Trials the candidate reduction dropped: root `n_cell_dropped` plus `n_dominated` |
 
 With a `/detections` table, `detections_per_nbins/nbins` and `count` give
 the detections per profile bin count, which is one row per octave group.

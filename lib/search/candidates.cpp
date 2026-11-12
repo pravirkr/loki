@@ -376,8 +376,11 @@ void CellCap::add(const Candidate& c) {
     ++m_dropped;
     if (candidate_brighter(c, kept.front())) {
         std::ranges::pop_heap(kept, candidate_brighter);
-        kept.back() = c;
+        m_max_dropped_snr = std::max(m_max_dropped_snr, kept.back().snr);
+        kept.back()       = c;
         std::ranges::push_heap(kept, candidate_brighter);
+    } else {
+        m_max_dropped_snr = std::max(m_max_dropped_snr, c.snr);
     }
 }
 
@@ -472,7 +475,8 @@ std::vector<Candidate> CellCap::take() {
          it      = m_cells.erase(it)) {
         out.insert(out.end(), it->second.begin(), it->second.end());
     }
-    m_kept = 0;
+    m_kept            = 0;
+    m_max_dropped_snr = 0;
     return out;
 }
 
