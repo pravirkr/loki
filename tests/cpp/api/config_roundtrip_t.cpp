@@ -85,6 +85,7 @@ void set_non_defaults(FFATomlConfig& cfg) {
     c.harmonic_phase_distance  = 0.5;
     c.harmonic_snr_distance    = 2.0;
     c.max_per_cell             = 1;
+    c.cell_bins                = 0;
     c.cell_log_width           = 2e-4;
     c.max_candidates           = 50;
     c.memory_gb                = 2.5;
@@ -168,6 +169,7 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(c.harmonic_phase_distance == d.harmonic_phase_distance);
     CHECK(c.harmonic_snr_distance == d.harmonic_snr_distance);
     CHECK(c.max_per_cell == d.max_per_cell);
+    CHECK(c.cell_bins == d.cell_bins);
     CHECK(c.cell_log_width == d.cell_log_width);
     CHECK(c.max_candidates == d.max_candidates);
     CHECK(c.memory_gb == d.memory_gb);

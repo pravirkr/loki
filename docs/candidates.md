@@ -182,7 +182,7 @@ harmonic_denominator_max = 100
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
 max_per_cell = 0
-# cell_log_width: required with max_per_cell
+# cell_bins or cell_log_width: exactly one is required with max_per_cell
 max_candidates = 0
 memory_gb = 1.0
 # temporary_directory = "/scratch/loki"
@@ -190,7 +190,7 @@ memory_gb = 1.0
 
 CLI equivalents include `--no-cluster`, `--cluster-grouping transitive|anchored`, `--cluster-radius`, `--cluster-phase-radius`,
 `--no-retain-detections`, `--flag-harmonics` / `--no-flag-harmonics`,
-`--remove-harmonics` / `--no-remove-harmonics`, `--max-per-cell`, `--cell-log-width`,
+`--remove-harmonics` / `--no-remove-harmonics`, `--max-per-cell`, `--cell-bins`, `--cell-log-width`,
 `--max-candidates`, `--candidate-memory-gb`, `--candidate-tempdir`,
 `--dm`, `--start-mjd` and `--barycentric true|false`.
 Harmonic removal requires harmonic flagging. Zero maximum candidates means
@@ -291,14 +291,25 @@ mechanism alters `/detections`.
 A search can leave millions of trials above `snr_min`, most of them responses
 to the same few sources or to interference. Grouping holds every distinct
 track in its index, so such a search exhausts `memory_gb` long before
-`max_candidates` applies. `max_per_cell` bounds the input instead: a trial at
-frequency f is in cell `floor(ln(f) / cell_log_width)`, and only the
-`max_per_cell` strongest trials of each cell, by the detection order above,
-are sorted, grouped and written. `cell_log_width` has no default and must be
-set with `max_per_cell`; zero `max_per_cell` keeps every trial.
+`max_candidates` applies. `max_per_cell` bounds the input instead: only the
+`max_per_cell` strongest trials of each frequency cell of each source, by the
+detection order above, are sorted, grouped and written. Zero `max_per_cell`
+keeps every trial.
+
+A cell is a frequency interval of one source: one EP run, or one FFA search
+region (`source_region`). Cells of different runs never compete, so a bright
+source that fills a cell in its strongest runs does not displace its weaker
+detections in the other runs, and the number of runs that detect a source is
+kept. Set exactly one cell width with `max_per_cell`; neither has a default:
+
+- `cell_bins`: a trial at frequency f is in cell `floor(f * tobs / cell_bins)`,
+  a width of `cell_bins` Fourier bins;
+- `cell_log_width`: a trial is in cell `floor(ln(f) / cell_log_width)`, a
+  constant fractional width.
 
 The cap is applied as the spool is read, before the external sort, so the
-sort and the grouping see at most `max_per_cell` trials per cell. Dropped
+sort and the grouping see at most `max_per_cell` trials per cell. EP runs are
+capped one at a time, so the cap holds the kept trials of a single run. Dropped
 trials are not detections of the product: they are not in `/detections`, and
 the root attribute `n_cell_dropped` counts them (`n_detections` counts the
 kept ones). The cells' index is charged against `memory_gb` like the grouping

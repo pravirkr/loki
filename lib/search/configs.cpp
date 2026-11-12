@@ -304,6 +304,8 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    }),
         field<Cfg>("candidates", "max_per_cell",
                    [](auto& c) -> auto& { return c.candidates.max_per_cell; }),
+        field<Cfg>("candidates", "cell_bins",
+                   [](auto& c) -> auto& { return c.candidates.cell_bins; }),
         field<Cfg>(
             "candidates", "cell_log_width",
             [](auto& c) -> auto& { return c.candidates.cell_log_width; }),
@@ -584,10 +586,12 @@ remove_harmonics = false
 harmonic_denominator_max = 100
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
-# Keep only the strongest max_per_cell trials of each frequency cell, before
-# grouping. 0 keeps every trial. Cells are cell_log_width wide in
-# ln(frequency); it has no default and must be set with max_per_cell.
+# Keep only the strongest max_per_cell trials of each frequency cell of each
+# source region, before grouping. 0 keeps every trial. Cells are cell_bins
+# Fourier bins (1/tobs) or cell_log_width in ln(frequency) wide; set exactly
+# one of them with max_per_cell.
 max_per_cell = 0
+# cell_bins = <cell width in Fourier bins>
 # cell_log_width = <cell width in ln(frequency)>
 max_candidates = 0 # unlimited; applied after harmonic filtering
 memory_gb = 1.0 # additional host budget, reserved within CPU search budget
@@ -2313,9 +2317,11 @@ remove_harmonics = false
 harmonic_denominator_max = 100
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
-# Strongest trials kept per frequency cell, before grouping; 0 keeps all.
+# Strongest trials kept per frequency cell of each run, before grouping; 0
+# keeps all. Set exactly one cell width with max_per_cell.
 max_per_cell = 0
-# cell_log_width = <cell width in ln(frequency)>; required with max_per_cell
+# cell_bins = <cell width in Fourier bins (1/tobs)>
+# cell_log_width = <cell width in ln(frequency)>
 max_candidates = 0
 # Separate host candidate budget; reserved before CPU chunk planning.
 memory_gb = 1.0

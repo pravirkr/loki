@@ -317,6 +317,8 @@ TEST_CASE("FFATomlConfig names the key of every wrong type", "[config][ffa]") {
          "candidates.max_candidates must be an integer"},
         {"[candidates]\nmax_per_cell = 1.5\n",
          "candidates.max_per_cell must be an integer"},
+        {"[candidates]\ncell_bins = \"64\"\n",
+         "candidates.cell_bins must be a number"},
         {"[candidates]\ncell_log_width = \"2e-4\"\n",
          "candidates.cell_log_width must be a number"},
         {"[candidates]\nharmonic_denominator_max = 20000\n",

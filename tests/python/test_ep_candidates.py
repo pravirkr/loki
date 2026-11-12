@@ -356,30 +356,33 @@ def test_ep_cell_cap_publishes_a_search_too_large_to_group(product, tmp_path):
     with h5py.File(output) as result:
         total = result.attrs["n_detections"]
         snr_min = result["processing"].attrs["snr_min"]
-    # The same budget holds the strongest leaf of each cell.
+    # The same budget holds the strongest leaf of each cell of each run.
     log_width = 2e-3
     opts.cluster = True
     opts.max_per_cell = 1
     opts.cell_log_width = log_width
     libloki.prune.EPFreqSweep.publish_candidates(spool, output, candidates=opts)
-    best: dict[int, float] = {}
+    best: dict[tuple[int, int], float] = {}
     with h5py.File(spool) as handle:
-        for run_path in handle["search/sources/run_path"].asstr()[:]:
+        run_paths = handle["search/sources/run_path"].asstr()[:]
+        for run, run_path in enumerate(run_paths):
             run_scores = handle[f"{run_path}/scores"][:]
             freqs = handle[f"{run_path}/param_sets"][:, -3, 0]  # the freq row
             for cell, score in zip(
                 np.floor(np.log(freqs) / log_width), run_scores, strict=True
             ):
                 if score >= snr_min:
-                    best[int(cell)] = max(best.get(int(cell), score), score)
+                    key = (run, int(cell))
+                    best[key] = max(best.get(key, score), score)
     with h5py.File(output) as result:
         kept = result.attrs["n_detections"]
         assert kept + result.attrs["n_cell_dropped"] == total
         assert result["processing"].attrs["max_per_cell"] == 1
         cells = np.floor(np.log(result["detections/f0"][:]) / log_width)
-        assert kept == len(best) == len(np.unique(cells))
-        for cell, snr in zip(cells, result["detections/snr"][:], strict=True):
-            assert snr == best[int(cell)]
+        keys = list(zip(result["detections/source_region"][:], cells, strict=True))
+        assert kept == len(best) == len(set(keys))
+        for (run, cell), snr in zip(keys, result["detections/snr"][:], strict=True):
+            assert snr == best[(int(run), int(cell))]
         check_graph(result)
     opts.cell_log_width = 0
     with pytest.raises(ValueError, match="cell_log_width"):

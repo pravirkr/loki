@@ -749,8 +749,24 @@ void publish_candidate_results(const std::filesystem::path& spool,
     // With a cell cap, only the trials it keeps are sorted and grouped.
     std::optional<search::detail::CellCap> cap;
     if (options.max_per_cell != 0) {
-        cap.emplace(options, 2 * source_bytes);
+        cap.emplace(options, tobs, 2 * source_bytes);
     }
+    // Cells belong to one source, so an EP run's kept trials can be sorted
+    // as soon as it is read: the cap then holds one run at a time.
+    const auto drain = [&] {
+        if (!cap) {
+            return;
+        }
+        const auto kept = cap->take();
+        nrows += kept.size();
+        for (std::size_t start = 0; start < kept.size(); start += batch) {
+            std::vector<Candidate> records(
+                kept.begin() + static_cast<std::ptrdiff_t>(start),
+                kept.begin() + static_cast<std::ptrdiff_t>(
+                                   std::min(start + batch, kept.size())));
+            sort.add(records);
+        }
+    };
     const auto keep = [&](std::vector<Candidate>& records) {
         if (cap) {
             for (const auto& c : records) {
@@ -776,6 +792,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                     start, std::min(batch, count - start), nparams, snr_min);
                 keep(records);
             }
+            drain();
         }
     } else {
         const auto count = raw.getDataSet("snr").getDimensions()[0];
@@ -788,19 +805,9 @@ void publish_candidate_results(const std::filesystem::path& spool,
             keep(records);
         }
     }
+    drain();
     const std::uint64_t cell_dropped = cap ? cap->dropped() : 0;
-    if (cap) {
-        auto kept = cap->take();
-        cap.reset();
-        nrows = kept.size();
-        for (std::size_t start = 0; start < kept.size(); start += batch) {
-            std::vector<Candidate> records(
-                kept.begin() + static_cast<std::ptrdiff_t>(start),
-                kept.begin() + static_cast<std::ptrdiff_t>(
-                                   std::min(start + batch, kept.size())));
-            sort.add(records);
-        }
-    }
+    cap.reset();
     progress.phase("merging sorted runs", 0);
     const auto sorted = sort.finish();
     // The atomic publication file must live beside the destination, even if
@@ -849,6 +856,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
             config.createAttribute("harmonic_snr_distance",
                                    options.harmonic_snr_distance);
             config.createAttribute("max_per_cell", options.max_per_cell);
+            config.createAttribute("cell_bins", options.cell_bins);
             config.createAttribute("cell_log_width", options.cell_log_width);
             config.createAttribute("max_candidates", options.max_candidates);
             config.createAttribute("memory_gb", options.memory_gb);

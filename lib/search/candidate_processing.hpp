@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -13,25 +14,42 @@ namespace loki::search::detail {
 
 [[nodiscard]] bool candidate_brighter(const Candidate& a, const Candidate& b);
 
-/// Keeps the CandidateOptions::max_per_cell brightest trials of each cell of
-/// width cell_log_width in ln(frequency). Trials arrive in any order;
-/// candidate_brighter is a total order, so the kept set does not depend on
-/// it. The index is charged against CandidateOptions::memory_gb.
+/// Keeps the CandidateOptions::max_per_cell brightest trials of each
+/// frequency cell of each source region (an EP run or an FFA region), so that
+/// a bright source in one run cannot displace its detections in another.
+/// Cells are cell_bins Fourier bins or cell_log_width in ln(frequency) wide.
+/// Trials arrive in any order; candidate_brighter is a total order, so the
+/// kept set does not depend on it. The kept trials are charged against
+/// CandidateOptions::memory_gb until take() moves them out.
 class CellCap {
 public:
-    explicit CellCap(const CandidateOptions& options,
-                     std::size_t reserved_bytes = 0);
+    CellCap(const CandidateOptions& options,
+            double tobs,
+            std::size_t reserved_bytes = 0);
     void add(const Candidate& candidate);
     /// Moves the kept trials out, in no particular order.
     [[nodiscard]] std::vector<Candidate> take();
     [[nodiscard]] std::uint64_t dropped() const noexcept { return m_dropped; }
 
 private:
+    struct Key {
+        std::uint32_t region;
+        std::int64_t cell;
+        bool operator==(const Key&) const = default;
+    };
+    struct KeyHash {
+        std::size_t operator()(const Key& k) const noexcept {
+            return std::hash<std::uint64_t>{}(
+                (static_cast<std::uint64_t>(k.cell) * 0x9E3779B97F4A7C15ULL) ^
+                k.region);
+        }
+    };
     std::uint64_t m_max;
-    double m_width;
+    bool m_log;
+    double m_scale;
     double m_memory_gb;
     // Each cell is a heap whose front is its weakest kept trial.
-    std::unordered_map<std::int64_t, std::vector<Candidate>> m_cells;
+    std::unordered_map<Key, std::vector<Candidate>, KeyHash> m_cells;
     std::uint64_t m_kept{};
     std::uint64_t m_dropped{};
 };

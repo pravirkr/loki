@@ -326,7 +326,7 @@ TEST_CASE("A cell cap keeps the same trials in any arrival order",
         c.id             = i;
     }
     const auto kept = [&](const std::vector<loki::search::Candidate>& in) {
-        loki::search::detail::CellCap cap(options);
+        loki::search::detail::CellCap cap(options, 10);
         for (const auto& c : in) {
             cap.add(c);
         }
@@ -346,6 +346,60 @@ TEST_CASE("A cell cap keeps the same trials in any arrival order",
         std::ranges::shuffle(trials, rng);
         REQUIRE(kept(trials) == reference);
     }
+}
+
+TEST_CASE("Cell cap cells belong to one source region", "[candidates]") {
+    loki::search::CandidateOptions options;
+    options.max_per_cell = 2;
+    options.cell_bins    = 4; // 0.4 Hz cells over tobs = 10 s
+    std::vector<loki::search::Candidate> trials;
+    // Two regions see the same source near 100 Hz; the strong region would
+    // fill a shared cell with its own trials.
+    for (std::uint32_t region = 0; region < 2; ++region) {
+        for (std::uint32_t k = 0; k < 5; ++k) {
+            loki::search::Candidate c;
+            c.derivatives[0] = 100.0 + 0.01 * k;
+            c.parameters[0]  = c.derivatives[0];
+            c.snr           = static_cast<float>(region == 0 ? 50 - k : 10 - k);
+            c.width         = 1;
+            c.nbins         = 10;
+            c.source_region = region;
+            c.source_index  = k;
+            c.id            = (static_cast<std::uint64_t>(region) << 32U) | k;
+            trials.push_back(c);
+        }
+    }
+    loki::search::detail::CellCap cap(options, 10);
+    for (const auto& c : trials) {
+        cap.add(c);
+    }
+    auto kept = cap.take();
+    std::ranges::sort(kept, loki::search::detail::candidate_brighter);
+    std::vector<float> snr;
+    for (const auto& c : kept) {
+        snr.push_back(c.snr);
+    }
+    REQUIRE(snr == std::vector<float>{50, 49, 10, 9});
+    REQUIRE(cap.dropped() == 6);
+    // A cell of 4 bins is 0.4 Hz wide, [100, 100.4) Hz here: a weak trial at
+    // 100.39 Hz is dropped from the full cell, one at 100.41 Hz is not.
+    for (const double f : {100.39, 100.41}) {
+        CAPTURE(f);
+        loki::search::Candidate edge = trials[0];
+        edge.derivatives[0]          = f;
+        edge.parameters[0]           = f;
+        edge.snr                     = 1;
+        edge.id                      = 99;
+        cap.add(trials[0]);
+        cap.add(trials[1]);
+        cap.add(edge);
+        REQUIRE(cap.take().size() == (f < 100.4 ? 2U : 3U));
+    }
+    // cell_bins needs the observation length, and exactly one width is set.
+    REQUIRE_THROWS_AS(loki::search::detail::CellCap(options, 0),
+                      std::invalid_argument);
+    options.cell_log_width = 1e-3;
+    REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);
 }
 
 TEST_CASE("A cell cap is bounded by the candidate memory budget",

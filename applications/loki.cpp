@@ -1771,8 +1771,11 @@ int main(int argc, char** argv) {
                                "Harmonic S/N agreement tolerance");
     grp_candidates->add_option(
         "--max-per-cell", ffa_cfg.candidates.max_per_cell,
-        "Strongest trials kept per frequency cell before grouping; zero "
+        "Strongest trials kept per frequency cell of each run or region "
+        "before grouping; zero "
         "keeps all");
+    grp_candidates->add_option("--cell-bins", ffa_cfg.candidates.cell_bins,
+                               "Frequency cell width in Fourier bins (1/tobs)");
     grp_candidates->add_option("--cell-log-width",
                                ffa_cfg.candidates.cell_log_width,
                                "Frequency cell width in ln(frequency)");
@@ -1986,8 +1989,12 @@ int main(int argc, char** argv) {
                                   "Harmonic S/N agreement tolerance");
     ep_grp_candidates->add_option(
         "--max-per-cell", ep_cfg.candidates.max_per_cell,
-        "Strongest trials kept per frequency cell before grouping; zero "
+        "Strongest trials kept per frequency cell of each run or region "
+        "before grouping; zero "
         "keeps all");
+    ep_grp_candidates->add_option(
+        "--cell-bins", ep_cfg.candidates.cell_bins,
+        "Frequency cell width in Fourier bins (1/tobs)");
     ep_grp_candidates->add_option("--cell-log-width",
                                   ep_cfg.candidates.cell_log_width,
                                   "Frequency cell width in ln(frequency)");
