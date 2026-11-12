@@ -95,7 +95,9 @@ public:
                   const search::PulsarSearchConfig& cfg,
                   float min_pd,
                   std::string_view poly_basis,
-                  float ref_ducy);
+                  float ref_ducy,
+                  std::optional<search::detail::LeafReductionSpec> reduction =
+                      std::nullopt);
     ~EPSweepWriter();
     EPSweepWriter(const EPSweepWriter&)            = delete;
     EPSweepWriter& operator=(const EPSweepWriter&) = delete;
@@ -107,6 +109,8 @@ private:
     std::filesystem::path m_file;
     std::filesystem::path m_partial_file;
     SizeType m_nchunks;
+    /// Per chunk: the leaf reduction with the chunk's nbins, if any.
+    std::vector<search::detail::LeafReductionSpec> m_reductions;
     bool m_finished{false};
     bool m_published{false};
     std::mutex m_mutex;

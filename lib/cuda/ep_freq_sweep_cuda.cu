@@ -204,6 +204,11 @@ public:
     EPFreqSweepCudaEngine(EPFreqSweepCudaEngine&&)                 = delete;
     EPFreqSweepCudaEngine& operator=(EPFreqSweepCudaEngine&&)      = delete;
 
+    void set_leaf_reduction(
+        std::optional<search::detail::LeafReductionSpec> spec) override {
+        m_reduction = std::move(spec);
+    }
+
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
@@ -253,7 +258,8 @@ public:
         const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
         const SizeType nchunks = chunk_cfgs.size();
         detail::EPSweepWriter result_writer(result_file, chunk_cfgs, m_base_cfg,
-                                            m_min_pd, m_poly_basis, m_ref_ducy);
+                                            m_min_pd, m_poly_basis, m_ref_ducy,
+                                            m_reduction);
         spdlog::debug("EPFreqSweep (CUDA {}): starting sweep over {} chunks",
                       m_device_id, nchunks);
 
@@ -399,6 +405,7 @@ private:
     float m_min_pd;
     std::string m_poly_basis;
     float m_ref_ducy;
+    std::optional<search::detail::LeafReductionSpec> m_reduction;
     std::optional<SizeType> m_n_runs;
     std::optional<std::vector<SizeType>> m_ref_segs;
     int m_device_id;

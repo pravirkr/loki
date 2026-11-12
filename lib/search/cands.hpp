@@ -18,6 +18,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/search/candidate_processing.hpp"
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
@@ -386,16 +387,18 @@ public:
                            SizeType n_params,
                            SizeType n_harvested_total);
 
-    void write_run_results(std::string_view run_name,
-                           std::span<const SizeType> snail_scheme,
-                           memory::CircularView<double> leaves_view,
-                           memory::CircularView<float> scores_view,
-                           memory::CircularView<float> scores_ep_view,
-                           double total_pruning_gflops,
-                           SizeType n_leaves,
-                           SizeType n_params,
-                           const PruneStatsCollection& pstats,
-                           std::span<const std::uint32_t> widths = {});
+    void
+    write_run_results(std::string_view run_name,
+                      std::span<const SizeType> snail_scheme,
+                      memory::CircularView<double> leaves_view,
+                      memory::CircularView<float> scores_view,
+                      memory::CircularView<float> scores_ep_view,
+                      double total_pruning_gflops,
+                      SizeType n_leaves,
+                      SizeType n_params,
+                      const PruneStatsCollection& pstats,
+                      std::span<const std::uint32_t> widths      = {},
+                      const detail::LeafReductionSpec* reduction = nullptr);
 
 private:
     std::filesystem::path m_filepath;

@@ -62,10 +62,27 @@ the attributes
 | `max_cell_dropped_snr` | Highest S/N the cell cap dropped (0 when none) |
 
 so `n_leaves_above_snr_min = n_cell_dropped + n_dominated +
-n_leaves_retained`. The result then holds a few thousand leaves where the
-spool may hold tens of millions: a 10 GB spool of 83 million leaves gave a
-1.5 MB result. With `max_per_cell = 0` the run groups are copied whole, as
-before.
+n_leaves_retained`.
+
+A candidate search applies the reduction while it writes each run, so its
+spool already holds only the retained leaves: a search whose 32 runs ended
+with 83 million final leaves wrote a spool of about 1.5 MB instead of 10 GB,
+and its postprocessing took a fraction of a second. The run groups of such a
+spool carry `leaf_index`, the counts above and the options they were reduced
+with (`reduced_max_per_cell`, `reduced_cell_bins`, `reduced_cell_log_width`,
+`reduced_dominance_kappa`, `reduced_radius`, `reduced_phase_radius`,
+`reduced_snr_min`), and `reduced_at = "search"`; a run reduced at
+publication records the same, with `reduced_at = "publication"`. Leaves
+below `snr_min` are not kept. Publishing such a
+spool again (`publish_candidates`, for example after an interrupted
+postprocessing), or republishing a reduced product, requires the same
+options and `snr_min`, and gives the same product; other options raise an
+error, since the dropped leaves are gone. To
+keep every final leaf, search with `max_per_cell = 0`, or without candidates
+(`--no-candidates`), which never reduces. Publishing a full spool, such as
+one written with `--no-candidates`, reduces it then: a 10 GB spool of 83
+million leaves gave a 1.5 MB result. With `max_per_cell = 0` the run groups
+are copied whole, as before.
 
 The candidate score is the existing run `scores` value: maximum boxcar S/N of
 the final reintegrated fold. `scores_ep` remains the pruning-score diagnostic.
@@ -87,8 +104,9 @@ Clustering compares candidates by the Taylor track through crackle; over an
 observation that is a small fraction of the orbit, the next term is small,
 and it largely cancels between two candidates on the same orbit.
 
-In Python, pass `candidates=CandidateOptions()` to opt in; `candidates=None`
-retains the existing diagnostic-only API. In C++, use the overload whose
+In Python, pass `candidates=CandidateOptions.ep_defaults()` to opt in with
+the EP defaults (a plain `CandidateOptions()` keeps every leaf);
+`candidates=None` retains the existing diagnostic-only API. In C++, use the overload whose
 second argument is `CandidateOptions`. The CLI enables candidate processing
 for supported Taylor searches using the existing `[candidates]` table and
 the same flags as FFA, including `--no-cluster`. Other CLI models retain

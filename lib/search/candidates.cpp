@@ -468,6 +468,78 @@ std::uint64_t DominanceReducer::reduce(std::vector<Candidate>& trials) const {
     return absorbed;
 }
 
+Candidate ep_leaf_candidate(std::span<const double> leaf,
+                            std::size_t nparams,
+                            float score,
+                            std::uint32_t width,
+                            std::uint32_t nbins,
+                            std::uint32_t run,
+                            std::uint32_t index) {
+    Candidate c;
+    c.id            = (static_cast<std::uint64_t>(run) << 32U) | index;
+    c.source_region = run;
+    c.source_index  = index;
+    c.width         = width;
+    c.nbins         = nbins;
+    c.snr           = score;
+    for (std::size_t k = 0; k < nparams; ++k) {
+        c.parameters[k] = leaf[2 * k];
+    }
+    c.derivatives[0] = c.parameters[nparams - 1];
+    for (std::size_t k = 1; k < nparams; ++k) {
+        c.derivatives[k] =
+            -c.derivatives[0] * c.parameters[nparams - 1 - k] * utils::kInvCval;
+    }
+    c.validate();
+    return c;
+}
+
+RunLeafReduction reduce_run_leaves(
+    const LeafReductionSpec& spec,
+    std::size_t n_leaves,
+    std::size_t nparams,
+    const std::function<std::span<const double>(std::size_t)>& leaf,
+    const std::function<float(std::size_t)>& score,
+    std::span<const std::uint32_t> widths) {
+    if (widths.size() != n_leaves) {
+        throw std::invalid_argument("leaf reduction needs one width per leaf");
+    }
+    if (n_leaves > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error(
+            "EP leaf index exceeds detection identity capacity");
+    }
+    CellCap cap(spec.options, spec.tobs);
+    RunLeafReduction out;
+    out.final_leaves = n_leaves;
+    for (std::size_t i = 0; i < n_leaves; ++i) {
+        if (i % 65536 == 0) {
+            loki::check_interrupt();
+        }
+        const float s = score(i);
+        if (!utils::is_finite(s)) {
+            throw std::invalid_argument("non-finite final EP score");
+        }
+        if (s < spec.snr_min) {
+            continue;
+        }
+        ++out.above_snr_min;
+        cap.add(ep_leaf_candidate(leaf(i), nparams, s, widths[i], spec.nbins, 0,
+                                  static_cast<std::uint32_t>(i)));
+    }
+    out.max_cell_dropped_snr = cap.max_dropped_snr();
+    out.cell_dropped         = cap.dropped();
+    auto kept                = cap.take();
+    if (spec.options.dominance_kappa > 0) {
+        out.dominated = DominanceReducer(spec.tobs, spec.options).reduce(kept);
+    }
+    out.retained.reserve(kept.size());
+    for (const auto& c : kept) {
+        out.retained.push_back(c.source_index);
+    }
+    std::ranges::sort(out.retained);
+    return out;
+}
+
 std::vector<Candidate> CellCap::take() {
     std::vector<Candidate> out;
     out.reserve(m_kept);

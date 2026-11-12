@@ -105,6 +105,11 @@ public:
     EPFreqSweepCpuEngine(EPFreqSweepCpuEngine&&)                 = delete;
     EPFreqSweepCpuEngine& operator=(EPFreqSweepCpuEngine&&)      = delete;
 
+    void set_leaf_reduction(
+        std::optional<search::detail::LeafReductionSpec> spec) override {
+        m_reduction = std::move(spec);
+    }
+
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
@@ -221,6 +226,12 @@ public:
                     /*ascend_levels=*/{}, chunk.max_sugg, kBatchSize,
                     m_poly_basis, m_show_progress && (nchunks == 1),
                     m_rfi_config);
+                if (m_reduction) {
+                    auto spec = *m_reduction;
+                    spec.nbins =
+                        static_cast<std::uint32_t>(chunk.cfg.get_nbins());
+                    chunk_ep->set_leaf_reduction(spec);
+                }
 
                 chunk_ep->execute(ts_e, ts_v, tmp_dir, chunk_prefix);
             }
@@ -246,6 +257,7 @@ private:
     std::string m_poly_basis;
     float m_ref_ducy;
     algorithms::PruneRFIConfig m_rfi_config;
+    std::optional<search::detail::LeafReductionSpec> m_reduction;
     std::optional<SizeType> m_n_runs;
     std::optional<std::vector<SizeType>> m_ref_segs;
     // Workers pruning at the same time: min(nthreads, runs).

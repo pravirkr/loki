@@ -134,6 +134,15 @@ EPFreqSweep::EPFreqSweep(
         search_cfg, show_progress, min_pd, poly_basis, ref_ducy, rfi_config,
         plan_cache_file, n_runs, ref_segs, exec));
     m_impl->candidates = candidates;
+    // The search reduces each run as it writes it, exactly as publication
+    // would: the spool then holds only the retained leaves.
+    if (candidates.max_per_cell != 0) {
+        m_impl->m_engine->set_leaf_reduction(search::detail::LeafReductionSpec{
+            .options = candidates,
+            .snr_min = cfg.get_snr_min(),
+            .tobs    = cfg.get_tobs(),
+        });
+    }
 }
 
 EPFreqSweep::~EPFreqSweep()                                       = default;

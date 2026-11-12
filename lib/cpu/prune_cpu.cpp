@@ -104,6 +104,12 @@ public:
         return get_workspace().get_memory_usage_gib();
     }
 
+    /// Reduce each run's final leaves before writing them; null keeps all.
+    void set_leaf_reduction(
+        const search::detail::LeafReductionSpec* reduction) noexcept {
+        m_reduction = reduction;
+    }
+
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
                  std::span<const SizeType> ascend_levels,
@@ -199,6 +205,7 @@ private:
 
     search::PulsarSearchConfig m_cfg;
     plans::FFAPlan<FoldType> m_ffa_plan;
+    const search::detail::LeafReductionSpec* m_reduction{nullptr};
     std::vector<float> m_threshold_scheme;
     SizeType m_max_sugg;
     SizeType m_batch_size;
@@ -436,7 +443,7 @@ private:
         result_writer.write_run_results(
             run_name, m_snail_scheme.get_data(), leaves_view, scores_view,
             scores_ep_view, total_pruning_gflops, n_leaves, m_cfg.get_nparams(),
-            m_pstats, widths);
+            m_pstats, widths, m_reduction);
         if (m_rfi->has_harvest()) {
             result_writer.write_run_harvest(
                 run_name, m_harvest, m_cfg.get_nparams(), m_n_harvested_total);
@@ -1184,6 +1191,11 @@ public:
     EPMultiPassCpuEngine(EPMultiPassCpuEngine&&)                 = delete;
     EPMultiPassCpuEngine& operator=(EPMultiPassCpuEngine&&)      = delete;
 
+    void set_leaf_reduction(
+        std::optional<search::detail::LeafReductionSpec> spec) override {
+        m_reduction = std::move(spec);
+    }
+
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
@@ -1284,6 +1296,7 @@ private:
     SizeType m_batch_size;
     std::string m_poly_basis;
     bool m_show_progress;
+    std::optional<search::detail::LeafReductionSpec> m_reduction;
     PruneRFIConfig m_rfi_config;
 
     plans::FFAPlan<FoldType> m_ffa_plan;
@@ -1337,6 +1350,7 @@ private:
         auto prune = PruneImpl<FoldType>(
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
+        prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
@@ -1388,6 +1402,7 @@ private:
                 auto prune            = PruneImpl<FoldType>(
                     ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
                     m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
+                prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,

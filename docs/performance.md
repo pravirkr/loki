@@ -159,3 +159,32 @@ specific (it differs on a no-FMA clang build), so it is not asserted in CI.
 If cluster counts grow into the thousands, the harmonic flagging loop in
 `CandidateClusterer::finish` (clusters² × `harmonic_denominator_max`, with a
 span computation inside) is the next cliff; the same two fixes apply.
+
+### Per-run reduction of EP final leaves
+
+A bright source, or interference, leaves a large EP search with millions
+of final leaves above `snr_min`, nearly all of them responses to one pulse.
+Before the reduction every leaf was written to the spool, read back, sorted
+and grouped, and the run groups were copied into the result, so the
+candidate stage could write as much as the search. The reduction
+(`docs/candidates.md`, "Keeping the strongest trials per frequency cell")
+keeps the strongest leaves of each frequency cell of each run, absorbs
+leaves a stronger leaf of the run explains, and runs as each run is written.
+Measured 2026-11-12 on an EDGAR L40 node (`--threads 4`, CUDA):
+
+| Search | Final leaves | Before | After |
+|---|---|---|---|
+| Circular orbit, bright pulsar, 2^26 samples, 32 runs | 83.5 M | 10 GB spool; candidate stage killed after more than 10 min (reading and sorting 15 of 32 runs took 393 s) | 1.5 MB spool and result; candidate stage 0.26 s; whole run 67 s; peak RSS 1.13 GB |
+| Acceleration, 2^27 samples, 128 runs (publish only) | 0.73 M above `snr_min` | did not finish in 30 min | 1.3 s, 0.10 GB, 6,823 detections |
+| Jerk, 2^26 samples, 224 runs (publish only) | 0.15 M above `snr_min` | | 0.4 s, 2,874 detections |
+
+Every known pulsar in these observations kept its best S/N and every run
+that detected it; the reduction with `max_per_cell = 0` is bit-identical
+to the unreduced product, and a search that reduces as it writes gives the
+same product as reducing its full spool at publication (CPU, exact).
+
+Measured and rejected: pooling every run's leaves into the same frequency
+cells (as first proposed). The strongest runs of a source fill its cell, so
+its detections in weaker runs are dropped: with 32 leaves per cell, sources
+lost many of the runs that detected them (for example 21 to 12, and
+16 to 7), although every best S/N survived. Cells are per run.

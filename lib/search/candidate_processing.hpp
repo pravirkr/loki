@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -85,6 +86,46 @@ private:
     bool m_bins;
     double m_reach; ///< Hz with cell_bins, else a fraction of frequency.
 };
+
+/// The trial of an EP final leaf: @p leaf is its spool row of
+/// (nparams + 2) x 2 doubles (value, error), parameters in Loki order
+/// [..., accel, freq]. Its identity is (run << 32) | index.
+[[nodiscard]] Candidate ep_leaf_candidate(std::span<const double> leaf,
+                                          std::size_t nparams,
+                                          float score,
+                                          std::uint32_t width,
+                                          std::uint32_t nbins,
+                                          std::uint32_t run,
+                                          std::uint32_t index);
+
+/// The per-run reduction an EP search applies before writing a run.
+struct LeafReductionSpec {
+    CandidateOptions options; ///< max_per_cell must be nonzero.
+    double snr_min{};
+    double tobs{};
+    std::uint32_t nbins{}; ///< Fold bins of the run's chunk.
+};
+
+/// What the per-run reduction did to one EP run.
+struct RunLeafReduction {
+    std::uint64_t final_leaves{};  ///< Leaves of the run.
+    std::uint64_t above_snr_min{}; ///< Of those, trials at or above snr_min.
+    std::uint64_t cell_dropped{};
+    std::uint64_t dominated{};
+    float max_cell_dropped_snr{};
+    std::vector<std::uint32_t> retained; ///< Leaf indices kept, ascending.
+};
+
+/// Applies CellCap and, with dominance_kappa, DominanceReducer to the final
+/// leaves of one run, exactly as candidate publication does for one run.
+/// @p leaf(i) and @p score(i) give leaf i; @p widths has one per leaf.
+[[nodiscard]] RunLeafReduction reduce_run_leaves(
+    const LeafReductionSpec& spec,
+    std::size_t n_leaves,
+    std::size_t nparams,
+    const std::function<std::span<const double>(std::size_t)>& leaf,
+    const std::function<float(std::size_t)>& score,
+    std::span<const std::uint32_t> widths);
 
 /// Receives globally S/N-sorted trials. append() returns a provisional
 /// identity; cluster_id() resolves it after finish(), including bridges from

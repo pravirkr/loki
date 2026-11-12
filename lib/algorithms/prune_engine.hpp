@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
 
+#include "lib/search/candidate_processing.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms::detail {
@@ -77,6 +79,15 @@ public:
                          std::span<const float> ts_v,
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix) = 0;
+
+    /// Reduce each run's final leaves before writing them. Only the CPU
+    /// engine of a candidate sweep supports it.
+    virtual void
+    set_leaf_reduction(std::optional<search::detail::LeafReductionSpec> spec) {
+        if (spec) {
+            throw std::logic_error("EP engine cannot reduce final leaves");
+        }
+    }
 
     EPMultiPassEngine(const EPMultiPassEngine&)            = delete;
     EPMultiPassEngine& operator=(const EPMultiPassEngine&) = delete;

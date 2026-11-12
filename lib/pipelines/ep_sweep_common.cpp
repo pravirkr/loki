@@ -138,10 +138,18 @@ EPSweepWriter::EPSweepWriter(
     const search::PulsarSearchConfig& cfg,
     float min_pd,
     std::string_view poly_basis,
-    float ref_ducy)
+    float ref_ducy,
+    std::optional<search::detail::LeafReductionSpec> reduction)
     : m_file(result_file),
       m_partial_file(std::filesystem::path(result_file) += ".partial"),
       m_nchunks(chunks.size()) {
+    if (reduction) {
+        for (const auto& chunk : chunks) {
+            auto spec  = *reduction;
+            spec.nbins = static_cast<std::uint32_t>(chunk.cfg.get_nbins());
+            m_reductions.push_back(spec);
+        }
+    }
     initialize_ep_results(m_partial_file, chunks, cfg, min_pd, poly_basis,
                           ref_ducy, 0.0F, "cuda");
     m_thread = std::thread([this] { run(); });
@@ -195,13 +203,15 @@ void EPSweepWriter::run() {
             search::PruneResultWriter writer(
                 m_partial_file, search::PruneResultWriter::Mode::kAppend,
                 fmt::format("chunks/chunk_{:04d}", payload.chunk_id));
-            writer.write_run_results(payload.run_name, payload.snail_scheme,
-                                     {std::span<double>(payload.leaves), {}},
-                                     {std::span<float>(payload.scores), {}},
-                                     {std::span<float>(payload.scores_ep), {}},
-                                     payload.gflops, payload.scores.size(),
-                                     payload.nparams, payload.stats,
-                                     payload.widths);
+            writer.write_run_results(
+                payload.run_name, payload.snail_scheme,
+                {std::span<double>(payload.leaves), {}},
+                {std::span<float>(payload.scores), {}},
+                {std::span<float>(payload.scores_ep), {}}, payload.gflops,
+                payload.scores.size(), payload.nparams, payload.stats,
+                payload.widths,
+                m_reductions.empty() ? nullptr
+                                     : &m_reductions[payload.chunk_id]);
             m_gflops += payload.gflops;
         }
     } catch (...) {

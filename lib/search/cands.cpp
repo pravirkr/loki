@@ -962,7 +962,53 @@ void PruneResultWriter::write_run_results(
     SizeType n_leaves,
     SizeType n_params,
     const PruneStatsCollection& pstats,
-    std::span<const std::uint32_t> widths) {
+    std::span<const std::uint32_t> widths,
+    const detail::LeafReductionSpec* reduction) {
+    // With a reduction, only the retained leaves are written: compacted
+    // copies replace the views, and leaf_index maps rows back to leaves.
+    std::optional<detail::RunLeafReduction> reduced;
+    std::vector<double> kept_leaves;
+    std::vector<float> kept_scores;
+    std::vector<float> kept_scores_ep;
+    std::vector<std::uint32_t> kept_widths;
+    if (reduction != nullptr) {
+        const auto stride = (n_params + 2) * 2;
+        const auto n1     = leaves_view.first.size() / stride;
+        const auto leaf   = [&](std::size_t i) -> std::span<const double> {
+            return i < n1
+                       ? leaves_view.first.subspan(i * stride, stride)
+                       : leaves_view.second.subspan((i - n1) * stride, stride);
+        };
+        const auto pick = [](const memory::CircularView<float>& v,
+                             std::size_t i) {
+            return i < v.first.size() ? v.first[i]
+                                      : v.second[i - v.first.size()];
+        };
+        error_check::check_equal(
+            leaves_view.first.size() / stride +
+                leaves_view.second.size() / stride,
+            n_leaves, "write_run_results: circular view size mismatch");
+        reduced = detail::reduce_run_leaves(
+            *reduction, n_leaves, n_params, leaf,
+            [&](std::size_t i) { return pick(scores_view, i); }, widths);
+        const auto n = reduced->retained.size();
+        kept_leaves.reserve(n * stride);
+        kept_scores.reserve(n);
+        kept_scores_ep.reserve(n);
+        kept_widths.reserve(n);
+        for (const auto i : reduced->retained) {
+            const auto row = leaf(i);
+            kept_leaves.insert(kept_leaves.end(), row.begin(), row.end());
+            kept_scores.push_back(pick(scores_view, i));
+            kept_scores_ep.push_back(pick(scores_ep_view, i));
+            kept_widths.push_back(widths[i]);
+        }
+        leaves_view    = {std::span<double>(kept_leaves), {}};
+        scores_view    = {std::span<float>(kept_scores), {}};
+        scores_ep_view = {std::span<float>(kept_scores_ep), {}};
+        widths         = kept_widths;
+        n_leaves       = n;
+    }
     const std::scoped_lock lock(m_hdf5_mutex);
 
     HighFive::File file        = open_file();
@@ -1049,6 +1095,32 @@ void PruneResultWriter::write_run_results(
     }
     if (!timer_stats.empty()) {
         run_group.createDataSet("timer_stats", timer_stats);
+    }
+    if (reduced) {
+        run_group.createDataSet("leaf_index", reduced->retained)
+            .createAttribute("description",
+                             std::string("leaf of each row among the run's "
+                                         "final leaves"));
+        run_group.createAttribute("n_final_leaves", reduced->final_leaves);
+        run_group.createAttribute("n_leaves_above_snr_min",
+                                  reduced->above_snr_min);
+        run_group.createAttribute("n_cell_dropped", reduced->cell_dropped);
+        run_group.createAttribute("n_dominated", reduced->dominated);
+        run_group.createAttribute(
+            "n_leaves_retained",
+            static_cast<std::uint64_t>(reduced->retained.size()));
+        run_group.createAttribute("max_cell_dropped_snr",
+                                  reduced->max_cell_dropped_snr);
+        // The options the search reduced with: publication must use them.
+        const auto& o = reduction->options;
+        run_group.createAttribute("reduced_max_per_cell", o.max_per_cell);
+        run_group.createAttribute("reduced_cell_bins", o.cell_bins);
+        run_group.createAttribute("reduced_cell_log_width", o.cell_log_width);
+        run_group.createAttribute("reduced_dominance_kappa", o.dominance_kappa);
+        run_group.createAttribute("reduced_radius", o.radius);
+        run_group.createAttribute("reduced_phase_radius", o.phase_radius);
+        run_group.createAttribute("reduced_snr_min", reduction->snr_min);
+        run_group.createAttribute("reduced_at", std::string("search"));
     }
 }
 

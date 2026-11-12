@@ -187,13 +187,26 @@ struct RunReduction {
 constexpr std::array kLeafDatasets{"param_sets", "scores", "scores_ep",
                                    "width"};
 
-/// Writes the rows @p rows (ascending) of the leaf datasets of the spool run
-/// @p src_path into @p dst, reading runs of consecutive rows at once.
+/// Writes the leaves @p leaves (ascending) of the spool run @p src_path into
+/// @p dst, reading runs of consecutive rows at once. A run the search
+/// already reduced stores its leaves' indices in `leaf_index`.
 void copy_leaf_rows(const HighFive::File& raw,
                     const std::string& src_path,
                     HighFive::Group& dst,
-                    std::span<const std::uint32_t> rows) {
+                    std::span<const std::uint32_t> leaves) {
     const auto src = raw.getGroup(src_path);
+    std::vector<std::uint32_t> rows(leaves.begin(), leaves.end());
+    if (src.exist("leaf_index")) {
+        std::vector<std::uint32_t> spool_leaves;
+        src.getDataSet("leaf_index").read(spool_leaves);
+        for (auto& row : rows) {
+            const auto it = std::ranges::lower_bound(spool_leaves, row);
+            if (it == spool_leaves.end() || *it != row) {
+                throw std::logic_error("retained leaf missing from the spool");
+            }
+            row = static_cast<std::uint32_t>(it - spool_leaves.begin());
+        }
+    }
     for (const auto* name : kLeafDatasets) {
         const auto in    = src.getDataSet(name);
         const auto type  = in.getDataType();
@@ -225,10 +238,10 @@ void copy_leaf_rows(const HighFive::File& raw,
         }
     }
     dst.createDataSet("leaf_index",
-                      std::vector<std::uint32_t>(rows.begin(), rows.end()))
+                      std::vector<std::uint32_t>(leaves.begin(), leaves.end()))
         .createAttribute("description",
-                         std::string("row of each leaf in the search spool's "
-                                     "run; detections' source_index"));
+                         std::string("leaf of each row among the run's final "
+                                     "leaves; detections' source_index"));
 }
 
 /// Copies the spool's `chunks` tree one run at a time, with a checkpoint
@@ -241,7 +254,9 @@ void copy_ep_chunks(const HighFive::File& raw,
                     HighFive::File& result,
                     PostProgress& progress,
                     std::span<const EPSource> sources,
-                    std::span<const RunReduction> reductions) {
+                    std::span<const RunReduction> reductions,
+                    const search::CandidateOptions& options,
+                    double snr_min) {
     std::unordered_map<std::string, std::size_t> ordinal;
     for (std::size_t i = 0; i < reductions.size(); ++i) {
         ordinal.emplace(sources[i].path, i);
@@ -285,10 +300,10 @@ void copy_ep_chunks(const HighFive::File& raw,
                 const auto& reduction = reductions[found->second];
                 const auto src_run    = raw.getGroup(run_path);
                 auto dst_run          = dst_runs.createGroup(run);
-                copy_attributes(src_run, dst_run);
                 for (const auto& object : src_run.listObjectNames()) {
-                    if (std::ranges::find(kLeafDatasets, object) ==
-                        kLeafDatasets.end()) {
+                    if (object != "leaf_index" &&
+                        std::ranges::find(kLeafDatasets, object) ==
+                            kLeafDatasets.end()) {
                         copy_object(raw, run_path + "/" + object, dst_run,
                                     object);
                     }
@@ -306,6 +321,27 @@ void copy_ep_chunks(const HighFive::File& raw,
                     static_cast<std::uint64_t>(reduction.retained.size()));
                 dst_run.createAttribute("max_cell_dropped_snr",
                                         reduction.max_cell_dropped_snr);
+                // The options of the reduction: republishing this product
+                // needs them, as for a spool the search reduced.
+                dst_run.createAttribute("reduced_max_per_cell",
+                                        options.max_per_cell);
+                dst_run.createAttribute("reduced_cell_bins", options.cell_bins);
+                dst_run.createAttribute("reduced_cell_log_width",
+                                        options.cell_log_width);
+                dst_run.createAttribute("reduced_dominance_kappa",
+                                        options.dominance_kappa);
+                dst_run.createAttribute("reduced_radius", options.radius);
+                dst_run.createAttribute("reduced_phase_radius",
+                                        options.phase_radius);
+                dst_run.createAttribute("reduced_snr_min", snr_min);
+                dst_run.createAttribute(
+                    "reduced_at",
+                    src_run.hasAttribute("reduced_at")
+                        ? src_run.getAttribute("reduced_at").read<std::string>()
+                        : std::string("publication"));
+                // A reduced spool's counts are already folded into these;
+                // its other attributes are copied as they are.
+                copy_attributes(src_run, dst_run);
             }
         }
     }
@@ -450,6 +486,14 @@ std::vector<Candidate> read_ep_candidates(const HighFive::File& file,
     std::uint32_t nbins   = 0;
     const auto chunk_path = source.path.substr(0, source.path.find("/runs/"));
     file.getGroup(chunk_path).getAttribute("nbins").read(nbins);
+    // A run the search already reduced keeps only some leaves; leaf_index
+    // gives each row's leaf, the identity of its detection.
+    std::vector<std::uint32_t> leaf_index;
+    if (run.exist("leaf_index") && count != 0) {
+        leaf_index.resize(count);
+        run.getDataSet("leaf_index").select({start}, {count}).read(leaf_index);
+    }
+    const std::size_t stride = (nparams + 2) * 2;
     std::vector<Candidate> records;
     records.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
@@ -459,27 +503,15 @@ std::vector<Candidate> read_ep_candidates(const HighFive::File& file,
         if (scores[i] < snr_min) {
             continue;
         }
-        if (start + i > std::numeric_limits<std::uint32_t>::max()) {
+        const std::size_t leaf = leaf_index.empty() ? start + i : leaf_index[i];
+        if (leaf > std::numeric_limits<std::uint32_t>::max()) {
             throw std::overflow_error(
                 "EP leaf index exceeds detection identity capacity");
         }
-        Candidate c;
-        c.id = (static_cast<std::uint64_t>(run_id) << 32U) | (start + i);
-        c.source_region = run_id;
-        c.source_index  = static_cast<std::uint32_t>(start + i);
-        c.width         = widths[i];
-        c.nbins         = nbins;
-        c.snr           = scores[i];
-        for (std::size_t k = 0; k < nparams; ++k) {
-            c.parameters[k] = leaves[i * (nparams + 2) * 2 + 2 * k];
-        }
-        c.derivatives[0] = c.parameters[nparams - 1];
-        for (std::size_t k = 1; k < nparams; ++k) {
-            c.derivatives[k] = -c.derivatives[0] *
-                               c.parameters[nparams - 1 - k] * utils::kInvCval;
-        }
-        c.validate();
-        records.push_back(c);
+        records.push_back(search::detail::ep_leaf_candidate(
+            std::span<const double>(leaves).subspan(i * stride, stride),
+            nparams, scores[i], widths[i], nbins, run_id,
+            static_cast<std::uint32_t>(leaf)));
     }
     return records;
 }
@@ -782,6 +814,42 @@ private:
     std::vector<CandidateCluster> m_batch;
     std::vector<std::uint64_t> m_ids;
 };
+/// A run the search reduced keeps only some leaves: publication must use the
+/// options it was reduced with, and its snr_min, to give the same product.
+void check_reduced_run(const HighFive::Group& run,
+                       const search::CandidateOptions& options,
+                       double snr_min) {
+    if (!run.hasAttribute("reduced_max_per_cell")) {
+        return;
+    }
+    const auto u64 = [&](const char* name) {
+        return run.getAttribute(name).read<std::uint64_t>();
+    };
+    const auto f64 = [&](const char* name) {
+        return run.getAttribute(name).read<double>();
+    };
+    const bool same =
+        u64("reduced_max_per_cell") == options.max_per_cell &&
+        f64("reduced_cell_bins") == options.cell_bins &&
+        f64("reduced_cell_log_width") == options.cell_log_width &&
+        f64("reduced_dominance_kappa") == options.dominance_kappa &&
+        f64("reduced_radius") == options.radius &&
+        f64("reduced_phase_radius") == options.phase_radius &&
+        f64("reduced_snr_min") == snr_min;
+    if (!same) {
+        throw std::invalid_argument(fmt::format(
+            "the search reduced its final leaves with max_per_cell = {}, "
+            "cell_bins = {}, cell_log_width = {}, dominance_kappa = {}, "
+            "radius = {}, phase_radius = {} and snr_min = {}; publish with the "
+            "same options, or search again with max_per_cell = 0 to keep "
+            "every leaf",
+            u64("reduced_max_per_cell"), f64("reduced_cell_bins"),
+            f64("reduced_cell_log_width"), f64("reduced_dominance_kappa"),
+            f64("reduced_radius"), f64("reduced_phase_radius"),
+            f64("reduced_snr_min")));
+    }
+}
+
 void publish_candidate_results(const std::filesystem::path& spool,
                                const std::filesystem::path& output,
                                const ObservationMetadata& observation,
@@ -853,6 +921,9 @@ void publish_candidate_results(const std::filesystem::path& spool,
         dominance.emplace(tobs, options);
     }
     std::uint64_t dominated = 0;
+    // Trials a search that reduced its runs dropped before the spool.
+    std::uint64_t spool_cell_dropped = 0;
+    std::uint64_t spool_dominated    = 0;
     // Per-run accounting of a reduced EP spool; the result keeps only the
     // retained leaves of each run.
     std::vector<RunReduction> reductions(ep && cap ? sources.size() : 0);
@@ -896,6 +967,9 @@ void publish_candidate_results(const std::filesystem::path& spool,
     };
     if (ep) {
         progress.phase("reading and sorting runs", sources.size());
+        for (const auto& source : sources) {
+            check_reduced_run(raw.getGroup(source.path), options, snr_min);
+        }
         for (std::size_t run_id = 0; run_id < sources.size(); ++run_id) {
             progress.poke();
             progress.tick();
@@ -918,6 +992,23 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 run.cell_dropped = run.above_snr_min - cap->kept();
             }
             drain(reductions.empty() ? nullptr : &reductions[run_id]);
+            // A run the search reduced: add the search's counts.
+            const auto group = raw.getGroup(sources[run_id].path);
+            if (!reductions.empty() && group.hasAttribute("n_final_leaves")) {
+                auto& run      = reductions[run_id];
+                const auto get = [&](const char* name) {
+                    return group.getAttribute(name).read<std::uint64_t>();
+                };
+                run.final_leaves  = get("n_final_leaves");
+                run.above_snr_min = get("n_leaves_above_snr_min");
+                run.cell_dropped += get("n_cell_dropped");
+                run.dominated += get("n_dominated");
+                spool_cell_dropped += get("n_cell_dropped");
+                spool_dominated += get("n_dominated");
+                run.max_cell_dropped_snr = std::max(
+                    run.max_cell_dropped_snr,
+                    group.getAttribute("max_cell_dropped_snr").read<float>());
+            }
         }
     } else {
         const auto count = raw.getDataSet("snr").getDimensions()[0];
@@ -931,7 +1022,9 @@ void publish_candidate_results(const std::filesystem::path& spool,
         }
     }
     drain(nullptr);
-    const std::uint64_t cell_dropped = cap ? cap->dropped() : 0;
+    const std::uint64_t cell_dropped =
+        (cap ? cap->dropped() : 0) + spool_cell_dropped;
+    dominated += spool_dominated;
     cap.reset();
     progress.phase("merging sorted runs", 0);
     const auto sorted = sort.finish();
@@ -1023,7 +1116,8 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 copy_object(raw, "timer_stats", search_group, "timer_stats");
             }
             if (ep) {
-                copy_ep_chunks(raw, result, progress, sources, reductions);
+                copy_ep_chunks(raw, result, progress, sources, reductions,
+                               options, snr_min);
                 copy_attributes(raw.getGroup("/"), result, true);
                 config.createAttribute("snr_min", snr_min);
                 config.createAttribute(
