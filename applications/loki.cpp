@@ -1661,6 +1661,13 @@ int main(int argc, char** argv) {
     grp_candidates->add_option("--harmonic-snr-distance",
                                ffa_cfg.candidates.harmonic_snr_distance,
                                "Harmonic S/N agreement tolerance");
+    grp_candidates->add_option(
+        "--max-per-cell", ffa_cfg.candidates.max_per_cell,
+        "Strongest trials kept per frequency cell before grouping; zero "
+        "keeps all");
+    grp_candidates->add_option("--cell-log-width",
+                               ffa_cfg.candidates.cell_log_width,
+                               "Frequency cell width in ln(frequency)");
     grp_candidates->add_option("--max-candidates",
                                ffa_cfg.candidates.max_candidates,
                                "Maximum folding candidates; zero is unlimited");
@@ -1869,6 +1876,13 @@ int main(int argc, char** argv) {
     ep_grp_candidates->add_option("--harmonic-snr-distance",
                                   ep_cfg.candidates.harmonic_snr_distance,
                                   "Harmonic S/N agreement tolerance");
+    ep_grp_candidates->add_option(
+        "--max-per-cell", ep_cfg.candidates.max_per_cell,
+        "Strongest trials kept per frequency cell before grouping; zero "
+        "keeps all");
+    ep_grp_candidates->add_option("--cell-log-width",
+                                  ep_cfg.candidates.cell_log_width,
+                                  "Frequency cell width in ln(frequency)");
     ep_grp_candidates->add_option(
         "--max-candidates", ep_cfg.candidates.max_candidates,
         "Maximum folding candidates; zero is unlimited");

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <queue>
 #include <span>
 #include <stdexcept>
@@ -633,6 +634,21 @@ void publish_candidate_results(const std::filesystem::path& spool,
                static_cast<std::size_t>(options.memory_gb * utils::kBytesPerGB /
                                         (32 * sizeof(Candidate)))));
     ExternalSort sort(scratch.path);
+    // With a cell cap, only the trials it keeps are sorted and grouped.
+    std::optional<search::detail::CellCap> cap;
+    if (options.max_per_cell != 0) {
+        cap.emplace(options, 2 * source_bytes);
+    }
+    const auto keep = [&](std::vector<Candidate>& records) {
+        if (cap) {
+            for (const auto& c : records) {
+                cap->add(c);
+            }
+        } else if (!records.empty()) {
+            nrows += records.size();
+            sort.add(records);
+        }
+    };
     if (ep) {
         for (std::size_t run_id = 0; run_id < sources.size(); ++run_id) {
             const auto count = raw.getGroup(sources[run_id].path)
@@ -642,17 +658,27 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 auto records = read_ep_candidates(
                     raw, sources[run_id], static_cast<std::uint32_t>(run_id),
                     start, std::min(batch, count - start), nparams, snr_min);
-                nrows += records.size();
-                if (!records.empty()) {
-                    sort.add(records);
-                }
+                keep(records);
             }
         }
     } else {
-        nrows = raw.getDataSet("snr").getDimensions()[0];
-        for (std::size_t start = 0; start < nrows; start += batch) {
+        const auto count = raw.getDataSet("snr").getDimensions()[0];
+        for (std::size_t start = 0; start < count; start += batch) {
             auto records = read_candidates(
-                raw, start, std::min(batch, nrows - start), nparams);
+                raw, start, std::min(batch, count - start), nparams);
+            keep(records);
+        }
+    }
+    const std::uint64_t cell_dropped = cap ? cap->dropped() : 0;
+    if (cap) {
+        auto kept = cap->take();
+        cap.reset();
+        nrows = kept.size();
+        for (std::size_t start = 0; start < kept.size(); start += batch) {
+            std::vector<Candidate> records(
+                kept.begin() + static_cast<std::ptrdiff_t>(start),
+                kept.begin() + static_cast<std::ptrdiff_t>(
+                                   std::min(start + batch, kept.size())));
             sort.add(records);
         }
     }
@@ -685,6 +711,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                    "m/s^3; higher orders m/s^k");
             result.createAttribute("n_detections",
                                    static_cast<std::uint64_t>(nrows));
+            result.createAttribute("n_cell_dropped", cell_dropped);
             auto config = result.createGroup("processing");
             config.createAttribute("cluster", options.cluster);
             config.createAttribute("grouping", options.grouping);
@@ -701,6 +728,8 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                    options.harmonic_phase_distance);
             config.createAttribute("harmonic_snr_distance",
                                    options.harmonic_snr_distance);
+            config.createAttribute("max_per_cell", options.max_per_cell);
+            config.createAttribute("cell_log_width", options.cell_log_width);
             config.createAttribute("max_candidates", options.max_candidates);
             config.createAttribute("memory_gb", options.memory_gb);
             config.createAttribute("temporary_directory",

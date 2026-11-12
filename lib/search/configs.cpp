@@ -302,6 +302,11 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    [](auto& c) -> auto& {
                        return c.candidates.harmonic_snr_distance;
                    }),
+        field<Cfg>("candidates", "max_per_cell",
+                   [](auto& c) -> auto& { return c.candidates.max_per_cell; }),
+        field<Cfg>(
+            "candidates", "cell_log_width",
+            [](auto& c) -> auto& { return c.candidates.cell_log_width; }),
         field<Cfg>(
             "candidates", "max_candidates",
             [](auto& c) -> auto& { return c.candidates.max_candidates; }),
@@ -579,6 +584,11 @@ remove_harmonics = false
 harmonic_denominator_max = 100
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
+# Keep only the strongest max_per_cell trials of each frequency cell, before
+# grouping. 0 keeps every trial. Cells are cell_log_width wide in
+# ln(frequency); it has no default and must be set with max_per_cell.
+max_per_cell = 0
+# cell_log_width = <cell width in ln(frequency)>
 max_candidates = 0 # unlimited; applied after harmonic filtering
 memory_gb = 1.0 # additional host budget, reserved within CPU search budget
 # temporary_directory = "/scratch/loki"
@@ -2303,6 +2313,9 @@ remove_harmonics = false
 harmonic_denominator_max = 100
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
+# Strongest trials kept per frequency cell, before grouping; 0 keeps all.
+max_per_cell = 0
+# cell_log_width = <cell width in ln(frequency)>; required with max_per_cell
 max_candidates = 0
 # Separate host candidate budget; reserved before CPU chunk planning.
 memory_gb = 1.0

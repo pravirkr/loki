@@ -181,6 +181,8 @@ remove_harmonics = false
 harmonic_denominator_max = 100
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
+max_per_cell = 0
+# cell_log_width: required with max_per_cell
 max_candidates = 0
 memory_gb = 1.0
 # temporary_directory = "/scratch/loki"
@@ -188,7 +190,7 @@ memory_gb = 1.0
 
 CLI equivalents include `--no-cluster`, `--cluster-grouping transitive|anchored`, `--cluster-radius`, `--cluster-phase-radius`,
 `--no-retain-detections`, `--flag-harmonics` / `--no-flag-harmonics`,
-`--remove-harmonics` / `--no-remove-harmonics`,
+`--remove-harmonics` / `--no-remove-harmonics`, `--max-per-cell`, `--cell-log-width`,
 `--max-candidates`, `--candidate-memory-gb`, `--candidate-tempdir`,
 `--dm`, `--start-mjd` and `--barycentric true|false`.
 Harmonic removal requires harmonic flagging. Zero maximum candidates means
@@ -284,11 +286,29 @@ Removal affects the folding list, while `/clusters` retains flagged rows.
 The optional count limit is applied last, in decreasing S/N order. Neither
 mechanism alters `/detections`.
 
+### Keeping the strongest trials per frequency cell
+
+A search can leave millions of trials above `snr_min`, most of them responses
+to the same few sources or to interference. Grouping holds every distinct
+track in its index, so such a search exhausts `memory_gb` long before
+`max_candidates` applies. `max_per_cell` bounds the input instead: a trial at
+frequency f is in cell `floor(ln(f) / cell_log_width)`, and only the
+`max_per_cell` strongest trials of each cell, by the detection order above,
+are sorted, grouped and written. `cell_log_width` has no default and must be
+set with `max_per_cell`; zero `max_per_cell` keeps every trial.
+
+The cap is applied as the spool is read, before the external sort, so the
+sort and the grouping see at most `max_per_cell` trials per cell. Dropped
+trials are not detections of the product: they are not in `/detections`, and
+the root attribute `n_cell_dropped` counts them (`n_detections` counts the
+kept ones). The cells' index is charged against `memory_gb` like the grouping
+index. The cap applies to EP and FFA alike, and to `publish_candidates`.
+
 ## Common HDF5 schema 1.0
 
 Root attributes include `schema_version`, `producer`, `algorithm`, `complete`,
 `param_names`, parameter-model/order/units descriptions, and counts
-`n_detections`, `n_clusters`, `n_candidates`. The initial algorithm is `ffa` and
+`n_detections`, `n_cell_dropped`, `n_clusters`, `n_candidates`. The initial algorithm is `ffa` and
 the model is `kinematic_taylor`.
 
 | Group | Meaning |
