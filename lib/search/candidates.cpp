@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -122,6 +123,42 @@ Points roots(Polynomial p) {
     return result;
 }
 
+/// Time samples of a phase-difference track for the dominance test.
+constexpr std::size_t kDominanceSamples = 129;
+/// Widest pulse, in duty cycle, the dominance test considers, and the step
+/// between the widths it tries.
+constexpr double kDominanceMaxDuty   = 0.3;
+constexpr double kDominanceWidthStep = 1.5;
+
+/// Fraction of the S/N of a pulse of duty @p w that a trial recovers when its
+/// phase differs from the pulse's track by @p dphi (cycles, sampled uniformly
+/// over the observation). A boxcar of width W >= w that holds a fraction q
+/// of the samples recovers about q sqrt(w / W) of it; the best W wins.
+double dominance_ratio(std::span<double> dphi, double w) {
+    std::ranges::sort(dphi);
+    const auto n = dphi.size();
+    double best  = 0;
+    double width = w;
+    while (true) {
+        std::size_t most = 0;
+        std::size_t j    = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            while (j < n && dphi[j] <= dphi[i] + width) {
+                ++j;
+            }
+            most = std::max(most, j - i);
+        }
+        best =
+            std::max(best, static_cast<double>(most) / static_cast<double>(n) *
+                               std::sqrt(w / width));
+        if (width >= kDominanceMaxDuty) {
+            break;
+        }
+        width = std::min(width * kDominanceWidthStep, kDominanceMaxDuty);
+    }
+    return best;
+}
+
 /// Frequency reach of a link of phase span @p span over @p tobs. The phase
 /// difference on [-1, 1] has p'(0) = delta_f * Tobs / 2, and Bernstein's
 /// inequality at the midpoint bounds |p'(0)| by degree * span / 2, so every
@@ -202,6 +239,14 @@ void CandidateOptions::validate() const {
     if (!utils::is_finite(cell_bins) || cell_bins < 0) {
         throw std::invalid_argument(
             "candidate cell_bins must be finite and nonnegative");
+    }
+    if (!utils::is_finite(dominance_kappa) || dominance_kappa < 0) {
+        throw std::invalid_argument(
+            "candidate dominance_kappa must be finite and nonnegative");
+    }
+    if (dominance_kappa > 0 && max_per_cell == 0) {
+        throw std::invalid_argument(
+            "candidate dominance_kappa requires max_per_cell");
     }
     if (max_per_cell != 0 && (cell_bins > 0) == (cell_log_width > 0)) {
         throw std::invalid_argument(
@@ -330,6 +375,89 @@ void CellCap::add(const Candidate& c) {
         kept.back() = c;
         std::ranges::push_heap(kept, candidate_brighter);
     }
+}
+
+DominanceReducer::DominanceReducer(double tobs, const CandidateOptions& options)
+    : m_tobs(tobs),
+      m_options(options),
+      m_bins(options.cell_bins > 0),
+      m_reach(m_bins ? 2 * options.cell_bins / tobs
+                     : 2 * options.cell_log_width) {
+    options.validate();
+    if (options.dominance_kappa <= 0) {
+        throw std::invalid_argument("candidate dominance needs a kappa");
+    }
+    if (!utils::is_finite(tobs) || tobs <= 0) {
+        throw std::invalid_argument(
+            "candidate dominance needs a positive observation length");
+    }
+}
+
+bool DominanceReducer::explains(const Candidate& strong,
+                                const Candidate& weak) const {
+    if (weak.snr > m_options.dominance_kappa * strong.snr) {
+        return false; // the ratio never exceeds one
+    }
+    const double w     = std::min(strong.duty_cycle(), weak.duty_cycle());
+    const double limit = std::max(m_options.phase_radius, m_options.radius * w);
+    if (phase_span(weak, strong, m_tobs, 1.0, limit) <= limit) {
+        return true;
+    }
+    Polynomial p;
+    double factor = 1;
+    for (std::size_t k = 0; k < weak.derivatives.size(); ++k) {
+        factor *= (m_tobs / 2) / static_cast<double>(k + 1);
+        p.c[k + 1] = (weak.derivatives[k] - strong.derivatives[k]) * factor;
+    }
+    p.n = kPhaseDegree + 1;
+    std::array<double, kDominanceSamples> dphi{};
+    for (std::size_t j = 0; j < dphi.size(); ++j) {
+        dphi[j] = evaluate(p, -1 + (2.0 * static_cast<double>(j) /
+                                    static_cast<double>(dphi.size() - 1)));
+    }
+    return weak.snr <=
+           m_options.dominance_kappa * strong.snr * dominance_ratio(dphi, w);
+}
+
+std::uint64_t DominanceReducer::reduce(std::vector<Candidate>& trials) const {
+    std::ranges::sort(trials, [](const Candidate& a, const Candidate& b) {
+        if (a.source_region != b.source_region) {
+            return a.source_region < b.source_region;
+        }
+        return candidate_brighter(a, b);
+    });
+    std::vector<Candidate> kept;
+    kept.reserve(trials.size());
+    // Kept trials of the current region by frequency.
+    std::multimap<double, std::size_t> by_freq;
+    std::uint64_t absorbed = 0;
+    for (std::size_t i = 0; i < trials.size(); ++i) {
+        if (i % 1024 == 0) {
+            loki::check_interrupt();
+        }
+        const auto& c = trials[i];
+        if (i > 0 && c.source_region != trials[i - 1].source_region) {
+            by_freq.clear();
+        }
+        const double f     = c.derivatives[0];
+        const double reach = m_bins ? m_reach : m_reach * f;
+        bool explained     = false;
+        for (auto it = by_freq.lower_bound(f - reach);
+             it != by_freq.end() && it->first <= f + reach; ++it) {
+            if (explains(kept[it->second], c)) {
+                explained = true;
+                break;
+            }
+        }
+        if (explained) {
+            ++absorbed;
+            continue;
+        }
+        by_freq.emplace(f, kept.size());
+        kept.push_back(c);
+    }
+    trials = std::move(kept);
+    return absorbed;
 }
 
 std::vector<Candidate> CellCap::take() {

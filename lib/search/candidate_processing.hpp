@@ -54,6 +54,31 @@ private:
     std::uint64_t m_dropped{};
 };
 
+/// Second stage of the per-run reduction, after CellCap: within each source
+/// region, in decreasing S/N, a trial is absorbed by a stronger kept trial
+/// that explains it, and only unexplained trials are kept. A stronger trial
+/// explains a weaker one, of S/N at most dominance_kappa times its own, when
+/// their phase tracks stay within the suppression radius of each other, or
+/// when the weaker S/N is at most dominance_kappa times what the stronger
+/// trial's pulse would give along the weaker track (a boxcar model of its
+/// phase difference). Only kept trials within two cell widths in frequency
+/// are compared.
+class DominanceReducer {
+public:
+    DominanceReducer(double tobs, const CandidateOptions& options);
+    /// Keeps the trials that no stronger trial of their region explains, in
+    /// region and then detection order; returns how many it absorbed.
+    std::uint64_t reduce(std::vector<Candidate>& trials) const;
+
+private:
+    [[nodiscard]] bool explains(const Candidate& strong,
+                                const Candidate& weak) const;
+    double m_tobs;
+    CandidateOptions m_options;
+    bool m_bins;
+    double m_reach; ///< Hz with cell_bins, else a fraction of frequency.
+};
+
 /// Receives globally S/N-sorted trials. append() returns a provisional
 /// identity; cluster_id() resolves it after finish(), including bridges from
 /// later trials. The host index is charged conservatively against

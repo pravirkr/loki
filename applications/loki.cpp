@@ -1779,6 +1779,10 @@ int main(int argc, char** argv) {
     grp_candidates->add_option("--cell-log-width",
                                ffa_cfg.candidates.cell_log_width,
                                "Frequency cell width in ln(frequency)");
+    grp_candidates->add_option(
+        "--dominance-kappa", ffa_cfg.candidates.dominance_kappa,
+        "Absorb trials a stronger trial of the region explains; zero "
+        "disables");
     grp_candidates->add_option("--max-candidates",
                                ffa_cfg.candidates.max_candidates,
                                "Maximum folding candidates; zero is unlimited");
@@ -1998,6 +2002,9 @@ int main(int argc, char** argv) {
     ep_grp_candidates->add_option("--cell-log-width",
                                   ep_cfg.candidates.cell_log_width,
                                   "Frequency cell width in ln(frequency)");
+    ep_grp_candidates->add_option(
+        "--dominance-kappa", ep_cfg.candidates.dominance_kappa,
+        "Absorb trials a stronger trial of the run explains; zero disables");
     ep_grp_candidates->add_option(
         "--max-candidates", ep_cfg.candidates.max_candidates,
         "Maximum folding candidates; zero is unlimited");

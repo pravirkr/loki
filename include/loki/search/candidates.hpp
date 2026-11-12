@@ -38,6 +38,12 @@ struct CandidateOptions {
     /// Width of a frequency cell in natural-log frequency: a trial at
     /// frequency f is in cell floor(ln(f) / cell_log_width).
     double cell_log_width{0};
+    /// Within each run's capped cells, absorb a trial that a stronger kept
+    /// trial of the same run explains: one whose phase track stays within the
+    /// suppression radius of it, or whose S/N is at most dominance_kappa
+    /// times what the stronger trial's pulse would give along its track.
+    /// Zero disables it; it requires max_per_cell.
+    double dominance_kappa{0};
     std::uint64_t max_candidates{0}; ///< Zero means unlimited.
     double memory_gb{1.0};           ///< Additional host memory, GB (2^30).
     std::filesystem::path temporary_directory;

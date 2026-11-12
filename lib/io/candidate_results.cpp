@@ -751,13 +751,21 @@ void publish_candidate_results(const std::filesystem::path& spool,
     if (options.max_per_cell != 0) {
         cap.emplace(options, tobs, 2 * source_bytes);
     }
-    // Cells belong to one source, so an EP run's kept trials can be sorted
-    // as soon as it is read: the cap then holds one run at a time.
+    std::optional<search::detail::DominanceReducer> dominance;
+    if (options.dominance_kappa > 0) {
+        dominance.emplace(tobs, options);
+    }
+    std::uint64_t dominated = 0;
+    // Cells belong to one source, so an EP run's kept trials can be reduced
+    // and sorted as soon as it is read: the cap then holds one run at a time.
     const auto drain = [&] {
         if (!cap) {
             return;
         }
-        const auto kept = cap->take();
+        auto kept = cap->take();
+        if (dominance) {
+            dominated += dominance->reduce(kept);
+        }
         nrows += kept.size();
         for (std::size_t start = 0; start < kept.size(); start += batch) {
             std::vector<Candidate> records(
@@ -839,6 +847,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
             result.createAttribute("n_detections",
                                    static_cast<std::uint64_t>(nrows));
             result.createAttribute("n_cell_dropped", cell_dropped);
+            result.createAttribute("n_dominated", dominated);
             auto config = result.createGroup("processing");
             config.createAttribute("cluster", options.cluster);
             config.createAttribute("grouping", options.grouping);
@@ -858,6 +867,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
             config.createAttribute("max_per_cell", options.max_per_cell);
             config.createAttribute("cell_bins", options.cell_bins);
             config.createAttribute("cell_log_width", options.cell_log_width);
+            config.createAttribute("dominance_kappa", options.dominance_kappa);
             config.createAttribute("max_candidates", options.max_candidates);
             config.createAttribute("memory_gb", options.memory_gb);
             config.createAttribute("temporary_directory",

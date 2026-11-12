@@ -183,6 +183,7 @@ harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
 max_per_cell = 0
 # cell_bins or cell_log_width: exactly one is required with max_per_cell
+dominance_kappa = 0.0
 max_candidates = 0
 memory_gb = 1.0
 # temporary_directory = "/scratch/loki"
@@ -190,7 +191,7 @@ memory_gb = 1.0
 
 CLI equivalents include `--no-cluster`, `--cluster-grouping transitive|anchored`, `--cluster-radius`, `--cluster-phase-radius`,
 `--no-retain-detections`, `--flag-harmonics` / `--no-flag-harmonics`,
-`--remove-harmonics` / `--no-remove-harmonics`, `--max-per-cell`, `--cell-bins`, `--cell-log-width`,
+`--remove-harmonics` / `--no-remove-harmonics`, `--max-per-cell`, `--cell-bins`, `--cell-log-width`, `--dominance-kappa`,
 `--max-candidates`, `--candidate-memory-gb`, `--candidate-tempdir`,
 `--dm`, `--start-mjd` and `--barycentric true|false`.
 Harmonic removal requires harmonic flagging. Zero maximum candidates means
@@ -315,11 +316,35 @@ the root attribute `n_cell_dropped` counts them (`n_detections` counts the
 kept ones). The cells' index is charged against `memory_gb` like the grouping
 index. The cap applies to EP and FFA alike, and to `publish_candidates`.
 
+### Absorbing trials a stronger trial explains
+
+Most trials a cell keeps are still responses to the same pulse: the same
+track at a slightly different acceleration or frequency, or a track that
+crosses the pulse for part of the observation. With `dominance_kappa`
+positive (it requires `max_per_cell`), each run's kept trials are visited in
+detection order, and a trial is absorbed by a stronger kept trial of the same
+run that explains it:
+
+- their phase tracks stay within the suppression radius of each other,
+  `max(phase_radius, radius * w)` cycles, w the narrower duty cycle; or
+- its S/N is at most `dominance_kappa` times what the stronger trial's pulse
+  gives along its track. That fraction is estimated with a boxcar model: the
+  phase difference of the two tracks is sampled at 129 times over the
+  observation, and a boxcar of width W (from w to a duty cycle of 0.3, in
+  steps of 1.5) that holds a fraction q of the samples recovers
+  `q * sqrt(w / W)` of the stronger S/N.
+
+Only kept trials within two cell widths in frequency are compared. Absorbed
+trials are not detections of the product; the root attribute `n_dominated`
+counts them. A second source on a nearby track is kept whenever its S/N is
+more than `dominance_kappa` times what the stronger pulse explains. Zero, the
+default, disables the stage.
+
 ## Common HDF5 schema 1.0
 
 Root attributes include `schema_version`, `producer`, `algorithm`, `complete`,
 `param_names`, parameter-model/order/units descriptions, and counts
-`n_detections`, `n_cell_dropped`, `n_clusters`, `n_candidates`. The initial algorithm is `ffa` and
+`n_detections`, `n_cell_dropped`, `n_dominated`, `n_clusters`, `n_candidates`. The initial algorithm is `ffa` and
 the model is `kinematic_taylor`.
 
 | Group | Meaning |

@@ -43,6 +43,7 @@ void bind_configs(py::module_& m) {
         .def_readwrite("max_per_cell", &CO::max_per_cell)
         .def_readwrite("cell_bins", &CO::cell_bins)
         .def_readwrite("cell_log_width", &CO::cell_log_width)
+        .def_readwrite("dominance_kappa", &CO::dominance_kappa)
         .def_readwrite("max_candidates", &CO::max_candidates)
         .def_readwrite("memory_gb", &CO::memory_gb)
         .def_readwrite("temporary_directory", &CO::temporary_directory)

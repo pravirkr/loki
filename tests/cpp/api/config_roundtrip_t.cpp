@@ -87,6 +87,7 @@ void set_non_defaults(FFATomlConfig& cfg) {
     c.max_per_cell             = 1;
     c.cell_bins                = 0;
     c.cell_log_width           = 2e-4;
+    c.dominance_kappa          = 1.5;
     c.max_candidates           = 50;
     c.memory_gb                = 2.5;
     c.temporary_directory      = "/scratch/tmp";
@@ -171,6 +172,7 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(c.max_per_cell == d.max_per_cell);
     CHECK(c.cell_bins == d.cell_bins);
     CHECK(c.cell_log_width == d.cell_log_width);
+    CHECK(c.dominance_kappa == d.dominance_kappa);
     CHECK(c.max_candidates == d.max_candidates);
     CHECK(c.memory_gb == d.memory_gb);
     CHECK(c.temporary_directory == d.temporary_directory);

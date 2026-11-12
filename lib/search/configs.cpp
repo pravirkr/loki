@@ -310,6 +310,9 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
             "candidates", "cell_log_width",
             [](auto& c) -> auto& { return c.candidates.cell_log_width; }),
         field<Cfg>(
+            "candidates", "dominance_kappa",
+            [](auto& c) -> auto& { return c.candidates.dominance_kappa; }),
+        field<Cfg>(
             "candidates", "max_candidates",
             [](auto& c) -> auto& { return c.candidates.max_candidates; }),
         field<Cfg>("candidates", "memory_gb",
@@ -593,6 +596,9 @@ harmonic_snr_distance = 3.0
 max_per_cell = 0
 # cell_bins = <cell width in Fourier bins>
 # cell_log_width = <cell width in ln(frequency)>
+# Within each run's capped cells, absorb trials a stronger trial explains
+# (S/N at most dominance_kappa times what its pulse gives); 0 disables.
+dominance_kappa = 0.0
 max_candidates = 0 # unlimited; applied after harmonic filtering
 memory_gb = 1.0 # additional host budget, reserved within CPU search budget
 # temporary_directory = "/scratch/loki"
@@ -2322,6 +2328,8 @@ harmonic_snr_distance = 3.0
 max_per_cell = 0
 # cell_bins = <cell width in Fourier bins (1/tobs)>
 # cell_log_width = <cell width in ln(frequency)>
+# Absorb trials a stronger trial of the run explains; 0 disables.
+dominance_kappa = 0.0
 max_candidates = 0
 # Separate host candidate budget; reserved before CPU chunk planning.
 memory_gb = 1.0

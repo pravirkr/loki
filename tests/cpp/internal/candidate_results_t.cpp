@@ -402,6 +402,107 @@ TEST_CASE("Cell cap cells belong to one source region", "[candidates]") {
     REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);
 }
 
+namespace {
+loki::search::Candidate
+trial(double f, double fdot, float snr, std::uint32_t region, std::uint32_t k) {
+    loki::search::Candidate c;
+    c.derivatives[0] = f;
+    c.derivatives[1] = fdot;
+    c.parameters[0]  = f;
+    c.snr            = snr;
+    c.width          = 1;
+    c.nbins          = 20; // duty cycle 0.05
+    c.source_region  = region;
+    c.source_index   = k;
+    c.id             = (static_cast<std::uint64_t>(region) << 32U) | k;
+    return c;
+}
+std::vector<float> snrs(const std::vector<loki::search::Candidate>& trials) {
+    std::vector<float> out;
+    for (const auto& c : trials) {
+        out.push_back(c.snr);
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("Dominance absorbs trials a stronger trial of the run explains",
+          "[candidates]") {
+    loki::search::CandidateOptions options;
+    options.max_per_cell    = 32;
+    options.cell_bins       = 64;
+    options.dominance_kappa = 1.5;
+    const double tobs       = 100;
+    const loki::search::detail::DominanceReducer reducer(tobs, options);
+    // A bright pulse at 50 Hz (S/N 100) and, in the same run:
+    // - its own track at S/N 90: within the suppression radius;
+    // - a track 10 cycles away (0.1 Hz): the pulse gives it about 1.2 % of
+    //   its S/N, so S/N 1.5 is explained and S/N 10 is a second source;
+    // - a track 0.02 cycles away in a later run: never compared.
+    std::vector<loki::search::Candidate> trials{
+        trial(50.0, 0, 100, 0, 0),       trial(50.0, 0, 90, 0, 1),
+        trial(50.1, 0, 1.5F, 0, 2),      trial(50.1 + 1e-6, 0, 10, 0, 3),
+        trial(50.0 + 2e-4, 0, 20, 1, 0),
+    };
+    std::mt19937_64 rng(3);
+    std::vector<float> reference;
+    for (int shuffle = 0; shuffle < 4; ++shuffle) {
+        auto in = trials;
+        std::ranges::shuffle(in, rng);
+        REQUIRE(reducer.reduce(in) == 2);
+        // Region, then detection order.
+        REQUIRE(snrs(in) == std::vector<float>{100, 10, 20});
+    }
+    // A weaker trial is never absorbed by one it outshines by more than
+    // kappa, even on the same track.
+    std::vector<loki::search::Candidate> twins{trial(50, 0, 10, 0, 0),
+                                               trial(50, 0, 6, 0, 1)};
+    options.dominance_kappa = 0.5;
+    REQUIRE(
+        loki::search::detail::DominanceReducer(tobs, options).reduce(twins) ==
+        0);
+    // Tracks further apart in frequency than two cells are not compared.
+    options.dominance_kappa = 1.5;
+    options.cell_bins       = 1; // reach 0.02 Hz: 50.1 Hz is out of reach
+    std::vector<loki::search::Candidate> far{trial(50.0, 0, 100, 0, 0),
+                                             trial(50.1, 0, 1.5F, 0, 1)};
+    REQUIRE(loki::search::detail::DominanceReducer(tobs, options).reduce(far) ==
+            0);
+    // Dominance needs the cell cap.
+    options.max_per_cell = 0;
+    REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);
+}
+
+TEST_CASE("Dominance publishes one detection per explained group",
+          "[candidates][hdf5]") {
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
+    // Frequencies 10, 11, 12 and 13 Hz in turn, S/N 6 to 125.
+    spool(raw, 120);
+    loki::search::CandidateOptions options;
+    options.max_per_cell    = 2;
+    options.cell_log_width  = 1e-3; // one frequency per cell
+    options.dominance_kappa = 1.5;
+    const auto out          = dir / "out.h5";
+    loki::io::detail::write_candidate_results(raw, out, {}, options);
+    const HighFive::File file(out.string(), HighFive::File::ReadOnly);
+    std::uint64_t kept      = 0;
+    std::uint64_t dropped   = 0;
+    std::uint64_t dominated = 0;
+    file.getAttribute("n_detections").read(kept);
+    file.getAttribute("n_cell_dropped").read(dropped);
+    file.getAttribute("n_dominated").read(dominated);
+    // Each cell keeps two trials of the same track; the weaker is absorbed.
+    REQUIRE(dropped == 112);
+    REQUIRE(dominated == 4);
+    REQUIRE(kept == 4);
+    REQUIRE(column<float>(file, "detections/snr") ==
+            std::vector<float>{125, 124, 123, 122});
+    double kappa = 0;
+    file.getGroup("processing").getAttribute("dominance_kappa").read(kappa);
+    REQUIRE(kappa == 1.5);
+}
+
 TEST_CASE("A cell cap is bounded by the candidate memory budget",
           "[candidates][hdf5]") {
     const loki::test::TempDir dir("loki-candidate-results");
