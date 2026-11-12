@@ -8,7 +8,10 @@
  */
 
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace loki::search {
 
@@ -30,5 +33,31 @@ struct RunProvenance {
 /// @throws std::runtime_error if the file cannot be opened for writing.
 void write_run_provenance(const std::filesystem::path& results_file,
                           const RunProvenance& provenance);
+
+/// @brief Measured cost of a run, for batch scheduling (wall time and memory
+/// a job needs). Volatile by nature: two identical runs differ here.
+struct RunStats {
+    /// Wall time per stage in seconds, in run order, e.g. {"load", ...},
+    /// {"preprocess", ...}, {"plan", ...}, {"search", ...},
+    /// {"postprocess", ...}, {"total", ...}.
+    std::vector<std::pair<std::string, double>> timing_s;
+    /// Peak resident set size of the process in GB (2^30 bytes), as
+    /// getrusage(RUSAGE_SELF).ru_maxrss.
+    std::optional<double> peak_rss_gb;
+};
+
+/// @brief Writes @p stats, plus counts derived from the file itself, as
+/// attributes of the group `/run_stats` of @p results_file (replacing an
+/// existing group):
+/// - `timing_<stage>_s` for each stage and `peak_rss_gb`;
+/// - EP files: `n_runs`, `n_runs_overloaded` and `n_overloads` (sums of the
+///   runs' `level_stats.n_overloads`), and `plan_peak_memory_gb` (the largest
+///   chunk `chunk_memory_gb`: device memory on CUDA);
+/// - files with a `/detections` table: datasets `detections_per_nbins/nbins`
+///   and `detections_per_nbins/count` (one row per profile bin count, i.e.
+///   per octave group).
+/// @throws std::runtime_error if the file cannot be opened for writing.
+void write_run_stats(const std::filesystem::path& results_file,
+                     const RunStats& stats);
 
 } // namespace loki::search

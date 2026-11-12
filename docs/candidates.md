@@ -377,6 +377,29 @@ With both clustering and harmonic flagging disabled, singleton results stream
 directly without allocating a representative index.
 Runtime/allocator/HDF5 overhead is additional to the accounted buffers.
 
+## Run statistics
+
+The CLI adds a `/run_stats` group to every search results file after the run
+(`loki::search::write_run_stats`). Its attributes are measurements for batch
+scheduling, not search results, and change from run to run:
+
+| Attribute | Meaning |
+| --- | --- |
+| `timing_<stage>_s` | Wall time of `load`, `preprocess`, `plan`, `search`, `postprocess` and `total` (FFA: `search_and_postprocess`) |
+| `peak_rss_gb` | Peak resident set size of the process, GB of 2^30 bytes (`getrusage` `ru_maxrss`) |
+| `n_runs`, `n_runs_overloaded`, `n_overloads` | EP: runs, runs with at least one world-tree overload, and overloads summed over `level_stats` |
+| `plan_peak_memory_gb` | EP: the largest chunk `chunk_memory_gb` of the plan (device memory on CUDA) |
+
+With a `/detections` table, `detections_per_nbins/nbins` and `count` give
+the detections per profile bin count, which is one row per octave group.
+EP `postprocess` is the time after the sweep's own `total_runtime`: writer
+drain, spool reading, sorting, clustering and writing the product.
+
+During postprocessing the log reports progress every 30 s (phase, records
+done, records merged by the sort, elapsed time). SIGINT and SIGTERM stop it
+at the next record or batch. A run stopped after its search finished keeps
+`<prefix>_ep_spool.h5` for `publish_candidates`.
+
 ## Inspecting a result file
 
 `loki inspect` summarises a result file without Python: the run metadata

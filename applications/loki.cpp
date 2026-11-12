@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstddef>
@@ -29,6 +30,10 @@
 #include <spdlog/sinks/ansicolor_sink.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
+#if __has_include(<sys/resource.h>)
+#include <sys/resource.h>
+#define LOKI_CLI_HAS_RUSAGE 1
+#endif
 
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/regions.hpp"
@@ -292,7 +297,53 @@ loki::Exec search_exec(const loki::search::FFATomlConfig& cfg) {
 struct SearchTimeSeries {
     loki::io::TimeSeries ts;
     std::optional<loki::io::PreprocessReport> report;
+    double load_s{};       ///< Wall time to read the series.
+    double preprocess_s{}; ///< Wall time to preprocess it.
 };
+
+using SteadyClock = std::chrono::steady_clock;
+
+double seconds_since(SteadyClock::time_point start) {
+    return std::chrono::duration<double>(SteadyClock::now() - start).count();
+}
+
+/// Peak resident set size of this process in GB (2^30 bytes), the quantity a
+/// batch scheduler's memory limit applies to.
+std::optional<double> peak_rss_gb() {
+#ifdef LOKI_CLI_HAS_RUSAGE
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        // ru_maxrss is in KiB on Linux.
+        return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+    }
+#endif
+    return std::nullopt;
+}
+
+/// Writes /run_stats (timings, peak RSS, overloads). Never fails the run.
+void record_run_stats(const std::filesystem::path& result_file,
+                      loki::search::RunStats stats) {
+    if (!std::filesystem::exists(result_file)) {
+        return;
+    }
+    stats.peak_rss_gb = peak_rss_gb();
+    try {
+        loki::search::write_run_stats(result_file, stats);
+    } catch (const std::exception& ex) {
+        SPDLOG_WARN("Could not record run statistics in {}: {}",
+                    result_file.string(), ex.what());
+        return;
+    }
+    std::string text;
+    for (const auto& [stage, seconds] : stats.timing_s) {
+        text += fmt::format("{}{} {:.1f} s", text.empty() ? "" : ", ", stage,
+                            seconds);
+    }
+    SPDLOG_INFO("Run statistics: {}{}", text,
+                stats.peak_rss_gb
+                    ? fmt::format(", peak RSS {:.2f} GB", *stats.peak_rss_gb)
+                    : std::string());
+}
 
 /// Reads the raw timeseries of a search from [input] (or -i) and builds the
 /// folding inputs as [preprocessing] asks, on the search's backend.
@@ -316,9 +367,11 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
     read_opts.preprocess = false;
     read_opts.nthreads   = nthreads;
     SPDLOG_INFO("Loading timeseries from: {}", ts_path.string());
+    const auto load_start = SteadyClock::now();
     SearchTimeSeries out{.ts = loki::io::TimeSeries::read(ts_path, read_opts),
                          .report = std::nullopt};
-    auto& ts = out.ts;
+    out.load_s = seconds_since(load_start);
+    auto& ts   = out.ts;
     SPDLOG_INFO(
         "Loaded timeseries: nsamps = {}, dt = {:.6e} s, tobs = {:.2f} s",
         ts.get_nsamps(), ts.get_dt(), ts.get_tobs());
@@ -329,9 +382,11 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
     const bool robust  = options.method == loki::io::PreprocessMethod::kRobust;
     // GPU searches preprocess on their device; the CPU thread count serves
     // the options the GPU runs on the host (z-score, spectral zap).
-    exec.nthreads   = nthreads;
-    const auto rep  = ts.preprocess(options, exec);
-    const double dt = ts.get_dt();
+    exec.nthreads               = nthreads;
+    const auto preprocess_start = SteadyClock::now();
+    const auto rep              = ts.preprocess(options, exec);
+    out.preprocess_s            = seconds_since(preprocess_start);
+    const double dt             = ts.get_dt();
     if (robust) {
         SPDLOG_INFO(
             "Preprocessing (robust): baseline window = {:.3f} s, variance "
@@ -469,8 +524,9 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
             }
         });
     }
-    auto loaded = load_search_timeseries(toml_cfg, exec);
-    auto& ts    = loaded.ts;
+    const auto run_start = SteadyClock::now();
+    auto loaded          = load_search_timeseries(toml_cfg, exec);
+    auto& ts             = loaded.ts;
     if (device_init.joinable()) {
         device_init.join();
     }
@@ -501,15 +557,25 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     if (toml_cfg.observation.barycentric) {
         observation.barycentric = toml_cfg.observation.barycentric;
     }
+    const auto plan_start = SteadyClock::now();
     loki::pipelines::FFAFreqSweep sweep(ffa_cfg, toml_cfg.candidates,
                                         /*show_progress=*/true, exec);
+    const double plan_s     = seconds_since(plan_start);
+    const auto search_start = SteadyClock::now();
     sweep.execute(ts.get_ts_e().first(actual_nsamps),
                   ts.get_ts_v().first(actual_nsamps), outdir_path,
                   toml_cfg.prefix, config_toml, observation);
+    const double search_s = seconds_since(search_start);
 
     const auto result_file =
         outdir_path / fmt::format("{}_ffa_results.h5", toml_cfg.prefix);
     record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt());
+    record_run_stats(result_file,
+                     {.timing_s = {{"load", loaded.load_s},
+                                   {"preprocess", loaded.preprocess_s},
+                                   {"plan", plan_s},
+                                   {"search_and_postprocess", search_s},
+                                   {"total", seconds_since(run_start)}}});
     SPDLOG_INFO("FFA search complete. Inspecting results in {}",
                 result_file.string());
 
@@ -966,6 +1032,40 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
 }
 
 /// `search ep`: runs the EP sweep over the timeseries and prints a summary.
+/// Stage timings of an EP run. The sweep records its own runtime
+/// (`total_runtime`); the rest of execute() is candidate postprocessing.
+loki::search::RunStats ep_run_stats(const std::filesystem::path& result_file,
+                                    const SearchTimeSeries& loaded,
+                                    double plan_s,
+                                    double execute_s,
+                                    double total_s) {
+    loki::search::RunStats stats;
+    stats.timing_s  = {{"load", loaded.load_s},
+                       {"preprocess", loaded.preprocess_s},
+                       {"plan", plan_s}};
+    double search_s = -1.0;
+    try {
+        if (std::filesystem::exists(result_file)) {
+            const HighFive::File h5(result_file.string(),
+                                    HighFive::File::ReadOnly);
+            if (h5.hasAttribute("total_runtime")) {
+                float runtime = 0.0F;
+                h5.getAttribute("total_runtime").read(runtime);
+                search_s = runtime;
+            }
+        }
+    } catch (const std::exception&) { // NOLINT(bugprone-empty-catch)
+    }
+    if (search_s >= 0.0 && search_s <= execute_s) {
+        stats.timing_s.emplace_back("search", search_s);
+        stats.timing_s.emplace_back("postprocess", execute_s - search_s);
+    } else {
+        stats.timing_s.emplace_back("search_and_postprocess", execute_s);
+    }
+    stats.timing_s.emplace_back("total", total_s);
+    return stats;
+}
+
 int run_search_ep(loki::search::EPTomlConfig toml_cfg,
                   std::string_view config_toml,
                   bool dry_run,
@@ -990,6 +1090,7 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
         return 0;
     }
 
+    const auto run_start               = SteadyClock::now();
     auto loaded                        = load_search_timeseries(toml_cfg, exec);
     auto& ts                           = loaded.ts;
     const loki::SizeType actual_nsamps = ts.get_nsamps();
@@ -1014,7 +1115,8 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
                     loki::to_string(exec.backend), exec.device);
     }
 
-    const auto cache = prepare_ep_plan_cache(toml_cfg, ep_cfg, exec);
+    const auto plan_start = SteadyClock::now();
+    const auto cache      = prepare_ep_plan_cache(toml_cfg, ep_cfg, exec);
     const bool common_candidates =
         toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor";
     auto sweep = common_candidates
@@ -1040,14 +1142,20 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     if (toml_cfg.observation.barycentric) {
         observation.barycentric = toml_cfg.observation.barycentric;
     }
+    const double plan_s     = seconds_since(plan_start);
+    const auto search_start = SteadyClock::now();
     sweep.execute(ts.get_ts_e().first(actual_nsamps),
                   ts.get_ts_v().first(actual_nsamps), outdir_path,
                   toml_cfg.prefix, observation);
+    const double execute_s = seconds_since(search_start);
 
     const auto result_file =
         outdir_path / fmt::format("{}_ep_results.h5", toml_cfg.prefix);
     record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt(),
                       config_toml);
+    record_run_stats(result_file,
+                     ep_run_stats(result_file, loaded, plan_s, execute_s,
+                                  seconds_since(run_start)));
     print_ep_summary(result_file);
     return 0;
 }
