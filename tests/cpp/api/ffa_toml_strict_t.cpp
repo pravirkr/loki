@@ -65,6 +65,8 @@ clip_sigma = 0
 zap_periodic = true
 zap_sigma = 7.0
 zap_whiten_bins = 501
+zap_mode = "zero"
+zap_seed = 99
 birdies = [[50.0, 0.1], [60, 0]]
 )";
     const auto cfg         = loki::search::FFATomlConfig::from_string(toml);
@@ -83,6 +85,8 @@ birdies = [[50.0, 0.1], [60, 0]]
     REQUIRE(o.zap_periodic);
     REQUIRE(o.zap_sigma == 7.0);
     REQUIRE(o.zap_whiten_bins == 501);
+    REQUIRE(o.zap_mode == loki::io::ZapMode::kZero);
+    REQUIRE(o.zap_seed == 99U);
     REQUIRE(o.birdies.size() == 2);
     REQUIRE(o.birdies[0].freq == 50.0);
     REQUIRE(o.birdies[0].width == 0.1);
@@ -97,7 +101,8 @@ TEST_CASE("FFATomlConfig rejects bad [preprocessing] values", "[config][ffa]") {
         "block_scales = [0.0]", "block_scales = 1.0", "block_sigma = 0.0",
         "min_good_fraction = 1.5", "clip_sigma = -1.0", "zap_sigma = 0.0",
         "zap_whiten_bins = 2", "birdies = [[50.0]]", "birdies = [[-1.0, 0.1]]",
-        "zap_periodic = 1", "n_iter = 1.5", "unknown = 1");
+        "zap_periodic = 1", "zap_mode = \"soft\"", "n_iter = 1.5",
+        "unknown = 1");
     CAPTURE(bad);
     REQUIRE_THROWS_AS(loki::search::FFATomlConfig::from_string(
                           "[preprocessing]\n" + bad + "\n"),

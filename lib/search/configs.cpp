@@ -115,6 +115,11 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
         std::pair{std::string_view{"multiplicative"},
                   io::GainModel::kMultiplicative},
     };
+    constexpr std::array kZapModes{
+        std::pair{std::string_view{"noise"}, io::ZapMode::kNoise},
+        std::pair{std::string_view{"phase_kept"}, io::ZapMode::kPhaseKept},
+        std::pair{std::string_view{"zero"}, io::ZapMode::kZero},
+    };
     return {
         // [input]
         field<Cfg>("input", "timeseries",
@@ -186,6 +191,12 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
         field<Cfg>(
             "preprocessing", "zap_whiten_bins",
             [](auto& c) -> auto& { return c.preprocessing.zap_whiten_bins; }),
+        choice<Cfg>(
+            "preprocessing", "zap_mode",
+            [](auto& c) -> auto& { return c.preprocessing.zap_mode; },
+            kZapModes),
+        field<Cfg>("preprocessing", "zap_seed",
+                   [](auto& c) -> auto& { return c.preprocessing.zap_seed; }),
         custom<Cfg>(
             "preprocessing", "birdies",
             [](const toml::table& t, const std::string& path, Cfg& c) {
@@ -485,6 +496,13 @@ clip_sigma = 6.0
 zap_periodic = false
 zap_sigma = 8.0
 zap_whiten_bins = 1001
+# Robust: how zapped bins are replaced. "noise": complex Gaussian noise of
+# the local mean power (birdie windows excluded from that mean), drawn from
+# a seed hashed from the input (or zap_seed); "phase_kept": bins above the
+# local mean keep their phase at the mean power (a residual may remain);
+# "zero": set to zero.
+zap_mode = "noise"
+# zap_seed = 12345
 
 # Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
 birdies = []
@@ -2176,6 +2194,13 @@ clip_sigma = 6.0
 zap_periodic = false
 zap_sigma = 8.0
 zap_whiten_bins = 1001
+# Robust: how zapped bins are replaced. "noise": complex Gaussian noise of
+# the local mean power (birdie windows excluded from that mean), drawn from
+# a seed hashed from the input (or zap_seed); "phase_kept": bins above the
+# local mean keep their phase at the mean power (a residual may remain);
+# "zero": set to zero.
+zap_mode = "noise"
+# zap_seed = 12345
 
 # Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
 birdies = []

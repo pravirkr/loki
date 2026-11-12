@@ -22,6 +22,8 @@ using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
 using loki::SizeType;
 namespace pd = loki::io::detail;
+using loki::io::ZapMode;
+constexpr auto kPhaseKept = ZapMode::kPhaseKept;
 
 namespace {
 
@@ -39,6 +41,25 @@ double brute_median(std::vector<float> v) {
     std::ranges::sort(v);
     const auto n = v.size();
     return n % 2 == 1 ? v[n / 2] : 0.5 * (v[(n / 2) - 1] + v[n / 2]);
+}
+
+SizeType zap_with(std::span<float> y,
+                  double tsamp,
+                  bool threshold,
+                  SizeType whiten_bins,
+                  std::span<const loki::io::Birdie> birdies,
+                  ZapMode mode,
+                  std::uint64_t seed,
+                  std::span<std::uint8_t> flagged,
+                  int nthreads,
+                  std::span<const std::uint8_t> samples = {}) {
+    const pd::SpectralZap zs{.use_threshold = threshold,
+                             .sigma         = 8.0,
+                             .whiten_bins   = whiten_bins,
+                             .birdies       = birdies,
+                             .mode          = mode,
+                             .seed          = seed};
+    return pd::zap_spectrum(y, tsamp, zs, samples, flagged, nthreads);
 }
 
 } // namespace
@@ -227,14 +248,16 @@ TEST_CASE("preprocess kernels: spectral zap", "[preprocess]") {
                                             static_cast<double>(i) * tsamp));
     }
     SECTION("no flagged bins leaves the data untouched") {
-        auto y              = clean;
-        const SizeType nzap = pd::zap_spectrum(y, tsamp, true, 8.0, 101, {}, 2);
+        auto y = clean;
+        const SizeType nzap =
+            zap_with(y, tsamp, true, 101, {}, kPhaseKept, 0, {}, 2);
         REQUIRE(nzap == 0);
         REQUIRE(y == clean);
     }
     SECTION("a strong tone is removed, the rest is preserved") {
-        auto y              = z;
-        const SizeType nzap = pd::zap_spectrum(y, tsamp, true, 8.0, 101, {}, 2);
+        auto y = z;
+        const SizeType nzap =
+            zap_with(y, tsamp, true, 101, {}, kPhaseKept, 0, {}, 2);
         REQUIRE(nzap >= 1);
         REQUIRE(nzap < 10);
         double err = 0.0;
@@ -248,9 +271,170 @@ TEST_CASE("preprocess kernels: spectral zap", "[preprocess]") {
     SECTION("birdies zap without a threshold") {
         auto y = z;
         const std::vector<loki::io::Birdie> b{{.freq = f0, .width = 0.0}};
-        const SizeType nzap = pd::zap_spectrum(y, tsamp, false, 8.0, 101, b, 2);
+        const SizeType nzap =
+            zap_with(y, tsamp, false, 101, b, kPhaseKept, 0, {}, 2);
         REQUIRE(nzap == 1);
     }
+}
+
+TEST_CASE("preprocess kernels: hard zap modes", "[preprocess]") {
+    const SizeType n   = 1U << 18U;
+    const double tsamp = 1e-3;
+    const double t_obs = static_cast<double>(n) * tsamp;
+    auto z             = normal(n, 11);
+    // A bright line with harmonics, wider than a bin (a drifting tone).
+    for (SizeType i = 0; i < n; ++i) {
+        const double t = static_cast<double>(i) * tsamp;
+        for (int h = 1; h <= 3; ++h) {
+            z[i] += static_cast<float>(
+                0.3 / h *
+                std::sin(2.0 * std::numbers::pi * h * (40.0 + (0.01 * t)) * t));
+        }
+    }
+    std::vector<loki::io::Birdie> b;
+    for (int h = 1; h <= 3; ++h) {
+        b.push_back({.freq  = 40.0 * h + (h * 0.01 * t_obs / 2.0),
+                     .width = h * 0.01 * t_obs + 0.5});
+    }
+    const SizeType nf = (n / 2) + 1;
+    const auto window = pd::birdie_bins(b, t_obs, nf);
+    const auto nwin   = std::ranges::count(window, std::uint8_t{1});
+    REQUIRE(nwin > 1000);
+
+    SECTION("noise: the windows look like the noise around them") {
+        auto y = z;
+        std::vector<std::uint8_t> flagged(nf);
+        const SizeType nzap =
+            zap_with(y, tsamp, false, 1001, b, ZapMode::kNoise, 42, flagged, 2);
+        REQUIRE(nzap == static_cast<SizeType>(nwin));
+        REQUIRE(flagged == window);
+        const auto bands = pd::zap_bands(y, tsamp, flagged, 1001, 2);
+        REQUIRE(!bands.empty());
+        for (const auto& band : bands) {
+            CAPTURE(band.f_lo, band.n_zapped);
+            REQUIRE_THAT(band.power_ratio, WithinAbs(1.0, 0.1));
+        }
+        // The same seed gives the same bits for any thread count; another
+        // seed does not.
+        auto y1 = z;
+        zap_with(y1, tsamp, false, 1001, b, ZapMode::kNoise, 42, {}, 1);
+        auto y8 = z;
+        zap_with(y8, tsamp, false, 1001, b, ZapMode::kNoise, 42, {}, 8);
+        REQUIRE(y1 == y8);
+        auto y2 = z;
+        zap_with(y2, tsamp, false, 1001, b, ZapMode::kNoise, 43, {}, 1);
+        REQUIRE(y1 != y2);
+    }
+    SECTION("phase_kept keeps the phase of the windows") {
+        auto y = z;
+        zap_with(y, tsamp, false, 1001, b, kPhaseKept, 0, {}, 2);
+        std::vector<loki::ComplexType> before(nf);
+        std::vector<loki::ComplexType> after(nf);
+        loki::math::rfft_batch(z, before, 1, n, 1);
+        loki::math::rfft_batch(y, after, 1, n, 1);
+        // The line's bins come back scaled down, with their phase: a
+        // coherent residual that folding can still pick up.
+        double max_dphase = 0.0;
+        SizeType lowered  = 0;
+        for (SizeType k = 1; k < nf; ++k) {
+            if (window[k] != 0U &&
+                std::abs(after[k]) < 0.5 * std::abs(before[k])) {
+                ++lowered;
+                max_dphase = std::max(max_dphase,
+                                      static_cast<double>(std::abs(std::arg(
+                                          after[k] * std::conj(before[k])))));
+            }
+        }
+        REQUIRE(lowered > 20);
+        REQUIRE(max_dphase < 1e-2);
+    }
+    SECTION("zero empties the windows") {
+        auto y = z;
+        zap_with(y, tsamp, false, 1001, b, ZapMode::kZero, 0, {}, 2);
+        std::vector<loki::ComplexType> spec(nf);
+        loki::math::rfft_batch(y, spec, 1, n, 1);
+        double in_win = 0.0;
+        double total  = 0.0;
+        for (SizeType k = 1; k < nf; ++k) {
+            const double p = std::norm(spec[k]);
+            total += p;
+            in_win += window[k] != 0U ? p : 0.0;
+        }
+        REQUIRE(in_win < 1e-8 * total);
+    }
+}
+
+TEST_CASE("preprocess kernels: a hard zap removes a line through gaps",
+          "[preprocess]") {
+    const SizeType n   = 1U << 18U;
+    const double tsamp = 1e-3;
+    const double f0    = 40.0;
+    auto z             = normal(n, 13);
+    std::vector<std::uint8_t> samples(n, 1U);
+    for (SizeType i = 0; i < n; ++i) {
+        z[i] +=
+            static_cast<float>(0.5 * std::sin(2.0 * std::numbers::pi * f0 *
+                                              static_cast<double>(i) * tsamp));
+    }
+    // 4 % of the samples in 100 gaps of 0.1 s, zero in z. Alternating
+    // removal converges fast while gap length x window width << 1.
+    for (SizeType g = 0; g < 100; ++g) {
+        for (SizeType i = (g * 2600) + 300; i < (g * 2600) + 400; ++i) {
+            samples[i] = 0U;
+            z[i]       = 0.0F;
+        }
+    }
+    const std::vector<loki::io::Birdie> b{{.freq = f0, .width = 1.0}};
+    // Amplitude of the line left in the valid samples.
+    const auto line_left = [&](std::span<const float> y) {
+        double re  = 0.0;
+        double im  = 0.0;
+        double cnt = 0.0;
+        for (SizeType i = 0; i < n; ++i) {
+            if (samples[i] == 1U) {
+                const double ph = 2.0 * std::numbers::pi * f0 *
+                                  static_cast<double>(i) * tsamp;
+                re += y[i] * std::cos(ph);
+                im += y[i] * std::sin(ph);
+                cnt += 1.0;
+            }
+        }
+        return 2.0 * std::hypot(re, im) / cnt;
+    };
+    REQUIRE_THAT(line_left(z), WithinAbs(0.5, 0.01));
+    const auto run = [&](std::vector<float> y, ZapMode mode, SizeType passes,
+                         std::span<std::uint8_t> flagged) {
+        const pd::SpectralZap zs{
+            .birdies = b, .mode = mode, .seed = 3, .gap_passes = passes};
+        pd::zap_spectrum(y, tsamp, zs, samples, flagged, 2);
+        for (SizeType i = 0; i < n; ++i) {
+            REQUIRE((samples[i] == 1U || y[i] == 0.0F));
+        }
+        return y;
+    };
+    // On the line alone (the zero mode is linear): one pass leaves about
+    // the gap fraction of it, every further pass removes most of the rest.
+    std::vector<float> line(n);
+    for (SizeType i = 0; i < n; ++i) {
+        line[i] = samples[i] == 1U
+                      ? static_cast<float>(
+                            0.5 * std::sin(2.0 * std::numbers::pi * f0 *
+                                           static_cast<double>(i) * tsamp))
+                      : 0.0F;
+    }
+    const double one = line_left(run(line, ZapMode::kZero, 1, {}));
+    const double all =
+        line_left(run(line, ZapMode::kZero, pd::kZapGapPasses, {}));
+    CAPTURE(one, all);
+    REQUIRE(one > 0.01);
+    REQUIRE(all < 0.05 * one);
+    // With noise: the line is gone to the noise floor, sqrt(2 / n).
+    std::vector<std::uint8_t> flagged((n / 2) + 1);
+    const auto y = run(z, ZapMode::kNoise, pd::kZapGapPasses, flagged);
+    REQUIRE(line_left(y) < 0.01);
+    const auto bands = pd::zap_bands(y, tsamp, flagged, 1001, 2);
+    REQUIRE(bands.size() == 1);
+    REQUIRE_THAT(bands[0].power_ratio, WithinAbs(1.0, 0.1));
 }
 
 TEST_CASE("preprocess: z-score method reproduces the legacy path",

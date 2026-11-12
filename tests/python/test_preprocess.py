@@ -86,6 +86,26 @@ def test_options_and_birdies() -> None:
         io.preprocess(_noise(1024), TSAMP, opts)
 
 
+def test_zap_modes_and_self_check() -> None:
+    raw = _noise(1 << 18, 3)
+    opts = io.PreprocessOptions()
+    assert opts.zap_mode == io.ZapMode.Noise
+    assert opts.zap_seed is None
+    opts.birdies = [io.Birdie(37.0, 2.0)]
+    ts_e, _, rep = io.preprocess(raw, TSAMP, opts, nthreads=2)
+    assert rep.n_zapped > 0
+    (band,) = rep.zap_bands
+    assert (band.f_lo, band.f_hi) == (20.0, 50.0)
+    assert band.n_zapped > 0
+    assert abs(band.power_ratio - 1.0) < 0.25
+    opts.zap_seed = 5
+    seeded, _, _ = io.preprocess(raw, TSAMP, opts, nthreads=2)
+    assert not np.array_equal(seeded, ts_e)
+    opts.zap_mode = io.ZapMode.Zero
+    _, _, rep = io.preprocess(raw, TSAMP, opts, nthreads=2)
+    assert rep.zap_bands[0].power_ratio < 0.1
+
+
 @pytest.mark.skipif(
     "cuda" not in libloki.available_backends(), reason="CUDA backend not built"
 )

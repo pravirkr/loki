@@ -116,22 +116,78 @@ void flag_bad_blocks(std::span<const float> z,
 /// Gaussian upper tail at @p sigma.
 [[nodiscard]] double exp_power_threshold(double sigma);
 
+/// 1 for the spectral bins (of @p nf, DC excluded) inside @p birdies over
+/// an observation of @p t_obs seconds; a birdie narrower than a bin covers
+/// the nearest bin.
+[[nodiscard]] std::vector<std::uint8_t>
+birdie_bins(std::span<const Birdie> birdies, double t_obs, SizeType nf);
+
+/// Default removal passes of a hard zap on data with gaps.
+inline constexpr SizeType kZapGapPasses = 3;
+/// Gap fraction from which a hard zap makes its extra passes.
+inline constexpr double kZapMinGapFraction = 1e-4;
+
+/// What zap_spectrum() flags and how it replaces the flagged bins.
+struct SpectralZap {
+    bool use_threshold{false};  ///< flag bins above the threshold
+    double sigma{8.0};          ///< threshold (Gaussian-equivalent)
+    SizeType whiten_bins{1001}; ///< running-median width in bins
+    std::span<const Birdie> birdies;
+    ZapMode mode{ZapMode::kNoise};
+    std::uint64_t seed{0}; ///< noise stream seed
+    /// Removal passes when the series has gaps (hard modes only).
+    SizeType gap_passes{kZapGapPasses};
+};
+
 /**
  * @brief Zap periodic RFI in the spectrum of @p z, in place.
  *
- * The power spectrum is whitened by its running median over @p whiten_bins;
- * with @p use_threshold, bins above exp_power_threshold(zap_sigma) are
- * zapped, as are all bins inside @p birdies. A zapped bin keeps its phase
- * and gets the local mean power. DC is never zapped.
+ * The power spectrum is whitened by its running median over
+ * SpectralZap::whiten_bins; with SpectralZap::use_threshold, bins above
+ * exp_power_threshold(sigma) are flagged, as are the bins inside the
+ * birdies. DC is never zapped.
  *
- * @return Number of zapped bins.
+ * - ZapMode::kPhaseKept: a flagged bin above the local mean power keeps its
+ *   phase and gets the local mean power.
+ * - ZapMode::kNoise: every flagged bin is replaced by complex Gaussian noise
+ *   of the local mean power, drawn from a stream keyed on (seed, bin), so
+ *   the result does not depend on the thread count.
+ * - ZapMode::kZero: every flagged bin is set to zero.
+ *
+ * The hard modes (noise, zero) leave the birdie windows out of the local
+ * mean. @p samples (size n, or empty) marks the valid samples with 1; the
+ * others are gaps, zero in @p z and on return. With a gap fraction of at
+ * least kZapMinGapFraction, a hard zap removes the flagged bins
+ * SpectralZap::gap_passes times (re-zeroing the gaps in between) before the
+ * fill, so the part of a line that the gaps put back is removed too; the fill
+ * level then comes from the cleaned spectrum, raised for the part of the fill
+ * that zeroing the gaps removes (between 1 / (1 - f)^2 for short gaps and 1 /
+ * (1 - f) for long ones, f the gap fraction, from the gaps' spectrum). @p
+ * zapped (size n/2 + 1, or empty) receives 1 for every bin in a birdie window
+ * or above the threshold, whatever the mode.
+ *
+ * @return Number of bins replaced.
  */
 SizeType zap_spectrum(std::span<float> z,
                       double tsamp,
-                      bool use_threshold,
-                      double zap_sigma,
-                      SizeType whiten_bins,
-                      std::span<const Birdie> birdies,
+                      const SpectralZap& zs,
+                      std::span<const std::uint8_t> samples,
+                      std::span<std::uint8_t> zapped,
                       int nthreads);
+
+/**
+ * @brief Self-check of a zap on its output @p ts (n samples).
+ *
+ * Whitens the power spectrum of @p ts by the running median of the bins
+ * not in @p flagged (size n/2 + 1) and returns, per band (edges 0, 10, 20,
+ * 50, 100, ... Hz up to Nyquist), the mean whitened power of the flagged
+ * bins over that of the others. Bands without flagged bins are left out.
+ */
+[[nodiscard]] std::vector<PreprocessReport::ZapBand>
+zap_bands(std::span<const float> ts,
+          double tsamp,
+          std::span<const std::uint8_t> flagged,
+          SizeType whiten_bins,
+          int nthreads);
 
 } // namespace loki::io::detail

@@ -49,6 +49,10 @@ void bind_io(py::module_& m) {
     py::enum_<io::GainModel>(m_io, "GainModel")
         .value("Additive", io::GainModel::kAdditive)
         .value("Multiplicative", io::GainModel::kMultiplicative);
+    py::enum_<io::ZapMode>(m_io, "ZapMode")
+        .value("Noise", io::ZapMode::kNoise)
+        .value("PhaseKept", io::ZapMode::kPhaseKept)
+        .value("Zero", io::ZapMode::kZero);
     py::class_<io::Birdie>(m_io, "Birdie")
         .def(py::init([](double freq, double width) {
                  return io::Birdie{.freq = freq, .width = width};
@@ -72,6 +76,8 @@ void bind_io(py::module_& m) {
         .def_readwrite("zap_periodic", &PO::zap_periodic)
         .def_readwrite("zap_sigma", &PO::zap_sigma)
         .def_readwrite("zap_whiten_bins", &PO::zap_whiten_bins)
+        .def_readwrite("zap_mode", &PO::zap_mode)
+        .def_readwrite("zap_seed", &PO::zap_seed)
         .def_readwrite("birdies", &PO::birdies)
         .def_readwrite("loc", &PO::loc)
         .def_readwrite("scale", &PO::scale)
@@ -79,6 +85,11 @@ void bind_io(py::module_& m) {
         .def_readwrite("fast_median_min_points", &PO::fast_median_min_points)
         .def("validate", &PO::validate);
     using PR = io::PreprocessReport;
+    py::class_<PR::ZapBand>(m_io, "ZapBand")
+        .def_readonly("f_lo", &PR::ZapBand::f_lo)
+        .def_readonly("f_hi", &PR::ZapBand::f_hi)
+        .def_readonly("n_zapped", &PR::ZapBand::n_zapped)
+        .def_readonly("power_ratio", &PR::ZapBand::power_ratio);
     py::class_<PR>(m_io, "PreprocessReport")
         .def_readonly("method", &PR::method)
         .def_readonly("nsamps", &PR::nsamps)
@@ -88,6 +99,7 @@ void bind_io(py::module_& m) {
         .def_readonly("n_masked", &PR::n_masked)
         .def_readonly("n_clipped", &PR::n_clipped)
         .def_readonly("n_zapped", &PR::n_zapped)
+        .def_readonly("zap_bands", &PR::zap_bands)
         .def_readonly("longest_masked_run", &PR::longest_masked_run)
         .def_readonly("global_scale", &PR::global_scale)
         .def_readonly("norm", &PR::norm)

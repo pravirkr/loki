@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <complex>
 #include <cstddef>
@@ -111,6 +112,31 @@ PreprocessReport preprocess_zscore(std::span<float> x,
     return rep;
 }
 
+/// 64-bit hash of the bits of @p x (FNV-1a per chunk, chunks combined in
+/// order), independent of the thread count.
+std::uint64_t data_seed(std::span<const float> x, int nthreads) {
+    constexpr SizeType kChunk = SizeType{1} << 20U;
+    const SizeType n          = x.size();
+    const SizeType nchunks    = (n + kChunk - 1) / kChunk;
+    std::vector<std::uint64_t> h(nchunks);
+    const float* xp   = x.data();
+    std::uint64_t* hp = h.data();
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    firstprivate(n, nchunks, xp, hp, kChunk)
+    for (SizeType c = 0; c < nchunks; ++c) {
+        std::uint64_t v = 0xcbf29ce484222325ULL;
+        for (SizeType i = c * kChunk; i < std::min(n, (c + 1) * kChunk); ++i) {
+            v = (v ^ std::bit_cast<std::uint32_t>(xp[i])) * 0x100000001b3ULL;
+        }
+        hp[c] = v;
+    }
+    std::uint64_t seed = math::splitmix64(n);
+    for (const auto v : h) {
+        seed = math::splitmix64(seed ^ v);
+    }
+    return seed;
+}
+
 /// Zap step of the robust method (PreprocessOptions::zap_periodic, birdies)
 /// on @p x with the sample mask @p mask; @p z is scratch.
 SizeType zap_cpu(const BlockGrid& grid,
@@ -121,8 +147,15 @@ SizeType zap_cpu(const BlockGrid& grid,
                  std::span<float> x,
                  std::span<float> z,
                  std::span<std::uint8_t> mask,
+                 std::vector<std::uint8_t>& flagged,
                  int nthreads) {
-    const SizeType n     = x.size();
+    const SizeType n = x.size();
+    // The noise seed follows the input, so a rerun on the same data
+    // reproduces the output bit for bit.
+    const std::uint64_t seed = o.zap_seed.value_or(o.zap_mode == ZapMode::kNoise
+                                                       ? data_seed(x, nthreads)
+                                                       : std::uint64_t{0});
+    flagged.assign((n / 2) + 1, 0U);
     const SizeType block = grid.block;
     const double clamp   = o.clip_sigma;
     whiten(x, grid, mu, var, z, nthreads);
@@ -138,9 +171,15 @@ SizeType zap_cpu(const BlockGrid& grid,
         m[i]               = (m[i] != 0U && outlier) ? std::uint8_t{2} : m[i];
         zp[i]              = m[i] == 1U ? zp[i] : 0.0F;
     }
+    const SpectralZap zs{.use_threshold = o.zap_periodic,
+                         .sigma         = o.zap_sigma,
+                         .whiten_bins   = o.zap_whiten_bins,
+                         .birdies       = o.birdies,
+                         .mode          = o.zap_mode,
+                         .seed          = seed,
+                         .gap_passes    = kZapGapPasses};
     const SizeType n_zapped =
-        zap_spectrum(z, tsamp, o.zap_periodic, o.zap_sigma, o.zap_whiten_bins,
-                     o.birdies, nthreads);
+        zap_spectrum(z, tsamp, zs, mask, flagged, nthreads);
     float* xp         = x.data();
     const bool update = n_zapped > 0;
 #pragma omp parallel num_threads(nthreads) default(none) shared(grid)          \
@@ -335,7 +374,13 @@ public:
                  std::span<const float> var,
                  double tsamp,
                  const PreprocessOptions& o) override {
-        return zap_cpu(grid, mu, var, tsamp, o, m_x, m_z, m_mask, m_nthreads);
+        return zap_cpu(grid, mu, var, tsamp, o, m_x, m_z, m_mask, m_flagged,
+                       m_nthreads);
+    }
+
+    std::vector<PreprocessReport::ZapBand>
+    zap_check(double tsamp, const PreprocessOptions& o) override {
+        return zap_bands(m_x, tsamp, m_flagged, o.zap_whiten_bins, m_nthreads);
     }
 
     void output(const BlockGrid& grid,
@@ -356,6 +401,7 @@ private:
     std::span<float> m_x;
     std::span<float> m_z;
     std::vector<std::uint8_t> m_mask;
+    std::vector<std::uint8_t> m_flagged; // zapped Fourier bins
     int m_nthreads;
 };
 
@@ -619,70 +665,12 @@ double exp_power_threshold(double sigma) {
            std::log(sigma * std::sqrt(2.0 * std::numbers::pi));
 }
 
-SizeType zap_spectrum(std::span<float> z,
-                      double tsamp,
-                      bool use_threshold,
-                      double zap_sigma,
-                      SizeType whiten_bins,
-                      std::span<const Birdie> birdies,
-                      int nthreads) {
-    const SizeType n  = z.size();
-    const SizeType nf = (n / 2) + 1;
-    nthreads          = std::max(nthreads, 1);
-    std::vector<ComplexType> spec(nf);
-    math::rfft_batch(z, spec, 1, n, nthreads);
+/// make_keyed_pcg32 purpose of the noise drawn into zapped bins.
+constexpr std::uint32_t kZapNoisePurpose = 1;
 
-    std::vector<float> power(nf);
-    {
-        float* pw             = power.data();
-        const ComplexType* sp = spec.data();
-#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
-    firstprivate(nf, pw, sp) if (nf >= kParallelThreshold)
-        for (SizeType k = 0; k < nf; ++k) {
-            pw[k] = std::norm(sp[k]);
-        }
-    }
-    power[0] = 0.0F;
-    // Local median power: block medians, then a running median of them.
-    const SizeType w      = std::min(whiten_bins, nf);
-    const SizeType fblock = std::max<SizeType>(w / 16, 1);
-    const BlockGrid fgrid(nf, fblock);
-    std::vector<float> fmed(fgrid.nblocks);
-    std::vector<std::uint8_t> fuse(fgrid.nblocks);
-    std::vector<float> fgood(fgrid.nblocks);
-    block_medians(power, {}, fgrid, 0.0, fmed, fuse, fgood, nthreads);
-    const auto fmean = masked_running_median(
-        fmed, fuse, blocks_per_window(w, fblock), nthreads);
-
-    // Flagged bins get the local mean power (median / ln 2).
-    std::vector<std::uint8_t> zap(nf, 0U);
-    const double thr   = exp_power_threshold(zap_sigma);
-    const double t_obs = static_cast<double>(n) * tsamp;
-    {
-        const std::span<const float> fm = fmean;
-        float* pw                       = power.data();
-        std::uint8_t* zp                = zap.data();
-#pragma omp parallel num_threads(nthreads) default(none) shared(fgrid)         \
-    firstprivate(fm, pw, zp, fblock, thr,                                      \
-                     use_threshold) if (nf >= kParallelThreshold)
-        {
-            std::vector<float> mean_b(fblock);
-#pragma omp for schedule(static)
-            for (SizeType b = 0; b < fgrid.nblocks; ++b) {
-                interpolate_block(fgrid, fm, b, mean_b.data());
-                const SizeType k0 = fgrid.begin(b);
-                for (SizeType k = k0; k < fgrid.end(b); ++k) {
-                    const float mean =
-                        mean_b[k - k0] / std::numbers::ln2_v<float>;
-                    if (use_threshold && k > 0 && mean > 0.0F &&
-                        pw[k] > thr * mean) {
-                        zp[k] = 1U;
-                    }
-                    pw[k] = mean; // reuse: local mean power
-                }
-            }
-        }
-    }
+std::vector<std::uint8_t>
+birdie_bins(std::span<const Birdie> birdies, double t_obs, SizeType nf) {
+    std::vector<std::uint8_t> in(nf, 0U);
     for (const auto& bd : birdies) {
         const double lo = (bd.freq - (0.5 * bd.width)) * t_obs;
         const double hi = (bd.freq + (0.5 * bd.width)) * t_obs;
@@ -693,32 +681,299 @@ SizeType zap_spectrum(std::span<float> z,
                 std::max(std::llround(bd.freq * t_obs), 1LL));
         }
         for (SizeType k = k_lo; k <= std::min(k_hi, nf - 1); ++k) {
-            const double p = std::norm(spec[k]);
-            zap[k]         = p > power[k] ? 1U : zap[k];
+            in[k] = 1U;
         }
     }
-    SizeType nzap = 0;
+    return in;
+}
+
+namespace {
+
+/// Local mean power (median / ln 2) of every bin, from block medians of
+/// the bins with @p valid != 0 (all when empty) and their running median.
+std::vector<float> local_mean_power(std::span<const float> power,
+                                    std::span<const std::uint8_t> valid,
+                                    SizeType whiten_bins,
+                                    int nthreads) {
+    const SizeType nf     = power.size();
+    const SizeType w      = std::min(whiten_bins, nf);
+    const SizeType fblock = std::max<SizeType>(w / 16, 1);
+    const BlockGrid fgrid(nf, fblock);
+    std::vector<float> fmed(fgrid.nblocks);
+    std::vector<std::uint8_t> fuse(fgrid.nblocks);
+    std::vector<float> fgood(fgrid.nblocks);
+    block_medians(power, valid, fgrid, 0.0, fmed, fuse, fgood, nthreads);
+    const auto fmean = masked_running_median(
+        fmed, fuse, blocks_per_window(w, fblock), nthreads);
+    std::vector<float> mean(nf);
+    const std::span<const float> fm = fmean;
+    float* mp                       = mean.data();
+#pragma omp parallel num_threads(nthreads) default(none) shared(fgrid)         \
+    firstprivate(fm, mp, fblock) if (nf >= kParallelThreshold)
     {
-        const float* pw        = power.data();
+        std::vector<float> mean_b(fblock);
+#pragma omp for schedule(static)
+        for (SizeType b = 0; b < fgrid.nblocks; ++b) {
+            interpolate_block(fgrid, fm, b, mean_b.data());
+            const SizeType k0 = fgrid.begin(b);
+            for (SizeType k = k0; k < fgrid.end(b); ++k) {
+                mp[k] = mean_b[k - k0] / std::numbers::ln2_v<float>;
+            }
+        }
+    }
+    return mean;
+}
+
+std::vector<float> power_spectrum(std::span<const ComplexType> spec,
+                                  int nthreads) {
+    const SizeType nf = spec.size();
+    std::vector<float> power(nf);
+    float* pw             = power.data();
+    const ComplexType* sp = spec.data();
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    firstprivate(nf, pw, sp) if (nf >= kParallelThreshold)
+    for (SizeType k = 0; k < nf; ++k) {
+        pw[k] = std::norm(sp[k]);
+    }
+    power[0] = 0.0F;
+    return power;
+}
+
+/**
+ * In-window power that zeroing the gaps leaves of a fill that is white
+ * over a run of W flagged bins:
+ * sum_{|q| < W} |M(q)|^2 (1 - |q| / W) / n^2, with M the spectrum of the
+ * valid-sample indicator. (1 - f)^2 for gaps much shorter than 1 / W (f the
+ * gap fraction), 1 - f for much longer ones. M is taken from the indicator
+ * averaged over blocks, which is exact enough at the low q that matter.
+ */
+class GapRetention {
+public:
+    GapRetention(std::span<const std::uint8_t> samples, int nthreads) {
+        const SizeType n     = samples.size();
+        const SizeType block = std::max<SizeType>(n >> 20U, 1);
+        const SizeType nd    = n / block; // the tail (< block) is left out
+        std::vector<float> md(nd);
+        for (SizeType j = 0; j < nd; ++j) {
+            SizeType cnt = 0;
+            for (SizeType i = j * block; i < (j + 1) * block; ++i) {
+                cnt += samples[i] == 1U ? 1U : 0U;
+            }
+            md[j] = static_cast<float>(cnt) / static_cast<float>(block);
+        }
+        std::vector<ComplexType> spec((nd / 2) + 1);
+        math::rfft_batch(md, spec, 1, nd, nthreads);
+        const double norm =
+            1.0 / (static_cast<double>(nd) * static_cast<double>(nd));
+        m_s0.resize(spec.size() + 1, 0.0);
+        m_s1.resize(spec.size() + 1, 0.0);
+        for (SizeType q = 0; q < spec.size(); ++q) {
+            const double p = std::norm(spec[q]) * norm;
+            m_s0[q + 1]    = m_s0[q] + p;
+            m_s1[q + 1]    = m_s1[q] + (static_cast<double>(q) * p);
+        }
+        m_dc    = m_s0[1];
+        m_total = (2.0 * m_s0.back()) - m_dc; // Parseval: the valid fraction
+    }
+
+    /// Retention for a run of @p width bins.
+    [[nodiscard]] double operator()(SizeType width) const {
+        const SizeType qmax = m_s0.size() - 1;
+        if (width >= qmax) {
+            return m_total;
+        }
+        const auto w = static_cast<double>(width);
+        // q = 0 once, 0 < |q| < W twice.
+        const double s0 = m_s0[width] - m_dc;
+        const double s1 = m_s1[width];
+        return m_dc + (2.0 * (s0 - (s1 / w)));
+    }
+
+private:
+    std::vector<double> m_s0; // prefix sums of |M(q)|^2 / n^2
+    std::vector<double> m_s1; // prefix sums of q |M(q)|^2 / n^2
+    double m_dc{0.0};
+    double m_total{0.0};
+};
+
+/// irfft of @p spec into @p z, with the gaps (samples != 1) set to zero.
+void to_series(std::span<const ComplexType> spec,
+               std::span<float> z,
+               std::span<const std::uint8_t> samples,
+               int nthreads) {
+    const SizeType n = z.size();
+    math::irfft_batch(spec, z, 1, n, nthreads);
+    if (samples.empty()) {
+        return;
+    }
+    float* zp               = z.data();
+    const std::uint8_t* smp = samples.data();
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    firstprivate(n, zp, smp) if (n >= kParallelThreshold)
+    for (SizeType i = 0; i < n; ++i) {
+        zp[i] = smp[i] == 1U ? zp[i] : 0.0F;
+    }
+}
+
+} // namespace
+
+SizeType zap_spectrum(std::span<float> z,
+                      double tsamp,
+                      const SpectralZap& zs,
+                      std::span<const std::uint8_t> samples,
+                      std::span<std::uint8_t> zapped,
+                      int nthreads) {
+    const SizeType n  = z.size();
+    const SizeType nf = (n / 2) + 1;
+    nthreads          = std::max(nthreads, 1);
+    if (!samples.empty() && samples.size() != n) {
+        throw std::invalid_argument("zap_spectrum: samples needs n entries");
+    }
+    std::vector<ComplexType> spec(nf);
+    math::rfft_batch(z, spec, 1, n, nthreads);
+    auto power         = power_spectrum(spec, nthreads);
+    const double t_obs = static_cast<double>(n) * tsamp;
+    const auto window  = birdie_bins(zs.birdies, t_obs, nf);
+    const bool hard    = zs.mode != ZapMode::kPhaseKept;
+    // Local mean power. The hard modes leave the birdie windows out of the
+    // medians, so other windows never raise the fill.
+    std::vector<std::uint8_t> valid;
+    if (hard) {
+        valid.resize(nf);
+        for (SizeType k = 0; k < nf; ++k) {
+            valid[k] = window[k] == 0U ? 1U : 0U;
+        }
+    }
+    auto mean = local_mean_power(power, valid, zs.whiten_bins, nthreads);
+
+    // Flags: bins above the threshold, and the birdie windows (phase_kept:
+    // only their bins above the local mean).
+    std::vector<std::uint8_t> zap(nf, 0U);
+    const double thr = exp_power_threshold(zs.sigma);
+    for (SizeType k = 1; k < nf; ++k) {
+        const float p = power[k];
+        if (zs.use_threshold && mean[k] > 0.0F && p > thr * mean[k]) {
+            zap[k] = 1U;
+        }
+        if (window[k] != 0U && (hard || p > mean[k])) {
+            zap[k] = 1U;
+        }
+    }
+    if (!zapped.empty()) {
+        for (SizeType k = 0; k < nf; ++k) {
+            zapped[k] = (zap[k] != 0U || window[k] != 0U) ? 1U : 0U;
+        }
+    }
+
+    SizeType nzap = 0;
+    if (!hard) {
+        const float* mp        = mean.data();
         const std::uint8_t* zp = zap.data();
         ComplexType* sp        = spec.data();
 #pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
-    firstprivate(nf, pw, zp, sp)                                               \
+    firstprivate(nf, mp, zp, sp)                                               \
     reduction(+ : nzap) if (nf >= kParallelThreshold)
         for (SizeType k = 1; k < nf; ++k) {
             if (zp[k] == 0U) {
                 continue;
             }
             const double p = std::norm(sp[k]);
-            if (p > pw[k]) {
-                sp[k] *= static_cast<float>(std::sqrt(pw[k] / p));
+            if (p > mp[k]) {
+                sp[k] *= static_cast<float>(std::sqrt(mp[k] / p));
                 ++nzap;
             }
         }
+        if (nzap > 0) {
+            math::irfft_batch(spec, z, 1, n, nthreads);
+        }
+        return nzap;
     }
-    if (nzap > 0) {
-        math::irfft_batch(spec, z, 1, n, nthreads);
+
+    nzap = static_cast<SizeType>(std::ranges::count(zap, std::uint8_t{1}));
+    if (nzap == 0) {
+        return 0;
     }
+    // With gaps (masked samples, zero in z), removing the flagged bins and
+    // re-zeroing the gaps puts a fraction of a line back into them; repeat
+    // the removal so the residual falls geometrically.
+    // Gaps leave about their fraction of a line behind; below
+    // kZapMinGapFraction (a few clipped samples) one pass is enough.
+    SizeType n_gap = 0;
+    if (!samples.empty()) {
+        n_gap = n - static_cast<SizeType>(
+                        std::ranges::count(samples, std::uint8_t{1}));
+    }
+    const bool gaps       = static_cast<double>(n_gap) >=
+                            kZapMinGapFraction * static_cast<double>(n);
+    const SizeType passes = gaps ? std::max<SizeType>(zs.gap_passes, 1) : 1;
+    for (SizeType pass = 0; pass + 1 < passes; ++pass) {
+        for (SizeType k = 1; k < nf; ++k) {
+            spec[k] = zap[k] != 0U ? ComplexType{0.0F, 0.0F} : spec[k];
+        }
+        to_series(spec, z, samples, nthreads);
+        math::rfft_batch(z, spec, 1, n, nthreads);
+    }
+    if (passes > 1) {
+        // The fill level of the cleaned spectrum: the gapped line's skirt
+        // no longer inflates the neighbourhood of a bright window.
+        power = power_spectrum(spec, nthreads);
+        for (SizeType k = 0; k < nf; ++k) {
+            valid[k] = zap[k] == 0U ? 1U : 0U;
+        }
+        mean = local_mean_power(power, valid, zs.whiten_bins, nthreads);
+    }
+    if (gaps) {
+        // Zeroing the gaps after the fill keeps only part of its in-window
+        // power (see gap_retention()); draw each flagged run that much
+        // stronger.
+        const GapRetention retention(samples, nthreads);
+        for (SizeType k = 1; k < nf;) {
+            if (zap[k] == 0U) {
+                ++k;
+                continue;
+            }
+            SizeType end = k;
+            while (end < nf && zap[end] != 0U) {
+                ++end;
+            }
+            const double r  = retention(end - k);
+            const auto gain = r > 0.0 ? static_cast<float>(1.0 / r) : 1.0F;
+            for (; k < end; ++k) {
+                mean[k] *= gain;
+            }
+        }
+    }
+    {
+        const float* mp          = mean.data();
+        const std::uint8_t* zp   = zap.data();
+        ComplexType* sp          = spec.data();
+        const bool noise         = zs.mode == ZapMode::kNoise;
+        const bool even          = n % 2 == 0;
+        const std::uint64_t seed = zs.seed;
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    firstprivate(nf, mp, zp, sp, noise, even,                                  \
+                     seed) if (nf >= kParallelThreshold)
+        for (SizeType k = 1; k < nf; ++k) {
+            if (zp[k] == 0U) {
+                continue;
+            }
+            if (!noise || mp[k] <= 0.0F) {
+                sp[k] = {0.0F, 0.0F};
+                continue;
+            }
+            // One stream per bin: independent of threads and of order.
+            auto rng =
+                math::make_keyed_pcg32(seed, kZapNoisePurpose, 0U,
+                                       static_cast<std::uint32_t>(k), 0U, 0U);
+            std::array<float, 2> re_im{};
+            const bool real_bin = even && k == nf - 1; // Nyquist is real
+            const float sd      = std::sqrt(real_bin ? mp[k] : mp[k] / 2.0F);
+            math::NormalSampler::generate(rng, re_im, 0.0F, sd);
+            sp[k] = {re_im[0], real_bin ? 0.0F : re_im[1]};
+        }
+    }
+    to_series(spec, z, n_gap > 0 ? samples : std::span<const std::uint8_t>{},
+              nthreads);
     return nzap;
 }
 
@@ -737,6 +992,95 @@ PreprocessReport preprocess_cpu(std::span<const float> raw,
         return preprocess_zscore(ts_e, tsamp, ts_v, options, nthreads);
     }
     return preprocess_robust(ts_e, tsamp, ts_v, options, nthreads);
+}
+
+std::vector<PreprocessReport::ZapBand>
+zap_bands(std::span<const float> ts,
+          double tsamp,
+          std::span<const std::uint8_t> flagged,
+          SizeType whiten_bins,
+          int nthreads) {
+    const SizeType n  = ts.size();
+    const SizeType nf = (n / 2) + 1;
+    if (flagged.size() != nf) {
+        throw std::invalid_argument("zap_bands: flagged needs n/2 + 1 bins");
+    }
+    nthreads = std::max(nthreads, 1);
+    std::vector<ComplexType> spec(nf);
+    math::rfft_batch(ts, spec, 1, n, nthreads);
+    std::vector<float> power(nf);
+    std::vector<std::uint8_t> valid(nf);
+    for (SizeType k = 0; k < nf; ++k) {
+        power[k] = std::norm(spec[k]);
+        valid[k] = (k > 0 && flagged[k] == 0U) ? 1U : 0U;
+    }
+    spec = {};
+    // Whiten by the running median of the unflagged bins (as the zap does).
+    const SizeType w      = std::min(whiten_bins, nf);
+    const SizeType fblock = std::max<SizeType>(w / 16, 1);
+    const BlockGrid fgrid(nf, fblock);
+    std::vector<float> fmed(fgrid.nblocks);
+    std::vector<std::uint8_t> fuse(fgrid.nblocks);
+    std::vector<float> fgood(fgrid.nblocks);
+    block_medians(power, valid, fgrid, 0.0, fmed, fuse, fgood, nthreads);
+    const auto fmean = masked_running_median(
+        fmed, fuse, blocks_per_window(w, fblock), nthreads);
+
+    // Bands with edges 0, 10, 20, 50, 100, 200, 500, ... Hz up to Nyquist.
+    const double t_obs = static_cast<double>(n) * tsamp;
+    const double f_nyq = 0.5 / tsamp;
+    std::vector<double> edges{0.0};
+    for (double decade = 10.0; edges.back() < f_nyq; decade *= 10.0) {
+        for (const double m : {1.0, 2.0, 5.0}) {
+            edges.push_back(std::min(m * decade, f_nyq));
+            if (edges.back() >= f_nyq) {
+                break;
+            }
+        }
+    }
+    const SizeType nband = edges.size() - 1;
+    std::vector<double> sum_in(nband, 0.0);
+    std::vector<double> sum_out(nband, 0.0);
+    std::vector<SizeType> cnt_in(nband, 0);
+    std::vector<SizeType> cnt_out(nband, 0);
+    std::vector<float> mean_b(fblock);
+    SizeType band = 0;
+    for (SizeType b = 0; b < fgrid.nblocks; ++b) {
+        interpolate_block(fgrid, fmean, b, mean_b.data());
+        for (SizeType k = std::max<SizeType>(fgrid.begin(b), 1);
+             k < fgrid.end(b); ++k) {
+            const double f = static_cast<double>(k) / t_obs;
+            while (band + 1 < nband && f >= edges[band + 1]) {
+                ++band;
+            }
+            const double mean =
+                mean_b[k - fgrid.begin(b)] / std::numbers::ln2_v<float>;
+            if (mean <= 0.0) {
+                continue;
+            }
+            const double p = power[k] / mean;
+            if (flagged[k] != 0U) {
+                sum_in[band] += p;
+                ++cnt_in[band];
+            } else {
+                sum_out[band] += p;
+                ++cnt_out[band];
+            }
+        }
+    }
+    std::vector<PreprocessReport::ZapBand> out;
+    for (SizeType i = 0; i < nband; ++i) {
+        if (cnt_in[i] == 0 || cnt_out[i] == 0) {
+            continue;
+        }
+        out.push_back(
+            {.f_lo        = edges[i],
+             .f_hi        = edges[i + 1],
+             .n_zapped    = cnt_in[i],
+             .power_ratio = (sum_in[i] / static_cast<double>(cnt_in[i])) /
+                            (sum_out[i] / static_cast<double>(cnt_out[i]))});
+    }
+    return out;
 }
 
 } // namespace loki::io::detail

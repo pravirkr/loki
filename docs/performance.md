@@ -188,3 +188,40 @@ cells (as first proposed). The strongest runs of a source fill its cell, so
 its detections in weaker runs are dropped: with 32 leaves per cell, sources
 lost many of the runs that detected them (for example 21 to 12, and
 16 to 7), although every best S/N survived. Cells are per run.
+
+### Spectral zap modes
+
+`zap_mode = "noise"` (`docs/preprocessing.md`) replaces every birdie-window
+bin with Gaussian noise. With masked samples (gaps), one removal leaves
+about the masked fraction of a line in the valid samples: a bright binary
+pulsar at S/N above 100 still folded to S/N 9.5 after a single pass,
+2.5 % of the series masked. The hard modes therefore repeat the removal
+three times (re-zeroing the gaps in between) when at least 1e-4 of the
+samples are gaps, and take the fill level from the cleaned spectrum.
+Measured 2026-11-12 on an EDGAR node, 4 threads, 1,219 birdie windows
+(2.2 M bins), whole preprocessing:
+
+| Series | No zap | `phase_kept` | `noise` / `zero` |
+|---|---|---|---|
+| 2^27 samples, 40 masked bursts (3 removal passes) | 3.9 s | 13.5 s | 24.0 s |
+| 2^27 samples, no gaps (1 pass) | 4.0 s | 13.0 s | 12.8 s |
+
+Each further pass costs one FFT pair, about 2 s at 2^26 and 5.6 s at
+2^27. On the bright-binary series, 1, 2, 3, 5 and 8 passes left the
+pulsar's best S/N at 9.5, 7.2, 7.1, 7.0 and 7.0, against 6.7 for the same
+search on an externally hard-zapped copy; the strongest unrelated
+candidate in that search is 7.4. Three passes are kept. The removal is
+alternating projection: it converges fast while gap length times window
+width is well below 1, and slowly for long gaps in wide windows (a
+least-squares solve would converge faster, and is deferred until a series
+needs it).
+
+Zeroing the gaps after the fill also removes part of the fill, and the
+removal passes strip the leakage that genuine gapped noise would put into
+a window. Uncorrected, the zapped bins came out at about (1 - f)^2 of
+their neighbours' power for short gaps (0.72 at f = 0.15, gaps of 0.2 s);
+a flat 1 / (1 - f) correction gave 0.85. The fill is now raised by the
+retention that the mask's spectrum predicts for each window: zapped over
+other power is 0.95-1.02 for f up to 0.15, and 0.995-1.011 above 10 Hz
+on the bright-binary series. `phase_kept` (the previous zap) is
+bit-identical to before.

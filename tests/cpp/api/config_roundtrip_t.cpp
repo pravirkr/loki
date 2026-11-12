@@ -48,6 +48,8 @@ void set_non_defaults(FFATomlConfig& cfg) {
     o.zap_periodic              = true;
     o.zap_sigma                 = 7.5;
     o.zap_whiten_bins           = 501;
+    o.zap_mode                  = loki::io::ZapMode::kPhaseKept;
+    o.zap_seed                  = 1234;
     o.birdies   = {{.freq = 50.0, .width = 0.1}, {.freq = 60.0, .width = 0.25}};
     cfg.f_min   = 0.1;
     cfg.f_max   = 123.456;
@@ -119,6 +121,8 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(o.zap_periodic == p.zap_periodic);
     CHECK(o.zap_sigma == p.zap_sigma);
     CHECK(o.zap_whiten_bins == p.zap_whiten_bins);
+    CHECK(o.zap_mode == p.zap_mode);
+    CHECK(o.zap_seed == p.zap_seed);
     REQUIRE(o.birdies.size() == p.birdies.size());
     for (std::size_t i = 0; i < o.birdies.size(); ++i) {
         CHECK(o.birdies[i].freq == p.birdies[i].freq);

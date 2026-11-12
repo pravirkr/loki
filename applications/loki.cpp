@@ -345,6 +345,30 @@ void record_run_stats(const std::filesystem::path& result_file,
                     : std::string());
 }
 
+/// The zap self-check per band; a noise zap that left a coherent residual
+/// (or overfilled) warns.
+void log_zap_bands(const loki::io::PreprocessReport& rep,
+                   loki::io::ZapMode mode) {
+    // 0.1, or three standard errors of a mean of n Exp(1) powers.
+    constexpr loki::SizeType kMinBins = 64;
+    for (const auto& b : rep.zap_bands) {
+        const double tolerance =
+            std::max(0.1, 3.0 / std::sqrt(static_cast<double>(b.n_zapped)));
+        const bool off = mode == loki::io::ZapMode::kNoise &&
+                         b.n_zapped >= kMinBins &&
+                         std::abs(b.power_ratio - 1.0) > tolerance;
+        if (off) {
+            SPDLOG_WARN("Zap self-check: {:.0f}-{:.0f} Hz, {} bins, zapped / "
+                        "other power = {:.3f} (expected 1)",
+                        b.f_lo, b.f_hi, b.n_zapped, b.power_ratio);
+        } else {
+            SPDLOG_INFO("Zap self-check: {:.0f}-{:.0f} Hz, {} bins, zapped / "
+                        "other power = {:.3f}",
+                        b.f_lo, b.f_hi, b.n_zapped, b.power_ratio);
+        }
+    }
+}
+
 /// Reads the raw timeseries of a search from [input] (or -i) and builds the
 /// folding inputs as [preprocessing] asks, on the search's backend.
 SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
@@ -398,6 +422,7 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
                 static_cast<double>(rep.nsamps),
             rep.n_clipped, rep.n_zapped,
             static_cast<double>(rep.longest_masked_run) * dt);
+        log_zap_bands(rep, options.zap_mode);
     } else {
         SPDLOG_INFO("Preprocessing (zscore): baseline window = {:.3f} s",
                     static_cast<double>(rep.baseline_window) * dt);

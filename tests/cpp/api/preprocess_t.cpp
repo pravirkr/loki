@@ -344,11 +344,46 @@ TEST_CASE("preprocess: results do not depend on the thread count",
     }
     PreprocessOptions opt;
     opt.zap_periodic = true;
-    const auto a     = run(raw, opt, 1);
-    const auto b     = run(raw, opt, 8);
-    REQUIRE(a.e == b.e);
-    REQUIRE(a.v == b.v);
-    REQUIRE(a.rep.n_masked == b.rep.n_masked);
+    opt.birdies      = {{.freq = 37.0, .width = 0.5}};
+    for (const auto mode :
+         {loki::io::ZapMode::kNoise, loki::io::ZapMode::kPhaseKept,
+          loki::io::ZapMode::kZero}) {
+        opt.zap_mode = mode;
+        const auto a = run(raw, opt, 1);
+        const auto b = run(raw, opt, 8);
+        REQUIRE(a.e == b.e);
+        REQUIRE(a.v == b.v);
+        REQUIRE(a.rep.n_masked == b.rep.n_masked);
+    }
+}
+
+TEST_CASE("preprocess: the noise zap seed follows the data",
+          "[io][preprocess]") {
+    const SizeType n = 1U << 18U;
+    auto raw         = white(n, 12);
+    PreprocessOptions opt;
+    opt.birdies  = {{.freq = 37.0, .width = 2.0}};
+    const auto a = run(raw, opt);
+    REQUIRE(a.rep.n_zapped > 0);
+    REQUIRE(run(raw, opt).e == a.e);
+    // The self-check reports the band of the window, near 1.
+    REQUIRE(a.rep.zap_bands.size() == 1);
+    REQUIRE(a.rep.zap_bands[0].f_lo == 20.0);
+    REQUIRE_THAT(a.rep.zap_bands[0].power_ratio, WithinAbs(1.0, 0.25));
+    // An explicit seed overrides the data hash.
+    opt.zap_seed  = 7;
+    const auto s7 = run(raw, opt);
+    REQUIRE(s7.e != a.e);
+    REQUIRE(run(raw, opt).e == s7.e);
+    // Other data, another fill.
+    raw[0] += 1.0F;
+    opt.zap_seed.reset();
+    const auto c     = run(raw, opt);
+    std::size_t same = 0;
+    for (SizeType i = 1000; i < 2000; ++i) {
+        same += c.e[i] == a.e[i] ? 1U : 0U;
+    }
+    REQUIRE(same < 100);
 }
 
 TEST_CASE("preprocess: robust beats z-score under non-stationary noise",

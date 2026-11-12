@@ -365,6 +365,9 @@ run_robust(RobustStages& s, double tsamp, const PreprocessOptions& o) {
     if (rep.n_masked + rep.n_clipped == n) {
         throw std::invalid_argument("preprocess: every sample is masked");
     }
+    if (rep.n_zapped > 0) {
+        rep.zap_bands = s.zap_check(tsamp, o);
+    }
     rep.longest_masked_run = longest_zero_run(s.ts_v());
     rep.global_scale       = std::sqrt(st.median_var);
     rep.norm               = c;
