@@ -21,16 +21,17 @@ namespace loki::search {
 
 namespace {
 
-/// The `n_overloads` member of a run's `level_stats` compound table, read
-/// alone (HDF5 converts a compound by member name).
-std::uint64_t sum_overloads(const HighFive::DataSet& level_stats) {
+/// The sum of one unsigned member (e.g. `n_overloads`) of a run's
+/// `level_stats` compound table, read alone (HDF5 converts a compound by
+/// member name).
+std::uint64_t sum_level_stat(const HighFive::DataSet& level_stats,
+                             const char* name) {
     const auto n = level_stats.getSpace().getElementCount();
     if (n == 0) {
         return 0;
     }
     const hid_t member = H5Tcreate(H5T_COMPOUND, sizeof(std::uint64_t));
-    if (member < 0 ||
-        H5Tinsert(member, "n_overloads", 0, H5T_NATIVE_UINT64) < 0) {
+    if (member < 0 || H5Tinsert(member, name, 0, H5T_NATIVE_UINT64) < 0) {
         throw std::runtime_error("write_run_stats: cannot build HDF5 type");
     }
     std::vector<std::uint64_t> values(n);
@@ -39,7 +40,7 @@ std::uint64_t sum_overloads(const HighFive::DataSet& level_stats) {
     H5Tclose(member);
     if (status < 0) {
         throw std::runtime_error(
-            "write_run_stats: cannot read level_stats.n_overloads");
+            fmt::format("write_run_stats: cannot read level_stats.{}", name));
     }
     std::uint64_t total = 0;
     for (const auto v : values) {
@@ -61,7 +62,12 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
     std::uint64_t n_harvested       = 0;
     std::uint64_t n_harvests_kept   = 0;
     std::uint64_t max_harvested_run = 0;
-    const auto chunks               = file.getGroup("chunks");
+    // Leaves rejected by the pulsar mask and by the impulsive veto: written
+    // when a chunk ran with RFI control, so a no-op is visible.
+    bool any_rfi           = false;
+    std::uint64_t n_masked = 0;
+    std::uint64_t n_vetoed = 0;
+    const auto chunks      = file.getGroup("chunks");
     for (const auto& chunk_name : chunks.listObjectNames()) {
         const auto chunk = chunks.getGroup(chunk_name);
         if (chunk.hasAttribute("chunk_memory_gb")) {
@@ -69,6 +75,8 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
             chunk.getAttribute("chunk_memory_gb").read(gb);
             plan_peak_memory_gb = std::max(plan_peak_memory_gb, gb);
         }
+        const bool chunk_rfi = chunk.exist("rfi_config");
+        any_rfi              = any_rfi || chunk_rfi;
         if (!chunk.exist("runs")) {
             continue;
         }
@@ -94,9 +102,14 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
             if (!run.exist("level_stats")) {
                 continue;
             }
-            const auto overloads = sum_overloads(run.getDataSet("level_stats"));
+            const auto level_stats = run.getDataSet("level_stats");
+            const auto overloads   = sum_level_stat(level_stats, "n_overloads");
             n_overloads += overloads;
             n_overloaded += overloads > 0 ? 1 : 0;
+            if (chunk_rfi) {
+                n_masked += sum_level_stat(level_stats, "n_leaves_masked");
+                n_vetoed += sum_level_stat(level_stats, "n_leaves_vetoed");
+            }
         }
     }
     out.createAttribute("n_runs", n_runs);
@@ -107,6 +120,10 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
         out.createAttribute("n_harvested", n_harvested);
         out.createAttribute("n_harvests_recorded", n_harvests_kept);
         out.createAttribute("max_harvested_per_run", max_harvested_run);
+    }
+    if (any_rfi) {
+        out.createAttribute("n_leaves_masked", n_masked);
+        out.createAttribute("n_leaves_vetoed", n_vetoed);
     }
 }
 

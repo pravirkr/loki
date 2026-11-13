@@ -865,17 +865,27 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
 }
 
 /// `search ep --plan-only`: plans the chunks, writes the plan cache and prints
-/// the plan. No timeseries is read, so the sample count comes from the config.
+/// the plan. No samples are read: the sample count and interval come from
+/// [input] nsamps and tsamp (--nsamps, --tsamp) when both are set, else from
+/// the header of the input timeseries.
 int run_plan_ep(loki::search::EPTomlConfig toml_cfg,
                 bool clamp_default_runs = false) {
     check_frequency_range(toml_cfg);
     toml_cfg.check_rfi_backend();
     const loki::Exec exec = search_exec(toml_cfg);
+    if ((!toml_cfg.nsamps.has_value() || !toml_cfg.tsamp.has_value()) &&
+        !toml_cfg.timeseries_path.empty() &&
+        std::filesystem::exists(toml_cfg.timeseries_path)) {
+        const auto dims = dry_run_dims(toml_cfg);
+        toml_cfg.nsamps = dims.nsamps;
+        toml_cfg.tsamp  = dims.tsamp;
+    }
     if (!toml_cfg.nsamps.has_value() || !toml_cfg.tsamp.has_value()) {
         throw std::invalid_argument(
-            "--plan-only needs the sample count and interval: set [input] "
-            "nsamps and tsamp, or pass --nsamps and --tsamp (the plan depends "
-            "on nsamps)");
+            "--plan-only needs the sample count and interval: pass an input "
+            "timeseries (-i, its header is read), set [input] nsamps and "
+            "tsamp, or pass --nsamps and --tsamp (the plan depends on "
+            "nsamps)");
     }
     const auto cfg =
         toml_cfg.to_ep_search_config(*toml_cfg.nsamps, *toml_cfg.tsamp);
@@ -1994,10 +2004,11 @@ int main(int argc, char** argv) {
                           "zscore: width of the short series used by "
                           "--fast-median");
     ep_grp_io->add_option("--nsamps", ep_cfg.nsamps,
-                          "Sample count, for --plan-only (a search reads it "
-                          "from the timeseries)");
+                          "Sample count, for --plan-only without an input "
+                          "(otherwise read from the input's header)");
     ep_grp_io->add_option("--tsamp", ep_cfg.tsamp,
-                          "Sample interval in seconds, for --plan-only");
+                          "Sample interval in seconds, for --plan-only "
+                          "without an input");
     ep_grp_io->add_flag("--no-plan-cache", ep_no_plan_cache,
                         "Disable automatic EP plan caching");
     ep_grp_io->add_option("--plan-cache", ep_plan_cache_path,
@@ -2201,7 +2212,7 @@ int main(int argc, char** argv) {
                  "data");
     ep->add_flag("--plan-only", ep_plan_only,
                  "Plan the chunks, write the plan cache and print the plan; "
-                 "reads no data");
+                 "reads no samples");
 
     // =========================================================================
     // Subcommand: inspect

@@ -372,10 +372,16 @@ TEST_CASE("EPFreqSweep without RFI control records no rfi_config",
     EPFreqSweep sweep(cfg, false, 0.1F, "taylor", 0.1F, PruneRFIConfig{},
                       std::nullopt, std::nullopt, std::vector<SizeType>{4U});
     sweep.execute(ts_e, ts_v, outdir.path(), "off");
+    loki::search::write_run_stats(outdir / "off_ep_results.h5",
+                                  loki::search::RunStats{});
     const HighFive::File h5((outdir / "off_ep_results.h5").string(),
                             HighFive::File::ReadOnly);
     const auto chunk = h5.getGroup("chunks/chunk_0000");
     CHECK_FALSE(chunk.exist("rfi_config"));
+    // The RFI counters are written only for an RFI-controlled sweep.
+    const auto stats = h5.getGroup("run_stats");
+    CHECK_FALSE(stats.hasAttribute("n_leaves_masked"));
+    CHECK_FALSE(stats.hasAttribute("n_leaves_vetoed"));
     const auto runs = chunk.getGroup("runs");
     for (const auto& run : runs.listObjectNames()) {
         CHECK_FALSE(runs.exist(run + "/harvest"));
@@ -559,4 +565,8 @@ TEST_CASE("EP candidates publish an RFI-controlled sweep",
           n_harvested);
     CHECK(stats.getAttribute("max_harvested_per_run").read<std::uint64_t>() >=
           1);
+    // The masked source's leaves are counted; the veto total is written even
+    // when nothing was vetoed, so a no-op is distinguishable.
+    CHECK(stats.getAttribute("n_leaves_masked").read<std::uint64_t>() >= 1);
+    CHECK(stats.hasAttribute("n_leaves_vetoed"));
 }

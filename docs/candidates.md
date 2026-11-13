@@ -576,6 +576,7 @@ scheduling, not search results, and change from run to run:
 | `peak_rss_gb` | Peak resident set size of the process, GB of 2^30 bytes (`getrusage` `ru_maxrss`) |
 | `n_runs`, `n_runs_overloaded`, `n_overloads` | EP: runs, runs with at least one world-tree overload, and overloads summed over `level_stats` |
 | `n_harvested`, `n_harvests_recorded`, `max_harvested_per_run` | EP with `[ep.rfi]` harvesting only: harvests over all runs (including those beyond `max_harvests`), the records kept, and the most harvests of one run |
+| `n_leaves_masked`, `n_leaves_vetoed` | EP with an active `[ep.rfi]` only: leaves rejected by the pulsar mask (and harvest masks) and by the impulsive veto, over all levels and runs; zero means the mechanism never triggered |
 | `plan_peak_memory_gb` | EP: the largest chunk `chunk_memory_gb` of the plan (device memory on CUDA) |
 | `leaves_dropped` | Trials the candidate reduction dropped: root `n_cell_dropped` plus `n_dominated` |
 | `max_cell_dropped_snr` | EP: the highest S/N the cell cap dropped in any run (runs' `max_cell_dropped_snr`) |
