@@ -1,0 +1,101 @@
+name: CUDA on simulated H100
+
+# The main CI builds with LOKI_CUDA=OFF because the hosted runners have no
+# GPU, so the CUDA backend and its tests never run there. This job builds loki
+# with CUDA and runs the C++ tests on a simulated NVIDIA H100
+# (https://github.com/pantheongpu/pantheonsim). A simulator cannot reproduce
+# hardware-specific behavior or timing, so it complements real-GPU testing and
+# does not replace it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "include/**"
+      - "lib/**"
+      - "tests/cpp/**"
+      - "cmake/**"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
+
+jobs:
+  cuda-sim:
+    name: CUDA 13.0 on simulated H100
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated H100 and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@68edfd58c091361dd6baf060b63de412e544d858 # v0.1.7
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build libhdf5-dev libomp-dev
+
+      # Reuses the CPM cache that the main CI saves; this job never writes it.
+      - name: Restore CPM dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/LokiDependencies.cmake', 'cmake/CPM.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      # The simulator needs the shared CUDA runtime. CMakeLists.txt sets
+      # CMAKE_CUDA_RUNTIME_LIBRARY with a plain set(), which a -D cannot
+      # override, so this switches it (and the cudart_static link in
+      # lib/CMakeLists.txt) to the shared form in the runner's checkout only.
+      # sm_90 builds embed compute_90 PTX, which the simulator runs.
+      - name: Configure
+        run: |
+          sed -i 's/set(CMAKE_CUDA_RUNTIME_LIBRARY Static)/set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)/' CMakeLists.txt
+          sed -i 's/CUDA::cudart_static/CUDA::cudart/' lib/CMakeLists.txt
+          git diff --stat
+          cmake --preset ci \
+            -D LOKI_CUDA=ON \
+            -D LOKI_CUDA_ARCHITECTURES=90 \
+            -D LOKI_FORCE_CURAND_RNG=ON \
+            -D CMAKE_CUDA_COMPILER=/usr/local/cuda-13.0/bin/nvcc \
+            -D CUDAToolkit_ROOT=/usr/local/cuda-13.0
+
+      - name: Build
+        run: cmake --build --preset ci --parallel 3
+
+      # Runs every test labelled cuda (the CUDA kernels, the CPU/CUDA parity
+      # checks and the CUDA workspace tests). Excluded: the CUDA window-beam
+      # test, which takes about 4 minutes on a real GPU and over 25 minutes on
+      # the simulator, and "Fused EP shift-add + score matches the unfused
+      # chain", which hits a simulator bug (an out-of-bounds shared-memory
+      # read in the sm_90 code; it passes on a real GPU). A CUDA test that
+      # skips (SKIP() in a build without CUDA) fails the step, so a broken
+      # CUDA build cannot pass as green.
+      - name: Test on the simulated H100
+        run: |
+          set -o pipefail
+          vgpu run --gpu nvidia/h100 ctest --preset ci -L cuda -j2 \
+            -E '^(Window beam resolves issue #15 on CUDA|Fused EP shift-add \+ score matches the unfused chain)' \
+            | tee ctest.log
+          if grep -q 'Skipped' ctest.log; then
+            echo "::error::CUDA tests were skipped"
+            exit 1
+          fi
