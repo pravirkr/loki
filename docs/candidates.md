@@ -235,9 +235,19 @@ them. Harvested leaves are not detections. They are referenced at the
 harvesting level's `t_ref`, not at the midpoint, their score is a partial
 S/N, and they have no winning width, so they stay out of `/detections`,
 `/clusters` and `/candidates` and remain in each run's `harvest` group of the
-result (copied whole, also when the run's final leaves are reduced). Review
-them there: a strong
-source is usually harvested once per run and chunk.
+result (copied whole, also when the run's final leaves are reduced). A
+strong source is usually harvested once per run and chunk.
+
+So that a harvested source is not missed, the result also has a
+`/harvested` table, with or without common candidates: one row per source,
+merging the records whose harvest windows overlap in frequency, strongest
+first. Each row holds the strongest record's `param_sets` and
+`param_errors` (at its `t_ref`), `snr` (its partial S/N, not comparable
+with detection S/N), `level`, `seg_idx`, `t_ref`, the merged window
+`f_lo`/`f_hi`, `n_records` and `n_runs` (how many records and runs saw the
+source) and `run` (where the strongest record is). Harmonics of a source are
+separate rows. The search summary and `loki inspect` list these sources,
+and `/run_stats` counts them (`n_harvested_sources`).
 
 ### Folding a leaf with loki's own model
 
@@ -582,6 +592,7 @@ scheduling, not search results, and change from run to run:
 | `peak_rss_gb` | Peak resident set size of the process, GB of 2^30 bytes (`getrusage` `ru_maxrss`) |
 | `n_runs`, `n_runs_overloaded`, `n_overloads` | EP: runs, runs with at least one world-tree overload, and overloads summed over `level_stats` |
 | `n_harvested`, `n_harvests_recorded`, `max_harvested_per_run` | EP with `[ep.rfi]` harvesting only: harvests over all runs (including those beyond `max_harvests`), the records kept, and the most harvests of one run |
+| `n_harvested_sources` | EP results with a `/harvested` table: its rows (sources removed by early harvest) |
 | `n_leaves_masked`, `n_leaves_vetoed` | EP with an active `[ep.rfi]` only: leaves rejected by the pulsar mask (and harvest masks) and by the impulsive veto, over all levels and runs; zero means the mechanism never triggered |
 | `plan_peak_memory_gb` | EP: the largest chunk `chunk_memory_gb` of the plan (device memory on CUDA) |
 | `leaves_dropped` | Trials the candidate reduction dropped: root `n_cell_dropped` plus `n_dominated` |
@@ -610,8 +621,10 @@ at the next record or batch. A run stopped after its search finished keeps
 `loki inspect` summarises a result file without Python: the run metadata
 (input, nsamps, tsamp, tobs, searched ranges, version, the command line
 and the effective configuration, or the raw `config_toml` when a file
-predates provenance) and the top candidates by S/N. It reads the common schema,
-flat FFA files (`--no-candidates`) and raw EP runs.
+predates provenance) and the top candidates by S/N, then the sources removed
+by early harvest when the file has a `/harvested` table (their partial S/N,
+harvest level and run count; `harvested` in `--json`). It reads the common
+schema, flat FFA files (`--no-candidates`) and raw EP runs.
 
 ```bash
 loki inspect trial_ffa_results.h5            # top 10 candidates

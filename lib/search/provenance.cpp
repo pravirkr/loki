@@ -121,6 +121,14 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
         out.createAttribute("n_harvests_recorded", n_harvests_kept);
         out.createAttribute("max_harvested_per_run", max_harvested_run);
     }
+    if (file.exist("harvested")) {
+        std::uint64_t n_sources = 0;
+        const auto harvested    = file.getGroup("harvested");
+        if (harvested.hasAttribute("n_sources")) {
+            harvested.getAttribute("n_sources").read(n_sources);
+        }
+        out.createAttribute("n_harvested_sources", n_sources);
+    }
     if (any_rfi) {
         out.createAttribute("n_leaves_masked", n_masked);
         out.createAttribute("n_leaves_vetoed", n_vetoed);

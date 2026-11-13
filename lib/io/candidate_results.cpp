@@ -30,6 +30,7 @@
 
 #include "lib/detail/utils.hpp"
 #include "lib/search/candidate_processing.hpp"
+#include "lib/search/harvested.hpp"
 
 namespace loki::io::detail {
 namespace {
@@ -1152,6 +1153,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 copy_ep_chunks(raw, result, progress, sources, reductions,
                                options, snr_min);
                 copy_attributes(raw.getGroup("/"), result, true);
+                search::write_harvested(result);
                 config.createAttribute("snr_min", snr_min);
                 config.createAttribute(
                     "width_policy",

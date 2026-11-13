@@ -1047,6 +1047,22 @@ void print_ep_summary(const std::filesystem::path& result_file) {
             rows.emplace_back("Top candidate",
                               "none: the pruning wrote no leaves");
         }
+        // Early-harvested sources are not in the candidate tables.
+        if (h5.exist("harvested/snr")) {
+            std::vector<float> h_snr;
+            h5.getDataSet("harvested/snr").read(h_snr);
+            if (!h_snr.empty()) {
+                std::vector<double> h_par(n_params);
+                h5.getDataSet("harvested/param_sets")
+                    .select({0, 0}, {1, n_params})
+                    .read_raw(h_par.data());
+                rows.emplace_back(
+                    "Harvested sources",
+                    fmt::format("{} (strongest: f = {:.6f} Hz, partial S/N "
+                                "{:.1f}); see /harvested",
+                                h_snr.size(), h_par.back(), h_snr.front()));
+            }
+        }
         loki::cli::Console::get().summary("Search Summary", rows);
         SPDLOG_INFO("Saved HDF5 results to: {}", result_file.string());
     } catch (const std::exception& e) {
@@ -1393,6 +1409,26 @@ std::string inspect_json(const loki::io::CandidateFileSummary& s,
             i == 0 ? "" : ",", i + 1, row.row, json_number(row.snr), params,
             row.width, row.nbins, json_string(row.source));
     }
+    if (s.n_harvested_sources > 0) {
+        std::string harvested;
+        for (std::size_t i = 0; i < s.harvested.size(); ++i) {
+            const auto& row = s.harvested[i];
+            std::string params;
+            for (std::size_t p = 0; p < row.params.size(); ++p) {
+                params += fmt::format("{}{}: {}", p == 0 ? "" : ", ",
+                                      json_string(s.param_names[p]),
+                                      json_number(row.params[p]));
+            }
+            harvested += fmt::format(
+                "{}\n    {{\"rank\": {}, \"partial_snr\": {}, \"params\": "
+                "{{{}}}, \"source\": {}}}",
+                i == 0 ? "" : ",", i + 1, json_number(row.snr), params,
+                json_string(row.source));
+        }
+        field("n_harvested_sources", fmt::format("{}", s.n_harvested_sources));
+        field("harvested",
+              harvested.empty() ? "[]" : "[" + harvested + "\n  ]");
+    }
     field("top_candidates", rows.empty() ? "[]" : "[" + rows + "\n  ]",
           !with_profile);
     if (with_profile) {
@@ -1577,6 +1613,29 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
                 }
             }
             out += "\n";
+        }
+    }
+
+    if (s.n_harvested_sources > 0) {
+        out += "\n" +
+               con.heading(fmt::format(
+                   "Harvested sources ({} of {}; partial S/N at the harvest "
+                   "level)",
+                   s.harvested.size(), s.n_harvested_sources)) +
+               "\n";
+        for (std::size_t i = 0; i < s.harvested.size(); ++i) {
+            const auto& row = s.harvested[i];
+            std::string params;
+            for (std::size_t p = 0; p < row.params.size(); ++p) {
+                params +=
+                    fmt::format("{}{} {}", p == 0 ? "" : ", ",
+                                param_label(s.param_names[p]),
+                                format_param(s.param_names[p], row.params[p]));
+            }
+            out += fmt::format("  {:>3}  {}  {}  {}\n",
+                               con.muted(fmt::format("{}", i + 1)),
+                               con.score(fmt::format("{:6.2f}", row.snr)),
+                               params, con.muted(row.source));
         }
     }
 

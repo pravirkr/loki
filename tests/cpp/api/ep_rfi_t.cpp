@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <random>
@@ -19,6 +20,7 @@
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/candidate_file.hpp"
 #include "loki/pipelines/ep_freq_sweep.hpp"
 #include "loki/search/candidates.hpp"
 #include "loki/search/configs.hpp"
@@ -388,6 +390,8 @@ TEST_CASE("EPFreqSweep without RFI control records no rfi_config",
     const auto stats = h5.getGroup("run_stats");
     CHECK_FALSE(stats.hasAttribute("n_leaves_masked"));
     CHECK_FALSE(stats.hasAttribute("n_leaves_vetoed"));
+    CHECK_FALSE(h5.exist("harvested"));
+    CHECK_FALSE(stats.hasAttribute("n_harvested_sources"));
     const auto runs = chunk.getGroup("runs");
     for (const auto& run : runs.listObjectNames()) {
         CHECK_FALSE(runs.exist(run + "/harvest"));
@@ -480,6 +484,25 @@ TEST_CASE("EPFreqSweep masks, harvests and vetoes on the CPU",
     }));
     CHECK(near(leaves, kHarvested, 0.05) < 10.0F);
     CHECK(near(leaves, kMasked, 0.05) < 10.0F);
+
+    // The result lists the harvested source once, merged over its runs.
+    REQUIRE(h5.exist("harvested"));
+    std::vector<double> h_params;
+    std::vector<float> h_snr;
+    std::vector<std::uint64_t> h_records;
+    h5.getDataSet("harvested/snr").read(h_snr);
+    h5.getDataSet("harvested/n_records").read(h_records);
+    REQUIRE_FALSE(h_snr.empty());
+    const auto h_dims = h5.getDataSet("harvested/param_sets").getDimensions();
+    h_params.resize(h_dims[0] * h_dims[1]);
+    h5.getDataSet("harvested/param_sets").read_raw(h_params.data());
+    CHECK(std::abs(h_params[h_dims[1] - 1] - kHarvested) < 0.05);
+    CHECK(std::ranges::is_sorted(h_snr, std::greater<>{}));
+    std::uint64_t total = 0;
+    for (const auto r : h_records) {
+        total += r;
+    }
+    CHECK(total == harvested_f.size());
 }
 
 namespace {
@@ -575,4 +598,17 @@ TEST_CASE("EP candidates publish an RFI-controlled sweep",
     // when nothing was vetoed, so a no-op is distinguishable.
     CHECK(stats.getAttribute("n_leaves_masked").read<std::uint64_t>() >= 1);
     CHECK(stats.hasAttribute("n_leaves_vetoed"));
+    // Harvested sources reach the published product and its summary.
+    REQUIRE(h5.exist("harvested"));
+    const auto n_sources = h5.getGroup("harvested")
+                               .getAttribute("n_sources")
+                               .read<std::uint64_t>();
+    CHECK(n_sources >= 1);
+    CHECK(stats.getAttribute("n_harvested_sources").read<std::uint64_t>() ==
+          n_sources);
+    const auto summary = loki::io::read_candidate_file_summary(product, 5);
+    CHECK(summary.n_harvested_sources == n_sources);
+    REQUIRE_FALSE(summary.harvested.empty());
+    CHECK(std::abs(summary.harvested.front().params.back() - kHarvested) <
+          0.05);
 }

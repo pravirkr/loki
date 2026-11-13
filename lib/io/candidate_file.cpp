@@ -447,6 +447,52 @@ void read_ep_runs(const HighFive::File& file,
     }
 }
 
+/// The strongest @p top_n rows of `/harvested` (already sorted by S/N).
+void read_harvested(const HighFive::File& file,
+                    CandidateFileSummary& out,
+                    std::size_t top_n) {
+    if (!file.exist("harvested")) {
+        return;
+    }
+    const auto g = file.getGroup("harvested");
+    if (!g.exist("snr") || !g.exist("param_sets")) {
+        return;
+    }
+    std::vector<float> snr;
+    g.getDataSet("snr").read(snr);
+    out.n_harvested_sources = snr.size();
+    const auto nparams      = out.param_names.size();
+    const auto dims         = g.getDataSet("param_sets").getDimensions();
+    if (snr.empty() || dims.size() != 2 || dims[1] != nparams) {
+        return;
+    }
+    const auto n = std::min(top_n, snr.size());
+    std::vector<double> params(n * nparams);
+    g.getDataSet("param_sets")
+        .select({0, 0}, {n, nparams})
+        .read_raw(params.data());
+    std::vector<std::uint64_t> level(snr.size(), 0);
+    std::vector<std::uint64_t> n_runs(snr.size(), 0);
+    if (g.exist("level")) {
+        g.getDataSet("level").read(level);
+    }
+    if (g.exist("n_runs")) {
+        g.getDataSet("n_runs").read(n_runs);
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        CandidateRow row{.row    = i,
+                         .params = {params.begin() + (i * nparams),
+                                    params.begin() + ((i + 1) * nparams)},
+                         .snr    = snr[i],
+                         .width  = 0,
+                         .nbins  = 0,
+                         .source =
+                             fmt::format("level {}, {} run{}", level[i],
+                                         n_runs[i], n_runs[i] == 1 ? "" : "s")};
+        out.harvested.push_back(std::move(row));
+    }
+}
+
 } // namespace
 
 CandidateFileSummary
@@ -485,6 +531,7 @@ read_candidate_file_summary(const std::filesystem::path& path,
                 "not a Loki FFA or EP result file (no schema_version, "
                 "ffa_version or ep_sweep_version)");
         }
+        read_harvested(file, out, top_n);
     } catch (const HighFive::Exception& e) {
         throw std::runtime_error(
             fmt::format("cannot read {}: {}", path.string(), e.what()));

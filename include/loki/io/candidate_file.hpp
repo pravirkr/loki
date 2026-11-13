@@ -80,6 +80,12 @@ struct CandidateFileSummary {
     /// table, signal over the root of its variance), when the file stores
     /// one. Current searches do not.
     std::optional<std::vector<float>> top_profile;
+    /// Sources removed by early harvest (EP with [ep.rfi], table
+    /// `/harvested`): how many, and the strongest @p top_n. Their `snr` is a
+    /// partial S/N at the harvest level and `params` are at the record's
+    /// t_ref; `source` names the level and the number of runs.
+    std::uint64_t n_harvested_sources{};
+    std::vector<CandidateRow> harvested;
 };
 
 /// Reads the metadata and the @p top_n best rows of @p path. Throws

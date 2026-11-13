@@ -18,6 +18,7 @@
 #include "loki/search/configs.hpp"
 
 #include "lib/algorithms/ep_memory.hpp"
+#include "lib/search/harvested.hpp"
 
 namespace loki::pipelines::detail {
 
@@ -150,6 +151,9 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
         }
     }
 
+    if (copy_rfi_config) {
+        search::write_harvested(main_h5);
+    }
     main_h5.getAttribute("total_pruning_gflops").write(accumulated_flops);
     main_h5.getAttribute("complete").write(1);
     return accumulated_flops;
