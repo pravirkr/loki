@@ -78,6 +78,7 @@ the FFA and EP workloads and the comparison tools).
 | Occupancy tuning | Rejected by the portability rule |
 | Writing 3-D `folds_out` for non-direct batches | At production scale (2^25, jerk, 16 runs) all 2219 batches were direct and none non-direct |
 | Hoisting `PruneCUDAImpl` across chunks | Constructor 0.4–1.4 ms per chunk against 90–330 ms of pruning; it also depends on the chunk's grid and steps, so a hoist needs a re-initialise API |
+| Per-chunk CUDA batch ladder (halve only the batch of a chunk whose minimum width does not fit; the planner halves one batch cap for every chunk) | Plans that fit were unchanged, and a circular search that the global ladder took to batch 8 kept 51 of 54 chunks at their default batch. But a lowered chunk stops at the first batch at which its minimum width fits, so it is barely wider than the minimum: a full-band jerk search (2^26 samples, 1.5 GB) planned 191 chunks at batches 4096-32768 against 98 at 4096, and pruned in 37.6 s against 30.0 s (wall 46.1 against 35.8 s); a tighter circular plan had 531 chunks against 110 and planned in 1297 s against 297 s. Narrow chunks repeat the per-chunk setup and the `2 · max_drift · f` overlap. A fix needs the batch and the width chosen together from the search cost (deferred) |
 
 ### EP on CPU
 
