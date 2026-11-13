@@ -56,7 +56,12 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
     std::uint64_t n_overloaded = 0;
     std::uint64_t n_overloads  = 0;
     double plan_peak_memory_gb = 0.0;
-    const auto chunks          = file.getGroup("chunks");
+    // Harvests ([ep.rfi]): written only when a run has a harvest group.
+    bool any_harvest                = false;
+    std::uint64_t n_harvested       = 0;
+    std::uint64_t n_harvests_kept   = 0;
+    std::uint64_t max_harvested_run = 0;
+    const auto chunks               = file.getGroup("chunks");
     for (const auto& chunk_name : chunks.listObjectNames()) {
         const auto chunk = chunks.getGroup(chunk_name);
         if (chunk.hasAttribute("chunk_memory_gb")) {
@@ -71,6 +76,21 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
         for (const auto& run_name : runs.listObjectNames()) {
             const auto run = runs.getGroup(run_name);
             ++n_runs;
+            if (run.exist("harvest")) {
+                const auto harvest  = run.getGroup("harvest");
+                std::uint64_t total = 0;
+                if (harvest.hasAttribute("n_harvested_total")) {
+                    harvest.getAttribute("n_harvested_total").read(total);
+                }
+                any_harvest = true;
+                n_harvested += total;
+                max_harvested_run = std::max(max_harvested_run, total);
+                if (harvest.exist("scores")) {
+                    n_harvests_kept += harvest.getDataSet("scores")
+                                           .getSpace()
+                                           .getElementCount();
+                }
+            }
             if (!run.exist("level_stats")) {
                 continue;
             }
@@ -83,6 +103,11 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
     out.createAttribute("n_runs_overloaded", n_overloaded);
     out.createAttribute("n_overloads", n_overloads);
     out.createAttribute("plan_peak_memory_gb", plan_peak_memory_gb);
+    if (any_harvest) {
+        out.createAttribute("n_harvested", n_harvested);
+        out.createAttribute("n_harvests_recorded", n_harvests_kept);
+        out.createAttribute("max_harvested_per_run", max_harvested_run);
+    }
 }
 
 /// FNV-1a, 64 bit: a stable hash of the effective configuration text, to

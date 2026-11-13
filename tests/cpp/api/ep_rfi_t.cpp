@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <optional>
@@ -19,7 +20,9 @@
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/pipelines/ep_freq_sweep.hpp"
+#include "loki/search/candidates.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/search/provenance.hpp"
 
 #include "temp_dir.hpp"
 
@@ -29,6 +32,7 @@ using loki::algorithms::HarvestDefaults;
 using loki::algorithms::make_default_harvest_scheme;
 using loki::algorithms::PruneRFIConfig;
 using loki::pipelines::EPFreqSweep;
+using loki::search::CandidateOptions;
 using loki::search::EPRFIOptions;
 using loki::search::EPTomlConfig;
 using loki::search::PulsarSearchConfig;
@@ -425,7 +429,7 @@ TEST_CASE("EPFreqSweep masks, harvests and vetoes on the CPU",
     PruneRFIConfig rfi;
     rfi.pulsar_mask.push_back({.f_lo = kMasked - 0.05, .f_hi = kMasked + 0.05});
     rfi.harvest_defaults =
-        HarvestDefaults{.min_level = 2, .offset = 6.0F, .min_snr = 12.0F};
+        HarvestDefaults{.min_level = 4, .offset = 6.0F, .min_snr = 25.0F};
     rfi.impulsive_veto = true;
     const TempDir outdir("loki-ep-rfi-on");
     EPFreqSweep sweep(cfg, false, 0.1F, "taylor", 0.1F, rfi, std::nullopt,
@@ -464,4 +468,95 @@ TEST_CASE("EPFreqSweep masks, harvests and vetoes on the CPU",
     }));
     CHECK(near(leaves, kHarvested, 0.05) < 10.0F);
     CHECK(near(leaves, kMasked, 0.05) < 10.0F);
+}
+
+namespace {
+
+/// The strongest detection of a published product within @p tol of @p f.
+float best_detection(const HighFive::File& h5, double f, double tol) {
+    const auto table = h5.getGroup("detections");
+    const auto dims  = table.getDataSet("param_sets").getDimensions();
+    std::vector<float> snr;
+    table.getDataSet("snr").read(snr);
+    std::vector<double> params(dims[0] * dims[1]);
+    if (dims[0] != 0) {
+        table.getDataSet("param_sets").read_raw(params.data());
+    }
+    float best = 0.0F;
+    for (std::size_t i = 0; i < dims[0]; ++i) {
+        const double freq = params[(i * dims[1]) + dims[1] - 1];
+        if (std::abs(freq - f) <= tol) {
+            best = std::max(best, snr[i]);
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+TEST_CASE("EP candidates publish an RFI-controlled sweep",
+          "[ep_freq_sweep][rfi][candidates]") {
+    constexpr double kHarvested = 141.0;
+    constexpr double kMasked    = 143.5;
+    constexpr double kKept      = 142.3;
+    const auto cfg              = make_sweep_cfg(140.0, 145.0);
+    const auto [ts_e, ts_v] =
+        make_series(cfg.get_nsamps(), cfg.get_tsamp(),
+                    {{kHarvested, 1.0F}, {kMasked, 1.0F}, {kKept, 0.35F}});
+    auto options      = CandidateOptions::ep_defaults();
+    options.memory_gb = 0.25;
+
+    const auto publish = [&](const PruneRFIConfig& rfi, const TempDir& dir) {
+        EPFreqSweep sweep(cfg, options, false, 0.1F, "taylor", 0.1F, rfi,
+                          std::nullopt, std::nullopt,
+                          std::vector<SizeType>{2U, 4U});
+        sweep.execute(ts_e, ts_v, dir.path(), "c");
+        return dir / "c_ep_results.h5";
+    };
+
+    const TempDir ref_dir("loki-ep-rfi-cand-ref");
+    const HighFive::File ref(publish(PruneRFIConfig{}, ref_dir).string(),
+                             HighFive::File::ReadOnly);
+    REQUIRE(best_detection(ref, kHarvested, 0.05) > 20.0F);
+    REQUIRE(best_detection(ref, kMasked, 0.05) > 20.0F);
+    const float kept_ref = best_detection(ref, kKept, 0.05);
+    REQUIRE(kept_ref > 8.0F);
+
+    PruneRFIConfig rfi;
+    rfi.pulsar_mask.push_back({.f_lo = kMasked - 0.05, .f_hi = kMasked + 0.05});
+    rfi.harvest_defaults =
+        HarvestDefaults{.min_level = 4, .offset = 6.0F, .min_snr = 25.0F};
+    rfi.impulsive_veto = true;
+    const TempDir dir("loki-ep-rfi-cand");
+    const auto product = publish(rfi, dir);
+    loki::search::write_run_stats(product, loki::search::RunStats{});
+    const HighFive::File h5(product.string(), HighFive::File::ReadOnly);
+    REQUIRE(h5.exist("candidates"));
+    // The bright sources are gone from the detections, the weak one stays.
+    CHECK(best_detection(h5, kHarvested, 0.05) < 10.0F);
+    CHECK(best_detection(h5, kMasked, 0.05) < 10.0F);
+    CHECK(best_detection(h5, kKept, 0.05) > 0.8F * kept_ref);
+    // Every run keeps its harvests, with at least one at the bright source.
+    SizeType n_runs      = 0;
+    SizeType n_harvested = 0;
+    const auto chunks    = h5.getGroup("chunks");
+    for (const auto& chunk : chunks.listObjectNames()) {
+        CHECK(chunks.exist(chunk + "/rfi_config"));
+        const auto runs = chunks.getGroup(chunk + "/runs");
+        for (const auto& run : runs.listObjectNames()) {
+            ++n_runs;
+            REQUIRE(runs.exist(run + "/harvest"));
+            n_harvested +=
+                runs.getDataSet(run + "/harvest/scores").getDimensions().at(0);
+        }
+    }
+    CHECK(n_runs == 2);
+    CHECK(n_harvested >= 2);
+    const auto stats = h5.getGroup("run_stats");
+    CHECK(stats.getAttribute("n_harvests_recorded").read<std::uint64_t>() ==
+          n_harvested);
+    CHECK(stats.getAttribute("n_harvested").read<std::uint64_t>() >=
+          n_harvested);
+    CHECK(stats.getAttribute("max_harvested_per_run").read<std::uint64_t>() >=
+          1);
 }

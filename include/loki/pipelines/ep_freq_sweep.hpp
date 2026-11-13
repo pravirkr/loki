@@ -60,7 +60,9 @@ public:
         Exec exec                                     = {});
 
     /// Publish common candidates after all independent runs have finished.
-    /// Currently supports polynomial Taylor with an inactive RFI config.
+    /// Currently supports polynomial Taylor. With an active @p rfi_config
+    /// (CPU), the final leaves are published as usual and each run's
+    /// harvested leaves stay in its `harvest` group (docs/candidates.md).
     explicit EPFreqSweep(
         const search::PulsarSearchConfig& cfg,
         const search::CandidateOptions& candidates,

@@ -440,10 +440,6 @@ std::vector<EPSource> ep_sources(const HighFive::File& file,
         for (const auto& run : runs) {
             const auto run_path = path + "/runs/" + run;
             const auto group    = file.getGroup(run_path);
-            if (group.exist("harvest")) {
-                throw std::invalid_argument(
-                    "EP candidate publication requires RFI disabled");
-            }
             bytes += 2 * (sizeof(EPSource) + run_path.size() + 1);
             if (static_cast<double>(bytes) >
                 options.memory_gb * utils::kBytesPerGB / 8) {

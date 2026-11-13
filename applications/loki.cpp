@@ -1131,12 +1131,6 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     check_frequency_range(toml_cfg);
     // Before any data is read, in a dry run too.
     toml_cfg.check_rfi_backend();
-    if (toml_cfg.rfi && toml_cfg.rfi->is_active() &&
-        toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor") {
-        throw std::invalid_argument(
-            "[ep.rfi] does not work with common EP candidates yet: add "
-            "--no-candidates (or set [candidates] enabled = false)");
-    }
     const loki::Exec exec = search_exec(toml_cfg);
     if (dry_run) {
         const auto dims = dry_run_dims(toml_cfg);
@@ -1965,6 +1959,7 @@ int main(int argc, char** argv) {
     std::optional<bool> ep_harvest;
     std::optional<bool> ep_impulsive_veto;
     std::optional<float> ep_harvest_min_snr;
+    std::optional<float> ep_harvest_offset;
     std::vector<std::string> ep_pulsar_mask;
 
     std::string ep_preproc_method;
@@ -2162,6 +2157,9 @@ int main(int argc, char** argv) {
     ep_grp_rfi->add_option("--harvest-min-snr", ep_harvest_min_snr,
                            "Lowest harvest threshold (ep.rfi.harvest_min_snr, "
                            "default: 15)");
+    ep_grp_rfi->add_option("--harvest-offset", ep_harvest_offset,
+                           "Harvest threshold above the pruning threshold "
+                           "(ep.rfi.harvest_offset, default: 10)");
     ep_grp_rfi->add_flag("--impulsive-veto,!--no-impulsive-veto",
                          ep_impulsive_veto,
                          "Impulsive-segment veto (ep.rfi.impulsive_veto)");
@@ -2265,7 +2263,7 @@ int main(int argc, char** argv) {
         ep_cfg.ref_segs = ep_ref_segs;
     }
     if (!ep_pulsar_mask.empty() || ep_harvest || ep_impulsive_veto ||
-        ep_harvest_min_snr) {
+        ep_harvest_min_snr || ep_harvest_offset) {
         auto& rfi = ep_cfg.rfi ? *ep_cfg.rfi : ep_cfg.rfi.emplace();
         if (!ep_pulsar_mask.empty()) {
             try {
@@ -2280,6 +2278,9 @@ int main(int argc, char** argv) {
         }
         if (ep_harvest_min_snr) {
             rfi.harvest_min_snr = *ep_harvest_min_snr;
+        }
+        if (ep_harvest_offset) {
+            rfi.harvest_offset = *ep_harvest_offset;
         }
         if (ep_impulsive_veto) {
             rfi.impulsive_veto = *ep_impulsive_veto;

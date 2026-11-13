@@ -207,7 +207,9 @@ impulsive_min_snr = 8.0
 
 A level's harvest threshold is `max(harvest_min_snr, threshold + harvest_offset)`
 from `harvest_min_level` on, built for each chunk from that chunk's own
-pruning threshold scheme. The chunk records it in
+pruning threshold scheme. Any source whose partial S/N crosses it is removed,
+a real pulsar as well as RFI, so set `harvest_min_snr` above the S/N of the
+weakest source you want to keep as a candidate. The chunk records it in
 `/chunks/<chunk>/rfi_config/harvest_scheme`, with the other settings as
 attributes and the mask as `pulsar_mask` (`f_lo, f_hi, a_lo, a_hi` rows). A
 harvested leaf is removed from the tree and its neighbourhood (the leaf's tile
@@ -218,11 +220,18 @@ referenced at `t_ref`, the reference time of the level that harvested them),
 `scores` (the partial S/N at that level), `levels`, `seg_idx`, `t_ref`, and
 `folds` when `harvest_store_folds` is on; `n_harvested_total` counts harvests
 beyond `max_harvests` too. The command line sets `--pulsar-mask F_LO:F_HI`
-(repeatable), `--harvest/--no-harvest`, `--harvest-min-snr` and
+(repeatable), `--harvest/--no-harvest`, `--harvest-min-snr`, `--harvest-offset` and
 `--impulsive-veto/--no-impulsive-veto`.
 
-Common candidates do not yet accept an active `[ep.rfi]`: run such a search
-with `--no-candidates` (`[candidates] enabled = false`).
+Common candidates work with an active `[ep.rfi]`. The final leaves are
+published as usual: a masked, vetoed or harvested source no longer reaches
+them. Harvested leaves are not detections. They are referenced at the
+harvesting level's `t_ref`, not at the midpoint, their score is a partial
+S/N, and they have no winning width, so they stay out of `/detections`,
+`/clusters` and `/candidates` and remain in each run's `harvest` group of the
+result (copied whole, also when the run's final leaves are reduced). Review
+them there: a strong
+source is usually harvested once per run and chunk.
 
 ### Folding a leaf with loki's own model
 
@@ -566,6 +575,7 @@ scheduling, not search results, and change from run to run:
 | `timing_<stage>_s` | Wall time of `load`, `preprocess`, `plan`, `search`, `postprocess` and `total` (FFA: `search_and_postprocess`) |
 | `peak_rss_gb` | Peak resident set size of the process, GB of 2^30 bytes (`getrusage` `ru_maxrss`) |
 | `n_runs`, `n_runs_overloaded`, `n_overloads` | EP: runs, runs with at least one world-tree overload, and overloads summed over `level_stats` |
+| `n_harvested`, `n_harvests_recorded`, `max_harvested_per_run` | EP with `[ep.rfi]` harvesting only: harvests over all runs (including those beyond `max_harvests`), the records kept, and the most harvests of one run |
 | `plan_peak_memory_gb` | EP: the largest chunk `chunk_memory_gb` of the plan (device memory on CUDA) |
 | `leaves_dropped` | Trials the candidate reduction dropped: root `n_cell_dropped` plus `n_dominated` |
 | `max_cell_dropped_snr` | EP: the highest S/N the cell cap dropped in any run (runs' `max_cell_dropped_snr`) |
@@ -703,8 +713,8 @@ every passing width trial; Taylor EP supplies one winning-width trial per
 final leaf across completed runs. Taylor EP recovers that width from final
 folds without overwriting reported scores or changing pruning decisions.
 
-Common EP candidates currently require an inactive RFI configuration and
-Taylor models through crackle (the circular-orbit search included).
-Chebyshev normalization and RFI harvest/masking integration are outside this
-path (see [RFI control of the pruning](#rfi-control-of-the-pruning-eprfi)). PulsarX export supports
+Common EP candidates currently require Taylor models through crackle (the
+circular-orbit search included); Chebyshev normalization is outside this
+path. With RFI control of the pruning, harvested leaves stay in the run
+diagnostics (see [RFI control of the pruning](#rfi-control-of-the-pruning-eprfi)). PulsarX export supports
 terms through jerk and rejects nonzero higher derivatives.

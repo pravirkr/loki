@@ -115,9 +115,8 @@ EPFreqSweep::EPFreqSweep(
         return;
     }
     if (poly_basis != "taylor" || cfg.get_nparams() < 2 ||
-        cfg.get_nparams() > kParamNames.size() || rfi_config.is_active()) {
-        throw std::invalid_argument("EP candidates require polynomial Taylor "
-                                    "and an inactive RFI config");
+        cfg.get_nparams() > kParamNames.size()) {
+        throw std::invalid_argument("EP candidates require polynomial Taylor");
     }
     auto search_cfg = cfg;
     if (exec.backend == Backend::kCPU) {

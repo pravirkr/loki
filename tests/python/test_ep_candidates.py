@@ -438,9 +438,6 @@ def test_ep_candidate_scope_is_explicit():
         libloki.prune.EPFreqSweep(
             config(False), candidates=options(), poly_basis="chebyshev"
         )
-    rfi = libloki.prune.PruneRFIConfig(harvest_scheme=[5.0], max_harvests=64)
-    with pytest.raises(ValueError, match="RFI"):
-        libloki.prune.EPFreqSweep(config(False), candidates=options(), rfi_config=rfi)
 
 
 def test_disabled_candidates_write_the_earlier_run_diagnostics(tmp_path, series):

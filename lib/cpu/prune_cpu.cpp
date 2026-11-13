@@ -405,7 +405,7 @@ private:
         auto& world_tree    = ws.world_tree;
         const auto n_leaves = world_tree.get_size();
         std::vector<std::uint32_t> widths;
-        if (m_poly_basis == "taylor" && !m_rfi->is_active()) {
+        if (m_poly_basis == "taylor") {
             widths.resize(n_leaves);
             const auto folds = world_tree.get_folds_circular_view();
             const auto nfirst =
