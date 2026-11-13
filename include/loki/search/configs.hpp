@@ -382,7 +382,7 @@ struct EPRFIOptions {
     bool harvest{false};
     SizeType harvest_min_level{10};
     float harvest_offset{10.0F};
-    float harvest_min_snr{15.0F};
+    float harvest_min_snr{40.0F};
     double harvest_mask_ntiles{4.0};
     SizeType max_harvests{4096};
     bool harvest_store_folds{true};

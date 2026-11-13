@@ -55,7 +55,7 @@ struct HarvestDefaults {
     /// Harvest threshold above the pruning threshold of the level.
     float offset = 10.0F;
     /// Lowest harvest threshold.
-    float min_snr = 15.0F;
+    float min_snr = 40.0F;
 };
 
 /**
@@ -212,13 +212,13 @@ make_harvest_window(double f,
  * @param min_level First stage (1-indexed) where harvest is permitted (default
  * 10).
  * @param offset Additive offset above the threshold scheme (default 10.0F).
- * @param min_snr Minimum absolute SNR required for harvesting (default 15.0F).
+ * @param min_snr Minimum absolute SNR required for harvesting (default 40.0F).
  */
 [[nodiscard]] std::vector<float>
 make_default_harvest_scheme(std::span<const float> threshold_scheme,
                             SizeType min_level = 10,
                             float offset       = 10.0F,
-                            float min_snr      = 15.0F);
+                            float min_snr      = 40.0F);
 
 /**
  * @brief Stage-consistency test for a single added segment.

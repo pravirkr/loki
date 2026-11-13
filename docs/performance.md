@@ -236,15 +236,15 @@ every case):
 | Input | Overloads | Runs (of 16) keeping each injection | Final leaves | Search |
 |---|---|---|---|---|
 | Raw, no RFI control | 130, every run | 0 / 0 / 0 / 0 | 5.2 M | - |
-| Raw, `harvest = true` (defaults) | 0 | 14 / 11 / 12 / 12 | 78 k | 13.5 s |
+| Raw, `harvest = true`, `harvest_min_snr = 15` | 0 | 14 / 11 / 12 / 12 | 78 k | 13.5 s |
 | Bright pulsar hard-zapped, no RFI control | 0 | 13 / 10 / 12 / 13 | 75 k | - |
 
-Harvesting at the default thresholds removed the bright pulsar (388
+Harvesting with a floor of 15 removed the bright pulsar (388
 harvests in 32 runs, at most 22 per run) and recovered the injections as
 well as an external hard zap did. Planning (the CPU threshold design)
 dominated wall time in these runs (40-60 s).
 
-The default harvest threshold, `max(15, threshold + 10)`, is about 16.5
+The harvest threshold `max(15, threshold + 10)` is about 16.5
 at the late levels of a 128-segment jerk search, so an RFI line of final
 S/N 12 is never harvested; `harvest_offset = 3` with
 `harvest_min_snr = 9` harvested it once per run in 15 of 32 runs and
@@ -252,7 +252,7 @@ removed all of its detections, as a frequency mask did. Such a low
 threshold also harvests real pulsars. On a survey observation with
 several known binary pulsars, `harvest_offset = 6` harvested one of them
 in 30 runs (final S/N 18.7 to 7.0), offsets 3-4 removed three others
-completely, and even the default offset harvested a bright one in one
+completely, and even offset 10 harvested a bright one in one
 run, while the observation's strongest line needed offset 3. Brightness
 alone does not separate lines from pulsars, so the default offset stays
 high. A harvest threshold below a source's partial S/N removes the
@@ -266,11 +266,57 @@ samples, 60-130 Hz, |a| <= 35 m/s^2, 32 runs) with a bright binary pulsar
 | Harvest setting | Harvests | Bright pulsar left (runs) | 3/2 left (runs) | Detections |
 |---|---|---|---|---|
 | none | 0 | 30 | 30 | 463 |
-| default, window sweep from the leaf's acceleration | 66 | 1 | 0 (harvested itself) | 307 |
-| default, window sweep from the window's largest acceleration | 63 | 0 | 0 (harvested itself) | 306 |
+| floor 15, window sweep from the leaf's acceleration | 66 | 1 | 0 (harvested itself) | 307 |
+| floor 15, window sweep from the window's largest acceleration | 63 | 0 | 0 (harvested itself) | 306 |
 | as above, `n_harmonics = 4`, `fractional_harmonics` | 33 | 0 | 0 (masked) | 208 |
 
 The pulsar was harvested at level 10, where its acceleration was not yet
 resolved (a = 0 with a tile of 70 m/s^2), so a sweep from the leaf's own
 acceleration left the window 6 grid cells wide. Masks are per chunk: the
 pulsar's 3/4 harmonic (S/N 15) lay in another chunk and stayed.
+
+#### Default harvest floor (`harvest_min_snr = 40`)
+
+Harvesting is a failsafe that keeps a dominating source out of the tree,
+not a detection step, so the floor must leave moderate sources alone. A
+source of final S/N S has partial S/N of about S * sqrt(level / nsegments)
+(measured: S/N 77 crossed a floor of 40 at levels 35-36 and a floor of 50
+at 54-62, S/N 153 crossed 50 at 15-16, with 128 segments), so a source
+whose final S/N is below the floor is never harvested. The pruning term
+`threshold + harvest_offset` stays below 20, so the floor alone sets the
+harvest threshold at every level.
+
+Single injected pulsar on the zapped series above (16 runs per chunk):
+
+| Floor | S/N 24 | S/N 39 | S/N 77 | S/N 153 (32 overloads without harvest) |
+|---|---|---|---|---|
+| 15 | removed | removed | removed | harvested early, 0 overloads |
+| 30 | kept | cut to S/N 9 | harvested from level 20 | harvested from level 10, 0 overloads |
+| 40 | kept | kept | harvested from level 35 | 0 overloads |
+| 50 | kept | kept | harvested from level 54 | harvested from level 14, 0 overloads |
+| 75 | kept | kept | kept | harvested from level 31, 0 overloads |
+
+The raw series (bright pulsar, final S/N about 275) is harder: its
+fractional harmonics (3/2 to 7/5, partial S/N 30-55) overload the tree
+on their own.
+
+| Floor | Overloads (runs) | With `n_harmonics = 5`, `fractional_harmonics` | Harvested sources | Search |
+|---|---|---|---|---|
+| none | 130 (32) | - | - | 44.8 s |
+| 15 | 0 | 0 | 22 | 7.5 s |
+| 30 | 0 | 0 | 11 | 15.3 s |
+| 40 | 0 | 0 | 7 | 28.0 s |
+| 45 | 9 (8) | 4 (3) | 6 | 31.5 s |
+| 50 | 15 (13) | 5 (3) | 6 | 36.8 s |
+| 75 | 73 (32) | 30 (16) | 4 | 47.9 s |
+
+The weak injections kept 14 / 11 / 12 / 12 runs at every floor up to 50
+(14 / 9 / 11 / 11 at 75). Every harvested source at floors 30-50 was the
+bright pulsar or one of its harmonics. The overloads left at 45-50 with
+fractional masking are in the other chunk (60-65 Hz), which holds the 3/4
+and 5/7 harmonics but not the pulsar; per-chunk masks cannot reach it.
+Floor 40 is the highest floor without overloads here and keeps a S/N-39
+source whole, so it is the default; lower it only after measuring what a
+lower floor removes. Each harvest shrinks the tree, so a higher floor costs
+search time (28 s at 40 against 7.5 s at 15; 21 s at 40 with fractional
+masking).

@@ -2226,7 +2226,7 @@ int main(int argc, char** argv) {
                          "threshold (ep.rfi.harvest)");
     ep_grp_rfi->add_option("--harvest-min-snr", ep_harvest_min_snr,
                            "Lowest harvest threshold (ep.rfi.harvest_min_snr, "
-                           "default: 15)");
+                           "default: 40)");
     ep_grp_rfi->add_option("--harvest-offset", ep_harvest_offset,
                            "Harvest threshold above the pruning threshold "
                            "(ep.rfi.harvest_offset, default: 10)");

@@ -199,7 +199,7 @@ inline void bind_prune_rfi(py::module& m) {
                  };
              }),
              py::kw_only(), py::arg("min_level") = 10U,
-             py::arg("offset") = 10.0F, py::arg("min_snr") = 15.0F)
+             py::arg("offset") = 10.0F, py::arg("min_snr") = 40.0F)
         .def_readwrite("min_level", &HarvestDefaults::min_level)
         .def_readwrite("offset", &HarvestDefaults::offset)
         .def_readwrite("min_snr", &HarvestDefaults::min_snr)
@@ -301,7 +301,7 @@ inline void bind_prune_rfi(py::module& m) {
                                                offset, min_snr);
         },
         py::arg("threshold_scheme"), py::arg("min_level") = 10U,
-        py::arg("offset") = 10.0F, py::arg("min_snr") = 15.0F,
+        py::arg("offset") = 10.0F, py::arg("min_snr") = 40.0F,
         "Conservative harvest scheme derived from the threshold scheme.");
 }
 

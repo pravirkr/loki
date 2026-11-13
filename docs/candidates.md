@@ -196,7 +196,7 @@ fractional_harmonics = false   # every reduced p/q != 1, p, q <= n_harmonics
 harvest = true
 harvest_min_level = 10         # first pruning level that may harvest
 harvest_offset = 10.0          # above the level's pruning threshold
-harvest_min_snr = 15.0         # lowest harvest threshold
+harvest_min_snr = 40.0         # lowest harvest threshold
 harvest_mask_ntiles = 4.0
 max_harvests = 4096            # records per run; masking continues beyond
 harvest_store_folds = true
@@ -215,7 +215,11 @@ A level's harvest threshold is `max(harvest_min_snr, threshold + harvest_offset)
 from `harvest_min_level` on, built for each chunk from that chunk's own
 pruning threshold scheme. Any source whose partial S/N crosses it is removed,
 a real pulsar as well as RFI, so set `harvest_min_snr` above the S/N of the
-weakest source you want to keep as a candidate. The chunk records it in
+weakest source you want to keep as a candidate. A source's partial S/N grows
+about as the square root of the fraction of the data seen, so with the default
+floor of 40 a source of final S/N below 40 is never harvested and a source of
+S/N 80 is harvested about a quarter of the way through the levels
+([performance](performance.md)). The chunk records the threshold scheme in
 `/chunks/<chunk>/rfi_config/harvest_scheme`, with the other settings as
 attributes and the mask as `pulsar_mask` (`f_lo, f_hi, a_lo, a_hi` rows). A
 harvested leaf is removed from the tree and its neighbourhood (the leaf's tile
