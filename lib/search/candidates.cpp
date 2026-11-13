@@ -35,12 +35,30 @@ struct Polynomial {
     std::size_t n{};
 };
 
-/// Points of [-1, 1] collected by roots(): critical points, endpoint zeros
-/// and one bisection root per sign change, at most 3 * degree - 1.
+/// Most points roots() collects for a polynomial of degree @p degree: the
+/// points of its derivative, plus at most one root per interval between
+/// them, plus the endpoints, R(d) = 2 R(d - 1) + 3 with R(1) = 1 (exact
+/// duplicates are stored once). Rounding can add sign changes beyond a
+/// polynomial's real roots, so the bound counts intervals, not roots.
+constexpr std::size_t max_points(std::size_t degree) {
+    return degree <= 1 ? 1 : (2 * max_points(degree - 1)) + 3;
+}
+
+/// Points of [-1, 1] collected by roots(): the derivative's points, zeros at
+/// the bounds and one bisection root per sign change. They only bound the
+/// polynomial's range, so an exact duplicate is stored once (a zero at a
+/// bound is met from both sides, at every derivative level).
 struct Points {
-    std::array<double, 3 * kPhaseDegree> x{};
+    // Only [0, n) is read: no zero fill, which would write 1 KB per
+    // recursion level of roots() on the clustering hot path.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): see above
+    std::array<double, max_points(kPhaseDegree)> x;
     std::size_t n{};
-    void push(double value) { x.at(n++) = value; }
+    void push(double value) {
+        if (std::find(x.begin(), x.begin() + n, value) == x.begin() + n) {
+            x.at(n++) = value;
+        }
+    }
     [[nodiscard]] double* begin() { return x.data(); }
     [[nodiscard]] double* end() { return x.data() + n; }
 };
@@ -94,7 +112,8 @@ Points roots(Polynomial p) {
     }
     bounds.push(1);
     std::ranges::sort(bounds);
-    result = critical;
+    std::copy_n(critical.x.begin(), critical.n, result.x.begin());
+    result.n = critical.n;
     for (std::size_t i = 1; i < bounds.n; ++i) {
         double lo        = bounds.x[i - 1];
         double hi        = bounds.x[i];

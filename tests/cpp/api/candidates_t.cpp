@@ -81,6 +81,24 @@ TEST_CASE("Phase track distance includes interior extrema", "[candidates]") {
     REQUIRE(loki::search::phase_track_distance(a, b, 2) == Catch::Approx(5));
 }
 
+TEST_CASE("Phase track distance of trials one derivative apart",
+          "[candidates]") {
+    // The residual is a monomial: every derivative of it has its root at the
+    // midpoint, where it evaluates to exactly zero.
+    const auto a = trial(0, 100, 12);
+    for (std::size_t k = 1; k < a.derivatives.size(); ++k) {
+        CAPTURE(k);
+        auto b           = a;
+        b.derivatives[k] = 1e-6;
+        double distance  = 0;
+        REQUIRE_NOTHROW(distance = loki::search::phase_track_distance(a, b, 2));
+        CHECK(std::isfinite(distance));
+        CHECK(distance > 0);
+        // Symmetric in the pair.
+        CHECK(loki::search::phase_track_distance(b, a, 2) == distance);
+    }
+}
+
 TEST_CASE("Harmonics are separately flagged filtered and capped",
           "[candidates]") {
     std::vector input{trial(0, 10, 20), trial(1, 20, 14.1421356F),
