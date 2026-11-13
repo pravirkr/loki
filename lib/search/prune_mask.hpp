@@ -79,6 +79,19 @@ public:
                     SizeType n_harmonics      = 0,
                     bool fractional_harmonics = false);
 
+    /// @brief The bitset words (bit `c % 64` of word `c / 64` is cell `c`),
+    /// for a device copy.
+    [[nodiscard]] std::span<const uint64_t> words() const noexcept {
+        return m_bits;
+    }
+
+    /**
+     * @brief True if the cell of the physical point (@p accel, @p freq) is
+     * masked, with the value-to-index mapping of add_window(). A point outside
+     * the grid takes the nearest edge cell.
+     */
+    [[nodiscard]] bool is_masked_at(double accel, double freq) const noexcept;
+
     /// @brief Rasterise a set of windows.
     void add_windows(std::span<const algorithms::ParamWindow> windows,
                      SizeType n_harmonics      = 0,

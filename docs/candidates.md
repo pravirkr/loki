@@ -184,9 +184,15 @@ still rejected by PulsarX export.
 
 The EP pruning can mask frequency windows, harvest leaves far above the
 pruning threshold (a bright source or an RFI line) and veto leaves whose last
-segment adds an implausible share of their S/N. It runs on the CPU only:
-with `backend = "cuda"` an active table fails before any data is read. The
-table is optional; without it the search and its output are unchanged.
+segment adds an implausible share of their S/N. The mask and the harvest run
+on both backends; the veto runs on the CPU only (with `backend = "cuda"`,
+`impulsive_veto = true` fails before any data is read). On CUDA a harvested
+leaf, and the leaves of its source below the harvest threshold, can survive
+the level they were found at; their children fall in the masked cells at the
+next level, so a source harvested at the last level also stays among the
+final leaves. A CUDA plan cache records the harvest settings: turning
+harvesting on or off needs a new plan. The table is optional; without it the search and its output are
+unchanged.
 
 ```toml
 [ep.rfi]

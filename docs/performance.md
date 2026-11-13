@@ -297,6 +297,27 @@ resolved (a = 0 with a tile of 70 m/s^2), so a sweep from the leaf's own
 acceleration left the window 6 grid cells wide. Masks are per chunk: the
 pulsar's 3/4 harmonic (S/N 15) lay in another chunk and stayed.
 
+#### On CUDA
+
+The pulsar mask and the early harvest run on CUDA (the impulsive veto is
+CPU only). On the bright-pulsar series above (2^24 samples, 60-130 Hz,
+|a| <= 400 m/s^2, 16 runs per chunk, harvest floor 40):
+
+| Backend | Overloads | Runs (of 16) keeping each injection | Harvests | Harvested sources | Search |
+|---|---|---|---|---|---|
+| CUDA, no harvest | 23 in 15 of 32 runs | 2 / 0 / 1 / 1 | 0 | - | 7.3 s |
+| CUDA, harvest | 0 | 13 / 10 / 9 / 11 | 98 | 7 | 1.4 s |
+| CPU, harvest | 0 | 14 / 11 / 12 / 12 | 98 | 7 | 26.4 s |
+
+With the bright pulsar hard-zapped instead, CUDA keeps the injections in
+10 / 10 / 9 / 11 runs. The CUDA and CPU sources agree in frequency, S/N,
+level and runs. The CUDA
+harvest keeps the fused direct write of the passing leaves: only a batch
+whose highest score reaches the harvest threshold does harvest work.
+Rejected: a post-score pass on every batch from the first harvest level
+(the CPU's structure) disables the direct write and cost 10 % of a
+full-band jerk search (10.9 to 12.0 s) with nothing to harvest.
+
 #### Default harvest floor (`harvest_min_snr = 40`)
 
 Harvesting is a failsafe that keeps a dominating source out of the tree,

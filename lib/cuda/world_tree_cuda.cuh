@@ -186,6 +186,14 @@ public:
                      cuda::std::span<const float> scores_batch,
                      SizeType slots_to_write,
                      cudaStream_t stream);
+    /// Reset and add the seeds @p indices_batch[0..n_keep) of the batch, in
+    /// that order (seeds outside an RFI mask).
+    void add_initial_scattered(cuda::std::span<const double> leaves_batch,
+                               cuda::std::span<const FoldTypeCUDA> folds_batch,
+                               cuda::std::span<const float> scores_batch,
+                               cuda::std::span<const uint32_t> indices_batch,
+                               SizeType n_keep,
+                               cudaStream_t stream);
     /**
      * @brief Add batch during update with threshold filtering, scattered.
      *

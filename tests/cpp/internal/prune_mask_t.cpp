@@ -135,6 +135,20 @@ TEST_CASE("GridMask: 2D window and clipping", "[prune_mask]") {
     }
 }
 
+TEST_CASE("GridMask: is_masked_at looks up the cell of a physical point",
+          "[prune_mask]") {
+    auto mask = make_mask();
+    CHECK_FALSE(mask.is_masked_at(0.0, 150.0));
+    const ParamWindow w{
+        .f_lo = 195.0, .f_hi = 250.0, .a_lo = 80.0, .a_hi = 500.0};
+    mask.add_window(w);
+    CHECK(mask.is_masked_at(90.0, 197.0));
+    CHECK_FALSE(mask.is_masked_at(-90.0, 197.0));
+    // Outside the grid: the nearest edge cell, which the window covers.
+    CHECK(mask.is_masked_at(1.0e4, 1.0e4));
+    CHECK_FALSE(mask.is_masked_at(-1.0e4, -1.0e4));
+}
+
 TEST_CASE("GridMask: disjoint windows are ignored", "[prune_mask]") {
     auto mask = make_mask();
     mask.add_window(ParamWindow{.f_lo = 10.0, .f_hi = 50.0});

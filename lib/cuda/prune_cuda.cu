@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -23,6 +24,7 @@
 #include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
 
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
@@ -40,6 +42,7 @@
 #include "lib/detail/utils.hpp"
 #include "lib/search/cands.hpp"
 #include "lib/search/ep_support.hpp"
+#include "lib/search/prune_mask.hpp"
 
 namespace loki::algorithms {
 
@@ -100,6 +103,115 @@ __global__ void kernel_cached_score_mask(const float* scores,
     }
 }
 
+/// Clears the validation flag of leaves whose base-grid cell is masked
+/// (@p bits in the GridMask layout) and adds the number cleared to
+/// @p n_masked (if not null).
+__global__ void
+kernel_mask_resolved(const uint32_t* __restrict__ param_idx,
+                     uint8_t* __restrict__ valid,
+                     const uint64_t* __restrict__ bits,
+                     SizeType n_cells,
+                     SizeType n,
+                     unsigned long long* __restrict__ n_masked) {
+    const SizeType i =
+        (static_cast<SizeType>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    int masked = 0;
+    if (i < n && valid[i] != 0) {
+        const SizeType c = param_idx[i];
+        if (c < n_cells && ((bits[c >> 6U] >> (c & 63U)) & 1ULL) != 0ULL) {
+            valid[i] = 0;
+            masked   = 1;
+        }
+    }
+    const int block_masked = __syncthreads_count(masked);
+    if (threadIdx.x == 0 && block_masked > 0 && n_masked != nullptr) {
+        atomicAdd(n_masked, static_cast<unsigned long long>(block_masked));
+    }
+}
+
+/// Lists the entries j < n (slot (start + j) mod capacity of @p scores) with
+/// a score >= @p threshold and, if @p flags is not null, flags[j] set.
+__global__ void kernel_list_harvest(const float* __restrict__ scores,
+                                    const uint8_t* __restrict__ flags,
+                                    SizeType start,
+                                    SizeType capacity,
+                                    SizeType n,
+                                    float threshold,
+                                    uint32_t* __restrict__ out,
+                                    unsigned long long* __restrict__ count) {
+    const SizeType j =
+        (static_cast<SizeType>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    if (j >= n || (flags != nullptr && flags[j] == 0)) {
+        return;
+    }
+    const SizeType slot =
+        start + j < capacity ? start + j : start + j - capacity;
+    if (scores[slot] >= threshold) {
+        out[atomicAdd(count, 1ULL)] = static_cast<uint32_t>(j);
+    }
+}
+
+/// dst row r = src row (start + idx[r]) mod capacity, rows of @p stride.
+template <typename T>
+__global__ void kernel_gather_rows(const T* __restrict__ src,
+                                   SizeType stride,
+                                   SizeType start,
+                                   SizeType capacity,
+                                   const uint32_t* __restrict__ idx,
+                                   SizeType n_rows,
+                                   T* __restrict__ dst) {
+    const SizeType e =
+        (static_cast<SizeType>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    if (e >= n_rows * stride) {
+        return;
+    }
+    const SizeType r = e / stride;
+    const SizeType k = e - (r * stride);
+    const SizeType j = idx[r];
+    const SizeType slot =
+        start + j < capacity ? start + j : start + j - capacity;
+    dst[e] = src[(slot * stride) + k];
+}
+
+/// valid[list[r]] = 0 for r < n.
+__global__ void kernel_clear_listed(uint8_t* __restrict__ valid,
+                                    const uint32_t* __restrict__ list,
+                                    SizeType n) {
+    const SizeType r =
+        (static_cast<SizeType>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    if (r < n) {
+        valid[list[r]] = 0;
+    }
+}
+
+/// flags[i] &= valid[i]; adds the set flags to @p count.
+__global__ void kernel_and_count(uint8_t* __restrict__ flags,
+                                 const uint8_t* __restrict__ valid,
+                                 SizeType n,
+                                 unsigned long long* __restrict__ count) {
+    const SizeType i =
+        (static_cast<SizeType>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    int set = 0;
+    if (i < n) {
+        flags[i] = static_cast<uint8_t>(flags[i] != 0 && valid[i] != 0);
+        set      = flags[i];
+    }
+    const int block_set = __syncthreads_count(set);
+    if (threadIdx.x == 0 && block_set > 0) {
+        atomicAdd(count, static_cast<unsigned long long>(block_set));
+    }
+}
+
+constexpr unsigned kRfiBlock = 256;
+
+unsigned rfi_grid(SizeType n) {
+    return static_cast<unsigned>((n + kRfiBlock - 1) / kRfiBlock);
+}
+
+// Number of individual harvests echoed to the log at info level per run, as
+// on CPU.
+constexpr SizeType kMaxHarvestLogLines = 16;
+
 template <SupportedFoldTypeCUDA FoldTypeCUDA> class PruneCUDAImpl {
 public:
     using HostFoldT   = HostFoldType<FoldTypeCUDA>;
@@ -114,7 +226,9 @@ public:
                   int device_id,
                   cudaStream_t stream,
                   std::function<void(pipelines::detail::EPResultPayload)>
-                      result_sink = {})
+                      result_sink                   = {},
+                  const PruneRFIConfig* rfi         = nullptr,
+                  const search::GridMask* mask_base = nullptr)
         : m_workspace_ptr(&workspace),
           m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
                                              : cfg.with_ep_default_nsegments()),
@@ -127,8 +241,17 @@ public:
           m_total_levels(m_threshold_scheme.size()),
           m_device_id(device_id),
           m_stream(stream),
-          m_result_sink(std::move(result_sink)) {
+          m_result_sink(std::move(result_sink)),
+          m_rfi(rfi != nullptr && rfi->is_active() ? rfi : nullptr),
+          m_mask_base(mask_base) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        if (m_rfi != nullptr) {
+            error_check::check(m_mask_base != nullptr,
+                               "PruneCUDAImpl: RFI control needs a base mask");
+            error_check::check(!m_rfi->impulsive_veto,
+                               "PruneCUDAImpl: the impulsive veto is CPU only");
+            m_counters_d.resize(2);
+        }
         error_check::check_less_equal(m_cfg.get_nparams(), 5,
                                       "Pruning not supported for nparams > 5.");
         m_prune_funcs = core::create_prune_dp_functs_cuda<FoldTypeCUDA>(
@@ -257,6 +380,22 @@ private:
     search::PruneStatsCollection m_pstats;
     std::unique_ptr<core::PruneDPFunctsCUDA<FoldTypeCUDA>> m_prune_funcs;
 
+    // RFI control (CPU semantics, see PruneRFIConfig; no impulsive veto).
+    // The host mask is authoritative; m_mask_d is its copy for the kernels.
+    const PruneRFIConfig* m_rfi{nullptr};
+    const search::GridMask* m_mask_base{nullptr};
+    search::GridMask m_mask;
+    bool m_mask_on_device{false};
+    search::HarvestBuffer<HostFoldT> m_harvest;
+    SizeType m_n_harvested_total{0};
+    thrust::device_vector<uint64_t> m_mask_d;
+    thrust::device_vector<uint32_t> m_seed_keep_d;
+    // [0]: leaves masked in the level, [1]: scratch count
+    thrust::device_vector<unsigned long long> m_counters_d;
+    thrust::device_vector<double> m_harvest_leaves_d;
+    thrust::device_vector<float> m_harvest_scores_d;
+    thrust::device_vector<FoldTypeCUDA> m_harvest_folds_d;
+
     [[nodiscard]] memory::EPWorkspaceCUDA<FoldTypeCUDA>&
     get_workspace() noexcept {
         return *m_workspace_ptr;
@@ -264,6 +403,247 @@ private:
     [[nodiscard]] const memory::EPWorkspaceCUDA<FoldTypeCUDA>&
     get_workspace() const noexcept {
         return *m_workspace_ptr;
+    }
+
+    [[nodiscard]] double get_tobs_scheme() const noexcept {
+        return static_cast<double>(m_ffa_plan.get_nsegments_active()) *
+               m_ffa_plan.get_tsegments().back();
+    }
+
+    [[nodiscard]] float get_harvest_threshold(SizeType level) const noexcept {
+        if (m_rfi == nullptr || m_rfi->harvest_scheme.empty() ||
+            level > m_rfi->harvest_scheme.size()) {
+            return kHarvestDisabled;
+        }
+        return m_rfi->harvest_scheme[level - 1];
+    }
+
+    /// Copies the host mask to the device (ordered on m_stream; the host
+    /// mask is only changed after a later synchronisation).
+    void upload_mask() {
+        const auto words = m_mask.words();
+        if (m_mask_d.size() != words.size()) {
+            m_mask_d.resize(words.size());
+        }
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_mask_d.data()),
+                            words.data(), words.size() * sizeof(uint64_t),
+                            cudaMemcpyHostToDevice, m_stream),
+            "EP RFI mask upload failed");
+        m_mask_on_device = !m_mask.empty();
+    }
+
+    /// Clears validation flags of the batch's resolved leaves in masked
+    /// cells, counting them into the level's masked count if @p count.
+    void mask_resolved(SizeType n_leaves, bool count) {
+        auto& prune_ws = get_workspace().prune;
+        kernel_mask_resolved<<<rfi_grid(n_leaves), kRfiBlock, 0, m_stream>>>(
+            thrust::raw_pointer_cast(prune_ws.branched_param_idx_d.data()),
+            thrust::raw_pointer_cast(prune_ws.validation_mask_d.data()),
+            thrust::raw_pointer_cast(m_mask_d.data()), m_mask.get_n_cells(),
+            n_leaves,
+            count ? thrust::raw_pointer_cast(m_counters_d.data()) : nullptr);
+        cuda_utils::check_last_cuda_error("EP RFI mask kernel failed");
+    }
+
+    /// Where harvest candidates are read from: entry j < n is slot
+    /// (start + j) mod capacity of leaves/scores (and folds, when stored).
+    struct HarvestSource {
+        const double* leaves{nullptr};
+        const float* scores{nullptr};
+        const FoldTypeCUDA* folds{nullptr}; ///< null: computed per record
+        const uint8_t* flags{nullptr};      ///< null: every entry
+        /// Not null: validation flags of the entries, cleared for every
+        /// listed entry (harvested, or skipped as already masked).
+        uint8_t* clear_valid{nullptr};
+        SizeType start{0};
+        SizeType capacity{0};
+        SizeType n{0};
+    };
+
+    /**
+     * @brief Early harvest of the entries of @p src at or above
+     * @p threshold, with the CPU sequence: strongest first, skip a source
+     * already masked, else widen the mask (window and harmonics) and record
+     * it (up to max_harvests). @p fold_of computes entry j's fold into
+     * m_harvest_folds_d row r when src.folds is null.
+     *
+     * @return Number of harvests (0: the mask is unchanged); @p n_listed
+     * receives the number of entries at or above @p threshold.
+     */
+    template <typename FoldFn>
+    SizeType harvest_entries(const HarvestSource& src,
+                             float threshold,
+                             std::pair<double, double> coord_cur,
+                             SizeType seg_idx_cur,
+                             FoldFn&& fold_of,
+                             SizeType* n_listed = nullptr) {
+        auto& prune_ws           = get_workspace().prune;
+        const auto leaves_stride = prune_ws.leaves_stride;
+        const auto folds_stride  = prune_ws.folds_stride;
+        auto* const count_d = thrust::raw_pointer_cast(m_counters_d.data()) + 1;
+        auto* const list_d =
+            thrust::raw_pointer_cast(prune_ws.passing_indices_d.data());
+        cuda_utils::check_cuda_call(
+            cudaMemsetAsync(count_d, 0, sizeof(unsigned long long), m_stream),
+            "EP harvest count reset failed");
+        kernel_list_harvest<<<rfi_grid(src.n), kRfiBlock, 0, m_stream>>>(
+            src.scores, src.flags, src.start, src.capacity, src.n, threshold,
+            list_d, count_d);
+        cuda_utils::check_last_cuda_error("EP harvest list kernel failed");
+        unsigned long long n_cand = 0;
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(&n_cand, count_d, sizeof(n_cand),
+                            cudaMemcpyDeviceToHost, m_stream),
+            "EP harvest count copy failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(m_stream),
+                                    "EP harvest count wait failed");
+        if (n_listed != nullptr) {
+            *n_listed = static_cast<SizeType>(n_cand);
+        }
+        if (n_cand == 0) {
+            return 0;
+        }
+        const auto k = static_cast<SizeType>(n_cand);
+        if (src.clear_valid != nullptr) {
+            kernel_clear_listed<<<rfi_grid(k), kRfiBlock, 0, m_stream>>>(
+                src.clear_valid, list_d, k);
+            cuda_utils::check_last_cuda_error("EP harvest clear failed");
+        }
+        if (m_harvest_leaves_d.size() < k * leaves_stride) {
+            m_harvest_leaves_d.resize(k * leaves_stride);
+            m_harvest_scores_d.resize(k);
+        }
+        kernel_gather_rows<double>
+            <<<rfi_grid(k * leaves_stride), kRfiBlock, 0, m_stream>>>(
+                src.leaves, leaves_stride, src.start, src.capacity, list_d, k,
+                thrust::raw_pointer_cast(m_harvest_leaves_d.data()));
+        kernel_gather_rows<float><<<rfi_grid(k), kRfiBlock, 0, m_stream>>>(
+            src.scores, 1, src.start, src.capacity, list_d, k,
+            thrust::raw_pointer_cast(m_harvest_scores_d.data()));
+        cuda_utils::check_last_cuda_error("EP harvest gather failed");
+        // Physical parameters at t_ref = coord_cur, as CPU harvest_candidate.
+        m_prune_funcs->report(
+            cuda_utils::as_span(m_harvest_leaves_d).first(k * leaves_stride),
+            coord_cur, k, m_stream);
+        std::vector<double> leaves_h(k * leaves_stride);
+        std::vector<float> scores_h(k);
+        std::vector<uint32_t> entry_h(k);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(leaves_h.data(),
+                            thrust::raw_pointer_cast(m_harvest_leaves_d.data()),
+                            leaves_h.size() * sizeof(double),
+                            cudaMemcpyDeviceToHost, m_stream),
+            "EP harvest leaves copy failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(scores_h.data(),
+                            thrust::raw_pointer_cast(m_harvest_scores_d.data()),
+                            k * sizeof(float), cudaMemcpyDeviceToHost,
+                            m_stream),
+            "EP harvest scores copy failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(entry_h.data(), list_d, k * sizeof(uint32_t),
+                            cudaMemcpyDeviceToHost, m_stream),
+            "EP harvest list copy failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(m_stream),
+                                    "EP harvest copy wait failed");
+
+        // Strongest first; ties in entry order (the CPU's stable sort).
+        std::vector<SizeType> order(k);
+        std::iota(order.begin(), order.end(), SizeType{0});
+        std::ranges::sort(order, [&](SizeType x, SizeType y) {
+            return scores_h[x] != scores_h[y] ? scores_h[x] > scores_h[y]
+                                              : entry_h[x] < entry_h[y];
+        });
+        constexpr SizeType kParamStride = 2U;
+        const auto n_params             = m_cfg.get_nparams();
+        const auto a_lim = m_cfg.get_param_limits()[n_params - 2];
+        const auto a_max = std::max(std::abs(a_lim.min), std::abs(a_lim.max));
+        const auto t_ref = coord_cur.first;
+        std::vector<SizeType> recorded;
+        SizeType n_harvested = 0;
+        for (const auto r : order) {
+            const auto* leaf = leaves_h.data() + (r * leaves_stride);
+            const auto a     = leaf[(n_params - 2) * kParamStride];
+            const auto da = std::abs(leaf[((n_params - 2) * kParamStride) + 1]);
+            const auto f  = leaf[(n_params - 1) * kParamStride];
+            const auto df = std::abs(leaf[((n_params - 1) * kParamStride) + 1]);
+            if (m_mask.is_masked_at(a, f)) {
+                continue; // a source this batch already harvested
+            }
+            const auto window =
+                make_harvest_window(f, a, df, da, t_ref, get_tobs_scheme(),
+                                    m_rfi->harvest_mask_ntiles, a_max);
+            m_mask.add_window(window, m_rfi->n_harmonics,
+                              m_rfi->fractional_harmonics);
+            ++m_n_harvested_total;
+            ++n_harvested;
+            if (m_harvest.size() + recorded.size() < m_rfi->max_harvests) {
+                recorded.push_back(r);
+                if (m_harvest.size() + recorded.size() <= kMaxHarvestLogLines) {
+                    spdlog::info("Pruning level {:3d}: harvested candidate "
+                                 "score {:.2f}, f = {:.9f} Hz, a = {:.4e} "
+                                 "m/s^2 (t_ref = {:.1f} s)",
+                                 m_prune_level, scores_h[r], f, a, t_ref);
+                }
+            }
+        }
+        if (n_harvested == 0) {
+            return 0;
+        }
+        upload_mask();
+        if (recorded.empty()) {
+            return n_harvested;
+        }
+        std::vector<HostFoldT> folds_h;
+        if (m_rfi->harvest_store_folds) {
+            const auto n_rec = recorded.size();
+            if (m_harvest_folds_d.size() < n_rec * folds_stride) {
+                m_harvest_folds_d.resize(n_rec * folds_stride);
+            }
+            for (SizeType q = 0; q < n_rec; ++q) {
+                const auto j = static_cast<SizeType>(entry_h[recorded[q]]);
+                auto* dst = thrust::raw_pointer_cast(m_harvest_folds_d.data()) +
+                            (q * folds_stride);
+                if (src.folds != nullptr) {
+                    const auto slot = src.start + j < src.capacity
+                                          ? src.start + j
+                                          : src.start + j - src.capacity;
+                    cuda_utils::check_cuda_call(
+                        cudaMemcpyAsync(dst, src.folds + (slot * folds_stride),
+                                        folds_stride * sizeof(FoldTypeCUDA),
+                                        cudaMemcpyDeviceToDevice, m_stream),
+                        "EP harvest fold copy failed");
+                } else {
+                    fold_of(j, dst);
+                }
+            }
+            folds_h.resize(n_rec * folds_stride);
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(
+                    folds_h.data(),
+                    thrust::raw_pointer_cast(m_harvest_folds_d.data()),
+                    folds_h.size() * sizeof(FoldTypeCUDA),
+                    cudaMemcpyDeviceToHost, m_stream),
+                "EP harvest folds copy failed");
+            cuda_utils::check_cuda_call(cudaStreamSynchronize(m_stream),
+                                        "EP harvest folds wait failed");
+        }
+        if (m_harvest.empty()) {
+            // One allocation of the cap, as the CPU's (ep_harvest_bytes).
+            m_harvest.reserve(m_rfi->max_harvests);
+        }
+        for (SizeType q = 0; q < recorded.size(); ++q) {
+            const auto r = recorded[q];
+            m_harvest.push(std::span<const double>(leaves_h).subspan(
+                               r * leaves_stride, leaves_stride),
+                           m_rfi->harvest_store_folds
+                               ? std::span<const HostFoldT>(folds_h).subspan(
+                                     q * folds_stride, folds_stride)
+                               : std::span<const HostFoldT>{},
+                           scores_h[r], m_prune_level, seg_idx_cur, t_ref);
+        }
+        return n_harvested;
     }
 
     void initialize(cuda::std::span<const FoldTypeCUDA> ffa_fold,
@@ -296,22 +676,58 @@ private:
             cuda_utils::as_span(ws.seed_scores_d).first(n_leaves);
         m_prune_funcs->seed(fold_segment, seed_leaves, seed_scores, coord_init,
                             stream);
-        // Initialize the WorldTree with the generated data
-        world_tree.add_initial(seed_leaves, fold_segment, seed_scores, n_leaves,
-                               stream);
+        // Per-run RFI state: start from the chunk's static mask.
+        SizeType n_seeds_masked = 0;
+        m_mask_on_device        = false;
+        if (m_rfi != nullptr) {
+            m_mask.assign(*m_mask_base);
+            m_harvest = search::HarvestBuffer<HostFoldT>(
+                world_tree.get_leaves_stride(), world_tree.get_folds_stride(),
+                m_rfi->harvest_store_folds);
+            m_n_harvested_total = 0;
+            if (!m_mask.empty()) {
+                upload_mask();
+            }
+        }
+        if (!m_mask_on_device) {
+            world_tree.add_initial(seed_leaves, fold_segment, seed_scores,
+                                   n_leaves, stream);
+        } else {
+            // Seed leaf i sits on base-grid cell i: drop the masked ones.
+            std::vector<SizeType> keep(n_leaves);
+            const auto n_keep = m_mask.select_seeds(keep, n_leaves);
+            n_seeds_masked    = n_leaves - n_keep;
+            std::vector<uint32_t> keep_u32(keep.begin(), keep.begin() + n_keep);
+            m_seed_keep_d.resize(std::max<SizeType>(n_keep, 1));
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(thrust::raw_pointer_cast(m_seed_keep_d.data()),
+                                keep_u32.data(), n_keep * sizeof(uint32_t),
+                                cudaMemcpyHostToDevice, stream),
+                "EP RFI seed indices upload failed");
+            world_tree.add_initial_scattered(
+                seed_leaves, fold_segment, seed_scores,
+                cuda_utils::as_span(m_seed_keep_d), n_keep, stream);
+            // keep_u32 is pageable and dies here.
+            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                        "EP RFI seed upload wait failed");
+            spdlog::debug("Pruning run {:03d}: pulsar mask removed {} of {} "
+                          "seeds ({} grid cells masked)",
+                          ref_seg, n_seeds_masked, n_leaves, m_mask.count());
+        }
 
         // Initialize the prune stats
         m_pstats = search::PruneStatsCollection();
         const search::PruneStats pstats_cur{
-            .level         = m_prune_level,
-            .seg_idx       = m_snail_scheme.get_segment_idx(m_prune_level),
-            .threshold     = 0,
-            .score_min     = world_tree.get_score_min(stream),
-            .score_max     = world_tree.get_score_max(stream),
-            .n_branches    = world_tree.get_size(),
-            .n_leaves      = world_tree.get_size(),
-            .n_leaves_phy  = world_tree.get_size(),
-            .n_leaves_surv = world_tree.get_size(),
+            .level           = m_prune_level,
+            .seg_idx         = m_snail_scheme.get_segment_idx(m_prune_level),
+            .threshold       = 0,
+            .score_min       = world_tree.get_score_min(stream),
+            .score_max       = world_tree.get_score_max(stream),
+            .n_branches      = n_leaves,
+            .n_leaves        = n_leaves,
+            .n_leaves_phy    = world_tree.get_size(),
+            .n_leaves_surv   = world_tree.get_size(),
+            .n_leaves_masked = n_seeds_masked,
         };
         m_pstats.update_stats(pstats_cur);
     }
@@ -438,7 +854,6 @@ private:
         const auto n2            = leaves_view.second.size() / leaves_stride;
 
         std::vector<std::uint32_t> widths_report_h;
-        // RFI control is rejected on GPU, so it is never active here.
         if (m_poly_basis == "taylor") {
             widths_report_h.resize(n_leaves);
             const auto folds   = world_tree.get_folds_circular_view();
@@ -529,7 +944,7 @@ private:
             "cudaStreamSynchronize write results failed");
 
         if (m_result_sink) {
-            m_result_sink(pipelines::detail::EPResultPayload{
+            pipelines::detail::EPResultPayload payload{
                 .run_name     = std::string(run_name),
                 .snail_scheme = m_snail_scheme.get_data(),
                 .leaves       = std::move(leaves_report_h),
@@ -539,9 +954,16 @@ private:
                 .gflops       = compute_total_prune_gflops(),
                 .nparams      = m_cfg.get_nparams(),
                 .stats        = m_pstats,
-            });
+            };
+            if (m_rfi != nullptr && m_rfi->has_harvest()) {
+                payload.harvest           = std::move(m_harvest);
+                payload.n_harvested_total = m_n_harvested_total;
+            }
+            m_result_sink(std::move(payload));
             return;
         }
+        error_check::check(m_rfi == nullptr,
+                           "PruneCUDAImpl: RFI control needs the sweep writer");
         // Both host vectors are now contiguous — wrap as single-span views
         memory::CircularView<double> leaves_report_view{
             std::span<double>(leaves_report_h), std::span<double>{}};
@@ -679,8 +1101,32 @@ private:
         const auto n_branches  = world_tree.get_size_old();
         const auto n_overloads = world_tree.overload_count();
 
+        if (m_rfi != nullptr) {
+            cuda_utils::check_cuda_call(
+                cudaMemsetAsync(thrust::raw_pointer_cast(m_counters_d.data()),
+                                0, sizeof(unsigned long long), stream),
+                "EP RFI counter reset failed");
+        }
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats,
                                   stream);
+        if (m_rfi != nullptr) {
+            unsigned long long n_masked = 0;
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(
+                    &n_masked, thrust::raw_pointer_cast(m_counters_d.data()),
+                    sizeof(n_masked), cudaMemcpyDeviceToHost, stream),
+                "EP RFI counter copy failed");
+            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                        "EP RFI counter wait failed");
+            stats.n_leaves_masked += static_cast<SizeType>(n_masked);
+            if (stats.n_harvested > 0) {
+                spdlog::debug("Pruning level {:3d}: harvested {} candidate(s) "
+                              "(run total {}, recorded {}, mask cells {})",
+                              m_prune_level, stats.n_harvested,
+                              m_n_harvested_total, m_harvest.size(),
+                              m_mask.count());
+            }
+        }
 
         // Finalize: make new region active, defragment for contiguous access.
         world_tree.finalize_in_place_update();
@@ -688,16 +1134,18 @@ private:
         // Update statistics
         stats.norm_scores(world_tree.get_size());
         const search::PruneStats pstats_cur{
-            .level         = m_prune_level,
-            .seg_idx       = seg_idx_cur,
-            .threshold     = threshold,
-            .score_min     = stats.score_min,
-            .score_max     = stats.score_max,
-            .n_branches    = n_branches,
-            .n_leaves      = stats.n_leaves,
-            .n_leaves_phy  = stats.n_leaves_phy,
-            .n_leaves_surv = world_tree.get_size(),
-            .n_overloads   = world_tree.overload_count() - n_overloads,
+            .level           = m_prune_level,
+            .seg_idx         = seg_idx_cur,
+            .threshold       = threshold,
+            .score_min       = stats.score_min,
+            .score_max       = stats.score_max,
+            .n_branches      = n_branches,
+            .n_leaves        = stats.n_leaves,
+            .n_leaves_phy    = stats.n_leaves_phy,
+            .n_leaves_surv   = world_tree.get_size(),
+            .n_leaves_masked = stats.n_leaves_masked,
+            .n_harvested     = stats.n_harvested,
+            .n_overloads     = world_tree.overload_count() - n_overloads,
         };
         m_pstats.update_stats(pstats_cur);
 
@@ -738,6 +1186,10 @@ private:
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
 
+        // Early harvest at this level (the batch's max score gates the work).
+        const auto harvest_threshold = get_harvest_threshold(m_prune_level);
+        const bool harvest_active    = is_harvest_enabled(harvest_threshold);
+
         MinMaxFloat batch_minmax{};
         auto accumulate_min_max = [&stats](const MinMaxFloat& minmax) {
             stats.score_min = std::min(stats.score_min, minmax.min);
@@ -756,6 +1208,22 @@ private:
                 m_prune_funcs->collect_shift_add_score(batch_minmax, &n_valid);
             stats.n_leaves_phy += n_valid;
             accumulate_min_max(batch_minmax);
+            if (harvest_active && n_passing > 0 &&
+                batch_minmax.max >= harvest_threshold) {
+                // The survivors are in the tree's uncommitted region, not yet
+                // transformed. Harvested leaves stay for this level; their
+                // children fall in the masked cells at the next.
+                const auto dw = world_tree.get_direct_write();
+                stats.n_harvested += harvest_entries(
+                    HarvestSource{.leaves   = dw.leaves,
+                                  .scores   = dw.scores,
+                                  .folds    = dw.folds,
+                                  .start    = direct_write_head,
+                                  .capacity = world_tree.get_capacity(),
+                                  .n        = n_passing},
+                    harvest_threshold, coord_cur, seg_idx_cur,
+                    [](SizeType, FoldTypeCUDA*) {});
+            }
             world_tree.commit_direct_write(n_passing);
             if (n_passing > 0) {
                 const auto capacity      = world_tree.get_capacity();
@@ -839,6 +1307,9 @@ private:
                     cuda_utils::as_span(prune_ws.branched_param_idx_d),
                     cuda_utils::as_span(prune_ws.branched_phase_shift_d),
                     coord_add, coord_cur, coord_init, n_leaves_batch, stream);
+                if (m_mask_on_device) {
+                    mask_resolved(n_leaves_batch, /*count=*/true);
+                }
                 const auto dw     = world_tree.get_direct_write();
                 direct_write_head = dw.write_head;
                 const core::EPDirectWriteCUDA<FoldTypeCUDA> target{
@@ -874,12 +1345,15 @@ private:
                 cuda_utils::as_span(prune_ws.branched_param_idx_d),
                 cuda_utils::as_span(prune_ws.branched_phase_shift_d), coord_add,
                 coord_cur, coord_init, n_leaves_batch, stream);
+            if (m_mask_on_device) {
+                mask_resolved(n_leaves_batch, /*count=*/true);
+            }
 
             // Shift-add and score (one fused kernel for Fourier folds).
             // branched_indices_d are logical indices, converted to physical
             // indices in the kernel.
-            SizeType n_valid            = 0;
-            const auto n_leaves_passing = m_prune_funcs->shift_add_score(
+            SizeType n_valid      = 0;
+            auto n_leaves_passing = m_prune_funcs->shift_add_score(
                 world_tree.get_folds_span(),
                 cuda_utils::as_span(prune_ws.branched_indices_d),
                 cuda_utils::as_span(prune_ws.validation_mask_d),
@@ -895,6 +1369,82 @@ private:
             stats.n_leaves_phy += n_valid;
 
             accumulate_min_max(batch_minmax);
+
+            if (harvest_active && n_leaves_passing > 0 &&
+                batch_minmax.max >= harvest_threshold) {
+                SizeType n_listed         = 0;
+                const auto physical_start = world_tree.get_physical_start_idx();
+                const auto tree_capacity  = world_tree.get_capacity();
+                const auto n_h            = harvest_entries(
+                    HarvestSource{.leaves = thrust::raw_pointer_cast(
+                                      prune_ws.branched_leaves_d.data()),
+                                  .scores = thrust::raw_pointer_cast(
+                                      prune_ws.branched_scores_d.data()),
+                                  .flags = thrust::raw_pointer_cast(
+                                      prune_ws.filtered_mask_d.data()),
+                                  .clear_valid = thrust::raw_pointer_cast(
+                                      prune_ws.validation_mask_d.data()),
+                                  .capacity = n_leaves_batch,
+                                  .n        = n_leaves_batch},
+                    harvest_threshold, coord_cur, seg_idx_cur,
+                    [&](SizeType j, FoldTypeCUDA* dst) {
+                        // The fused kernel kept no folds: recompute entry j.
+                        m_prune_funcs->shift_add(
+                            world_tree.get_folds_span(),
+                            cuda_utils::as_span(prune_ws.branched_indices_d)
+                                .subspan(j, 1),
+                            cuda_utils::as_span(prune_ws.filtered_mask_d)
+                                .subspan(j, 1),
+                            ffa_fold_segment,
+                            cuda_utils::as_span(prune_ws.branched_param_idx_d)
+                                .subspan(j, 1),
+                            cuda_utils::as_span(prune_ws.branched_phase_shift_d)
+                                .subspan(j, 1),
+                            cuda_utils::as_span(prune_ws.branched_folds_d), 1,
+                            physical_start, tree_capacity, stream);
+                        cuda_utils::check_cuda_call(
+                            cudaMemcpyAsync(
+                                dst,
+                                thrust::raw_pointer_cast(
+                                    prune_ws.branched_folds_d.data()),
+                                prune_ws.folds_stride * sizeof(FoldTypeCUDA),
+                                cudaMemcpyDeviceToDevice, stream),
+                            "EP harvest fold copy failed");
+                    },
+                    &n_listed);
+                stats.n_harvested += n_h;
+                if (n_listed > 0) {
+                    // The listed leaves are cleared; also drop every leaf of
+                    // the batch in a cell the harvests masked (CPU step 4).
+                    if (n_h > 0) {
+                        mask_resolved(n_leaves_batch, /*count=*/false);
+                    }
+                    auto* const count_d =
+                        thrust::raw_pointer_cast(m_counters_d.data()) + 1;
+                    cuda_utils::check_cuda_call(
+                        cudaMemsetAsync(count_d, 0, sizeof(unsigned long long),
+                                        stream),
+                        "EP harvest count reset failed");
+                    kernel_and_count<<<rfi_grid(n_leaves_batch), kRfiBlock, 0,
+                                       stream>>>(
+                        thrust::raw_pointer_cast(
+                            prune_ws.filtered_mask_d.data()),
+                        thrust::raw_pointer_cast(
+                            prune_ws.validation_mask_d.data()),
+                        n_leaves_batch, count_d);
+                    cuda_utils::check_last_cuda_error(
+                        "EP harvest recount failed");
+                    unsigned long long n_left = 0;
+                    cuda_utils::check_cuda_call(
+                        cudaMemcpyAsync(&n_left, count_d, sizeof(n_left),
+                                        cudaMemcpyDeviceToHost, stream),
+                        "EP harvest recount copy failed");
+                    cuda_utils::check_cuda_call(
+                        cudaStreamSynchronize(stream),
+                        "EP harvest recount wait failed");
+                    n_leaves_passing = static_cast<SizeType>(n_left);
+                }
+            }
 
             if (n_leaves_passing == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -1100,7 +1650,8 @@ public:
          SizeType max_sugg,
          SizeType batch_size,
          std::string_view poly_basis,
-         int device_id)
+         int device_id,
+         PruneRFIConfig rfi_config)
         : m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
                                              : cfg.with_ep_default_nsegments()),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
@@ -1150,6 +1701,7 @@ public:
                                  pipeline.ws_max_sugg, pipeline.ws_ncoords,
                                  m_cfg.get_nparams(), nbins,
                                  pipeline.ws_nsegments);
+        setup_rfi_control(std::move(rfi_config), nsegments);
     }
 
     ~Impl()                      = default;
@@ -1226,6 +1778,43 @@ private:
     plans::FFAPlan<HostFoldT> m_ffa_plan;
     std::vector<double> m_branching_pattern;
     SizeType m_branch_max{0};
+    // RFI control of the chunk and its static mask on the FFA base grid.
+    PruneRFIConfig m_rfi_config;
+    search::GridMask m_mask_base;
+
+    // Validate the RFI configuration and rasterise the static pulsar mask
+    // onto the (accel, freq) grid that resolve() snaps to (as on CPU).
+    void setup_rfi_control(PruneRFIConfig rfi_config, SizeType nsegments) {
+        if (!rfi_config.is_active()) {
+            return;
+        }
+        error_check::check(!rfi_config.impulsive_veto,
+                           "EPMultiPassCudaCore: the impulsive veto is CPU "
+                           "only; disable [ep.rfi] impulsive_veto or use the "
+                           "CPU backend");
+        rfi_config.validate(nsegments);
+        m_rfi_config = rfi_config.expand_harvest(m_threshold_scheme);
+        m_rfi_config.validate(nsegments);
+        const auto n_params = m_cfg.get_nparams();
+        error_check::check_greater_equal(
+            n_params, SizeType{2},
+            "EPMultiPassCudaCore: pruning requires at least 2 parameters");
+        const auto& counts = m_ffa_plan.get_param_counts().back();
+        const auto limits  = m_cfg.get_param_limits();
+        m_mask_base =
+            search::GridMask(limits[n_params - 2], counts[n_params - 2],
+                             limits[n_params - 1], counts[n_params - 1]);
+        m_mask_base.add_windows(m_rfi_config.pulsar_mask,
+                                m_rfi_config.n_harmonics,
+                                m_rfi_config.fractional_harmonics);
+        spdlog::info(
+            "EPMultiPassCudaCore: RFI control: {} mask window(s) ({} "
+            "harmonics{}) -> {} of {} grid cells masked; harvesting {}",
+            m_rfi_config.pulsar_mask.size(), m_rfi_config.n_harmonics,
+            m_rfi_config.fractional_harmonics ? ", fractional" : "",
+            m_mask_base.count(), m_mask_base.get_n_cells(),
+            m_rfi_config.has_harvest() ? "on" : "off");
+    }
 
     // EP workspace ownership
     ExecutionStream m_execution_stream;
@@ -1297,7 +1886,7 @@ private:
         auto prune = PruneCUDAImpl<FoldTypeCUDA>(
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get(),
-            sink);
+            sink, &m_rfi_config, &m_mask_base);
         for (const auto ref_seg : ref_segs_to_process) {
             loki::interrupt::check(m_execution_stream.get());
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
@@ -1375,7 +1964,8 @@ EPMultiPassCudaCore<FoldTypeCUDA>::EPMultiPassCudaCore(
     SizeType max_sugg,
     SizeType batch_size,
     std::string_view poly_basis,
-    int device_id)
+    int device_id,
+    PruneRFIConfig rfi_config)
     : m_impl(std::make_unique<Impl>(pipeline,
                                     std::move(cfg),
                                     threshold_scheme,
@@ -1385,7 +1975,8 @@ EPMultiPassCudaCore<FoldTypeCUDA>::EPMultiPassCudaCore(
                                     max_sugg,
                                     batch_size,
                                     poly_basis,
-                                    device_id)) {}
+                                    device_id,
+                                    std::move(rfi_config))) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 EPMultiPassCudaCore<FoldTypeCUDA>::~EPMultiPassCudaCore() = default;

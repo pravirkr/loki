@@ -68,6 +68,7 @@ std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_gpu(
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
     const std::optional<std::vector<SizeType>>& ref_segs,
-    int device_id);
+    int device_id,
+    const algorithms::PruneRFIConfig& rfi_config);
 
 } // namespace loki::pipelines::detail

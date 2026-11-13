@@ -188,23 +188,23 @@ make_memory_context(const search::PulsarSearchConfig& cfg,
                     const Exec& exec) {
     search::detail::check_ep_supported(cfg, "EPRegionPlanner");
     detail::EPMemoryContext ctx{
-        .nparams   = cfg.get_nparams(),
-        .nsamps    = cfg.get_nsamps(),
-        .n_workers = resolve_n_workers(cfg.get_nthreads(), n_workers),
-        .harvest   = detail::EPHarvestBound::from(rfi_config),
+        .nparams    = cfg.get_nparams(),
+        .nsamps     = cfg.get_nsamps(),
+        .n_workers  = resolve_n_workers(cfg.get_nthreads(), n_workers),
+        .harvest    = detail::EPHarvestBound::from(rfi_config),
+        .rfi_active = rfi_config.is_active(),
     };
     if (exec.backend == Backend::kCPU) {
         return ctx;
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        if (rfi_config.is_active()) {
-            loki::detail::throw_unimplemented("EPRegionPlanner (rfi_config)",
-                                              exec.backend);
+        if (rfi_config.impulsive_veto) {
+            loki::detail::throw_unimplemented(
+                "EPRegionPlanner (rfi_config.impulsive_veto)", exec.backend);
         }
         ctx.n_workers         = 1;
         ctx.batch_size        = detail::kEPBatchSizeCuda;
-        ctx.harvest           = {};
         ctx.kind              = detail::EPMemoryKind::kCuda;
         ctx.device            = exec.device;
         ctx.cub_scratch_bytes = &detail::ep_cuda_cub_scratch_bytes;

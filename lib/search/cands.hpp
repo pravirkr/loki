@@ -350,6 +350,14 @@ private:
     void ensure_datasets(SizeType n_params);
 };
 
+/**
+ * @brief Writes an RFI-control configuration into @p rfi (an empty
+ * `rfi_config` group): pulsar_mask, harvest_scheme and the settings as
+ * attributes.
+ */
+void write_rfi_config(HighFive::Group& rfi,
+                      const algorithms::PruneRFIConfig& rfi_config);
+
 class PruneResultWriter {
 public:
     enum class Mode : std::uint8_t { kWrite, kAppend };

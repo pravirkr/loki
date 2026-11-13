@@ -57,6 +57,8 @@ impulsive_veto = true
     cfg.backend = "cuda"
     with pytest.raises(ValueError, match="CPU only"):
         cfg.check_rfi_backend()
+    cfg.rfi.impulsive_veto = False
+    cfg.check_rfi_backend()
 
 
 def test_ep_rfi_table_is_strict():

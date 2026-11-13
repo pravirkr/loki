@@ -655,6 +655,31 @@ void WorldTreeCUDA<FoldTypeCUDA>::add_initial(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::add_initial_scattered(
+    cuda::std::span<const double> leaves_batch,
+    cuda::std::span<const FoldTypeCUDA> folds_batch,
+    cuda::std::span<const float> scores_batch,
+    cuda::std::span<const uint32_t> indices_batch,
+    SizeType n_keep,
+    cudaStream_t stream) {
+    error_check::check_less_equal(
+        n_keep, m_capacity, "WorldTreeCUDA: Suggestions too large to add.");
+    error_check::check_greater_equal(
+        indices_batch.size(), n_keep,
+        "add_initial_scattered: indices_batch smaller than n_keep");
+    reset();
+    if (n_keep > 0) {
+        scatter_to_circular_copy_cuda(
+            leaves_batch.data(), folds_batch.data(), scores_batch.data(),
+            indices_batch.data(), thrust::raw_pointer_cast(m_leaves.data()),
+            thrust::raw_pointer_cast(m_folds.data()),
+            thrust::raw_pointer_cast(m_scores.data()), 0, m_capacity, n_keep,
+            m_leaves_stride, m_folds_stride, stream);
+    }
+    m_size = n_keep;
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 typename WorldTreeCUDA<FoldTypeCUDA>::DirectWrite
 WorldTreeCUDA<FoldTypeCUDA>::get_direct_write() noexcept {
     return {.leaves     = thrust::raw_pointer_cast(m_leaves.data()),

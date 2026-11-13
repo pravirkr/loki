@@ -2215,7 +2215,8 @@ int main(int argc, char** argv) {
         "when a batch overflows it, in (0, 1] (default: 0.5)");
 
     auto* ep_grp_rfi = ep->add_option_group(
-        "RFI control (CPU only; sets [ep.rfi], see the config template)");
+        "RFI control (sets [ep.rfi], see the config template; the "
+        "impulsive veto is CPU only)");
     ep_grp_rfi
         ->add_option("--pulsar-mask", ep_pulsar_mask,
                      "Frequency window F_LO:F_HI in Hz masked at every "

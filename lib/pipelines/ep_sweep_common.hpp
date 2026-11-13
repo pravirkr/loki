@@ -13,14 +13,17 @@
 #include <filesystem>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "loki/algorithms/ep_regions.hpp"
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -83,6 +86,14 @@ struct EPResultPayload {
     double gflops{0.0};
     SizeType nparams{0};
     search::PruneStatsCollection stats;
+    /// The run's early-harvest records when harvesting is on (written under
+    /// `runs/<run>/harvest`), else empty.
+    std::variant<std::monostate,
+                 search::HarvestBuffer<float>,
+                 search::HarvestBuffer<ComplexType>>
+        harvest;
+    /// Every harvest of the run, including those beyond max_harvests.
+    SizeType n_harvested_total{0};
 };
 
 /// One active write and at most one waiting payload. All final-file HDF5
@@ -100,7 +111,8 @@ public:
                   std::string_view poly_basis,
                   float ref_ducy,
                   std::optional<search::detail::LeafReductionSpec> reduction =
-                      std::nullopt);
+                      std::nullopt,
+                  std::span<const algorithms::PruneRFIConfig> rfi_configs = {});
     ~EPSweepWriter();
     EPSweepWriter(const EPSweepWriter&)            = delete;
     EPSweepWriter& operator=(const EPSweepWriter&) = delete;
@@ -114,6 +126,9 @@ private:
     SizeType m_nchunks;
     /// Per chunk: the leaf reduction with the chunk's nbins, if any.
     std::vector<search::detail::LeafReductionSpec> m_reductions;
+    /// True when the chunks carry an active RFI configuration: finish()
+    /// then writes /harvested.
+    bool m_rfi_active{false};
     bool m_finished{false};
     bool m_published{false};
     std::mutex m_mutex;

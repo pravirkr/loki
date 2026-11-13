@@ -822,27 +822,8 @@ PruneResultWriter::PruneResultWriter(std::filesystem::path filename,
       m_mode(mode),
       m_group_path(std::move(group_path)) {}
 
-void PruneResultWriter::write_metadata(
-    const std::vector<std::string>& param_names,
-    SizeType nsegments,
-    SizeType max_sugg,
-    std::span<const float> threshold_scheme,
-    const algorithms::PruneRFIConfig& rfi_config) {
-    const std::scoped_lock lock(m_hdf5_mutex);
-
-    HighFive::File file = open_file();
-    if (file.exist("pruning_version")) {
-        throw std::runtime_error("Metadata already exists in file. Use "
-                                 "append mode or new file.");
-    }
-    file.createAttribute("pruning_version", "1.0.0-cpp");
-    file.createAttribute("param_names", param_names);
-    file.createAttribute("nsegments", nsegments);
-    file.createAttribute("max_sugg", max_sugg);
-    file.createDataSet("threshold_scheme", threshold_scheme);
-
-    // RFI-control configuration
-    HighFive::Group rfi  = file.createGroup("rfi_config");
+void write_rfi_config(HighFive::Group& rfi,
+                      const algorithms::PruneRFIConfig& rfi_config) {
     const auto n_windows = rfi_config.pulsar_mask.size();
     std::vector<double> windows_flat(n_windows * 4);
     for (SizeType i = 0; i < n_windows; ++i) {
@@ -872,6 +853,30 @@ void PruneResultWriter::write_metadata(
     rfi.createAttribute("impulsive_kappa", rfi_config.impulsive_kappa);
     rfi.createAttribute("impulsive_min_level", rfi_config.impulsive_min_level);
     rfi.createAttribute("impulsive_min_snr", rfi_config.impulsive_min_snr);
+}
+
+void PruneResultWriter::write_metadata(
+    const std::vector<std::string>& param_names,
+    SizeType nsegments,
+    SizeType max_sugg,
+    std::span<const float> threshold_scheme,
+    const algorithms::PruneRFIConfig& rfi_config) {
+    const std::scoped_lock lock(m_hdf5_mutex);
+
+    HighFive::File file = open_file();
+    if (file.exist("pruning_version")) {
+        throw std::runtime_error("Metadata already exists in file. Use "
+                                 "append mode or new file.");
+    }
+    file.createAttribute("pruning_version", "1.0.0-cpp");
+    file.createAttribute("param_names", param_names);
+    file.createAttribute("nsegments", nsegments);
+    file.createAttribute("max_sugg", max_sugg);
+    file.createDataSet("threshold_scheme", threshold_scheme);
+
+    // RFI-control configuration
+    auto rfi = file.createGroup("rfi_config");
+    write_rfi_config(rfi, rfi_config);
 }
 
 template <SupportedFoldType FoldType>

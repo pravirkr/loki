@@ -365,7 +365,8 @@ private:
  * @brief The [ep.rfi] table: RFI control of the EP pruning (pulsar mask,
  * early harvesting, impulsive-segment veto). See algorithms::PruneRFIConfig.
  *
- * @details CPU only. The harvest thresholds follow each chunk's pruning
+ * @details The impulsive veto is CPU only; the mask and the harvest run on
+ * both backends. The harvest thresholds follow each chunk's pruning
  * threshold scheme (make_default_harvest_scheme with harvest_min_level,
  * harvest_offset and harvest_min_snr). Options of a mechanism that is off are
  * kept but unused.
@@ -438,8 +439,8 @@ struct EPTomlConfig : FFATomlConfig {
 
     /// @brief The pruning's RFI control: inactive without [ep.rfi].
     [[nodiscard]] algorithms::PruneRFIConfig prune_rfi_config() const;
-    /// @brief Throws std::invalid_argument if an active [ep.rfi] meets a
-    /// non-CPU backend (RFI control is CPU only). Call after command-line
+    /// @brief Throws std::invalid_argument if [ep.rfi] enables the impulsive
+    /// veto (CPU only) with a non-CPU backend. Call after command-line
     /// overrides; to_ep_search_config() calls it.
     void check_rfi_backend() const;
 

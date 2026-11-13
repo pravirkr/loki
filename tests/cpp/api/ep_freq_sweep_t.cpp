@@ -546,14 +546,14 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
     }
 }
 
-TEST_CASE("EPFreqSweep CUDA rejects an active RFI config",
+TEST_CASE("EPFreqSweep CUDA rejects the impulsive veto",
           "[ep_freq_sweep][cuda]") {
     if (!cuda_available()) {
         SKIP("needs a CUDA build");
     }
     const auto cfg = make_test_cfg(4.0, 140.0, 142.0);
     loki::algorithms::PruneRFIConfig rfi;
-    rfi.harvest_scheme = {5.0F};
+    rfi.impulsive_veto = true;
     CHECK_THROWS_AS(EPFreqSweep(cfg, false, 0.1F, "taylor", 0.1F, rfi,
                                 std::nullopt, std::nullopt, std::nullopt,
                                 Exec::cuda(0)),

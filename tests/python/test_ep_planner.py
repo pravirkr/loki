@@ -43,9 +43,9 @@ def test_ep_region_planner_accepts_workers_and_rfi_config() -> None:
     "cuda" not in libloki.available_backends(),
     reason="CUDA backend not built",
 )
-def test_ep_region_planner_cuda_rejects_an_active_rfi_config() -> None:
+def test_ep_region_planner_cuda_rejects_the_impulsive_veto() -> None:
     cfg = _search_config(nthreads=1)
-    rfi = libloki.prune.PruneRFIConfig(harvest_scheme=[5.0], max_harvests=64)
+    rfi = libloki.prune.PruneRFIConfig(impulsive_veto=True)
     with pytest.raises(ValueError):  # noqa: PT011
         libloki.prune.EPRegionPlannerTime(cfg, rfi_config=rfi, backend="cuda")
 
@@ -96,7 +96,7 @@ def test_ep_region_planner_rejects_unknown_backend() -> None:
 
 
 @pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
-def test_ep_freq_sweep_cuda_runs_and_rejects_rfi(tmp_path: Path) -> None:
+def test_ep_freq_sweep_cuda_runs_and_rejects_the_veto(tmp_path: Path) -> None:
     cfg = _search_config(nthreads=1)
     rng = np.random.default_rng(0)
     ts_e = rng.standard_normal(1 << 16).astype(np.float32)
@@ -111,8 +111,8 @@ def test_ep_freq_sweep_cuda_runs_and_rejects_rfi(tmp_path: Path) -> None:
     sweep.execute(ts_e, ts_v, str(tmp_path), "py_cuda")
     assert (tmp_path / "py_cuda_ep_results.h5").exists()
 
-    rfi = libloki.prune.PruneRFIConfig(harvest_scheme=[5.0], max_harvests=64)
-    with pytest.raises(ValueError, match="rfi_config"):
+    rfi = libloki.prune.PruneRFIConfig(impulsive_veto=True)
+    with pytest.raises(ValueError, match="impulsive_veto"):
         libloki.prune.EPFreqSweep(cfg, rfi_config=rfi, backend="cuda")
 
 

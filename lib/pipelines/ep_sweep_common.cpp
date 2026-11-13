@@ -6,7 +6,9 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <fmt/format.h>
@@ -172,7 +174,8 @@ EPSweepWriter::EPSweepWriter(
     float min_pd,
     std::string_view poly_basis,
     float ref_ducy,
-    std::optional<search::detail::LeafReductionSpec> reduction)
+    std::optional<search::detail::LeafReductionSpec> reduction,
+    std::span<const algorithms::PruneRFIConfig> rfi_configs)
     : m_file(result_file),
       m_partial_file(std::filesystem::path(result_file) += ".partial"),
       m_nchunks(chunks.size()) {
@@ -185,6 +188,23 @@ EPSweepWriter::EPSweepWriter(
     }
     initialize_ep_results(m_partial_file, chunks, cfg, min_pd, poly_basis,
                           ref_ducy, 0.0F, "cuda");
+    if (!rfi_configs.empty()) {
+        if (rfi_configs.size() != chunks.size()) {
+            throw std::invalid_argument(
+                "EP writer: one RFI configuration per chunk is required");
+        }
+        m_rfi_active = rfi_configs.front().is_active();
+    }
+    if (m_rfi_active) {
+        // The chunk's RFI control, with its own harvest scheme, as the CPU
+        // sweep's merge copies it.
+        HighFive::File file(m_partial_file.string(), HighFive::File::ReadWrite);
+        for (SizeType i = 0; i < chunks.size(); ++i) {
+            auto rfi = file.createGroup(
+                fmt::format("chunks/chunk_{:04d}/rfi_config", i));
+            search::write_rfi_config(rfi, rfi_configs[i]);
+        }
+    }
     m_thread = std::thread([this] { run(); });
 }
 
@@ -245,6 +265,15 @@ void EPSweepWriter::run() {
                 payload.widths,
                 m_reductions.empty() ? nullptr
                                      : &m_reductions[payload.chunk_id]);
+            std::visit(
+                [&]<typename H>(const H& harvest) {
+                    if constexpr (!std::is_same_v<H, std::monostate>) {
+                        writer.write_run_harvest(payload.run_name, harvest,
+                                                 payload.nparams,
+                                                 payload.n_harvested_total);
+                    }
+                },
+                payload.harvest);
             m_gflops += payload.gflops;
         }
     } catch (...) {
@@ -276,6 +305,9 @@ double EPSweepWriter::finish(float runtime) {
         HighFive::File file(m_partial_file.string(), HighFive::File::ReadWrite);
         file.getAttribute("total_runtime").write(runtime);
         file.getAttribute("total_pruning_gflops").write(m_gflops);
+        if (m_rfi_active) {
+            search::write_harvested(file);
+        }
         file.getAttribute("complete").write(1);
     }
     std::filesystem::rename(m_partial_file, m_file);

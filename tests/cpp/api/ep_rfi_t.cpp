@@ -276,21 +276,25 @@ TEST_CASE("[ep.rfi] is checked again after command-line overrides",
     CHECK_THROWS_AS(cfg.to_ep_search_config(), std::invalid_argument);
 }
 
-TEST_CASE("An active [ep.rfi] needs the CPU backend", "[config][ep][rfi]") {
+TEST_CASE("The impulsive veto of [ep.rfi] needs the CPU backend",
+          "[config][ep][rfi]") {
     auto cfg = EPTomlConfig::from_string(
-        make_doc("harvest = true\n", "nthreads = 2\nbackend = \"cuda\"\n"));
+        make_doc("harvest = true\nimpulsive_veto = true\n",
+                 "nthreads = 2\nbackend = \"cuda\"\n"));
     try {
         cfg.check_rfi_backend();
-        FAIL("an active [ep.rfi] with backend cuda must be rejected");
+        FAIL("the impulsive veto with backend cuda must be rejected");
     } catch (const std::invalid_argument& err) {
         CHECK(std::string(err.what()).find("backend") != std::string::npos);
     }
     CHECK_THROWS_AS(cfg.to_ep_search_config(), std::invalid_argument);
-    // The command line can switch the backend back; an inactive table is
-    // fine on any backend.
+    // The command line can switch the backend back; the mask and harvest run
+    // on CUDA too.
     cfg.backend = loki::Backend::kCPU;
     CHECK_NOTHROW(cfg.check_rfi_backend());
-    cfg.backend      = loki::Backend::kCUDA;
+    cfg.backend             = loki::Backend::kCUDA;
+    cfg.rfi->impulsive_veto = false;
+    CHECK_NOTHROW(cfg.check_rfi_backend());
     cfg.rfi->harvest = false;
     CHECK_NOTHROW(cfg.check_rfi_backend());
 }
@@ -503,6 +507,134 @@ TEST_CASE("EPFreqSweep masks, harvests and vetoes on the CPU",
         total += r;
     }
     CHECK(total == harvested_f.size());
+}
+
+namespace {
+
+/// What an RFI-controlled sweep left: final leaves, harvested frequencies,
+/// the /harvested table's frequencies, and the run_stats counters.
+struct RfiSweepSummary {
+    std::vector<std::pair<double, float>> leaves;
+    std::vector<double> harvested_f;
+    std::vector<double> table_f;
+    std::uint64_t n_leaves_masked{0};
+    std::uint64_t n_harvested{0};
+};
+
+RfiSweepSummary run_rfi_sweep(const PulsarSearchConfig& cfg,
+                              const std::vector<float>& ts_e,
+                              const std::vector<float>& ts_v,
+                              const PruneRFIConfig& rfi,
+                              loki::Exec exec,
+                              const std::filesystem::path& dir) {
+    EPFreqSweep sweep(cfg, false, 0.1F, "taylor", 0.1F, rfi, std::nullopt,
+                      std::nullopt, std::vector<SizeType>{4U}, exec);
+    sweep.execute(ts_e, ts_v, dir, "rfi");
+    const auto file = dir / "rfi_ep_results.h5";
+    loki::search::write_run_stats(file, loki::search::RunStats{});
+    const HighFive::File h5(file.string(), HighFive::File::ReadOnly);
+    RfiSweepSummary out;
+    const auto chunks = h5.getGroup("chunks");
+    for (const auto& name : chunks.listObjectNames()) {
+        const auto runs = chunks.getGroup(name + "/runs");
+        for (const auto& run_name : runs.listObjectNames()) {
+            const auto run   = runs.getGroup(run_name);
+            const auto these = final_leaves(run);
+            out.leaves.insert(out.leaves.end(), these.begin(), these.end());
+            REQUIRE(run.exist("harvest"));
+            const auto dims =
+                run.getDataSet("harvest/param_sets").getDimensions();
+            if (dims[0] == 0) {
+                continue;
+            }
+            std::vector<double> params(dims[0] * dims[1] * dims[2]);
+            run.getDataSet("harvest/param_sets").read_raw(params.data());
+            for (std::size_t i = 0; i < dims[0]; ++i) {
+                out.harvested_f.push_back(params[(i * dims[1] * dims[2]) + 2]);
+            }
+        }
+    }
+    if (h5.exist("harvested")) {
+        const auto dims = h5.getDataSet("harvested/param_sets").getDimensions();
+        std::vector<double> params(dims[0] * dims[1]);
+        if (dims[0] != 0) {
+            h5.getDataSet("harvested/param_sets").read_raw(params.data());
+        }
+        for (std::size_t i = 0; i < dims[0]; ++i) {
+            out.table_f.push_back(params[(i * dims[1]) + dims[1] - 1]);
+        }
+    }
+    const auto stats = h5.getGroup("run_stats");
+    stats.getAttribute("n_leaves_masked").read(out.n_leaves_masked);
+    stats.getAttribute("n_harvested").read(out.n_harvested);
+    return out;
+}
+
+float best_near(const std::vector<std::pair<double, float>>& leaves,
+                double f,
+                double tol) {
+    float best = 0.0F;
+    for (const auto& [freq, score] : leaves) {
+        if (std::abs(freq - f) <= tol) {
+            best = std::max(best, score);
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+TEST_CASE("EPFreqSweep masks and harvests on CUDA as on the CPU",
+          "[ep_freq_sweep][rfi][cuda]") {
+    if (!loki::is_available(loki::Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    constexpr double kHarvested = 141.0;
+    constexpr double kMasked    = 143.5;
+    const auto cfg              = make_sweep_cfg(140.0, 145.0);
+    const auto [ts_e, ts_v] =
+        make_series(cfg.get_nsamps(), cfg.get_tsamp(),
+                    {{kHarvested, 1.0F}, {kMasked, 1.0F}});
+    PruneRFIConfig rfi;
+    rfi.pulsar_mask.push_back({.f_lo = kMasked - 0.05, .f_hi = kMasked + 0.05});
+    rfi.harvest_defaults =
+        HarvestDefaults{.min_level = 4, .offset = 6.0F, .min_snr = 25.0F};
+
+    const TempDir cpu_dir("loki-ep-rfi-cpu");
+    const TempDir gpu_dir("loki-ep-rfi-cuda");
+    const auto cpu =
+        run_rfi_sweep(cfg, ts_e, ts_v, rfi, loki::Exec{}, cpu_dir.path());
+    const auto gpu = run_rfi_sweep(cfg, ts_e, ts_v, rfi, loki::Exec::cuda(0),
+                                   gpu_dir.path());
+    for (const auto* s : {&cpu, &gpu}) {
+        // The bright source is harvested and listed once; neither source
+        // reaches the final leaves.
+        REQUIRE_FALSE(s->harvested_f.empty());
+        CHECK(std::ranges::all_of(s->harvested_f, [&](double f) {
+            return std::abs(f - kHarvested) < 0.05;
+        }));
+        REQUIRE(s->table_f.size() == 1);
+        CHECK(std::abs(s->table_f[0] - kHarvested) < 0.05);
+        CHECK(best_near(s->leaves, kHarvested, 0.05) < 10.0F);
+        CHECK(best_near(s->leaves, kMasked, 0.05) < 10.0F);
+        CHECK(s->n_leaves_masked > 0);
+        CHECK(s->n_harvested == s->harvested_f.size());
+    }
+    // The same harvests (one per run, at the same source).
+    CHECK(gpu.harvested_f.size() == cpu.harvested_f.size());
+}
+
+TEST_CASE("EPFreqSweep rejects the impulsive veto on CUDA",
+          "[ep_freq_sweep][rfi][cuda]") {
+    if (!loki::is_available(loki::Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    const auto cfg = make_sweep_cfg(140.0, 142.0);
+    PruneRFIConfig rfi;
+    rfi.impulsive_veto = true;
+    CHECK_THROWS(EPFreqSweep(cfg, false, 0.1F, "taylor", 0.1F, rfi,
+                             std::nullopt, std::nullopt,
+                             std::vector<SizeType>{4U}, loki::Exec::cuda(0)));
 }
 
 namespace {

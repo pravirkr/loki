@@ -2356,7 +2356,8 @@ use_conservative_tile = false
 # larger value keeps more of the best leaves but trims more often.
 overflow_keep_fraction = 0.5
 
-# RFI control of the pruning (CPU backend only). Omit the table for none.
+# RFI control of the pruning (impulsive_veto: CPU only). Omit the table for
+# none.
 # pulsar_mask: frequency windows [f_lo, f_hi] in Hz, masked at every
 #   acceleration. n_harmonics also masks f*k and f/k for k in [2, n], for
 #   the mask windows and for every harvest window. fractional_harmonics masks
@@ -2647,12 +2648,13 @@ algorithms::PruneRFIConfig EPTomlConfig::prune_rfi_config() const {
 }
 
 void EPTomlConfig::check_rfi_backend() const {
-    if (rfi.has_value() && rfi->is_active() && backend != Backend::kCPU) {
-        throw std::invalid_argument(fmt::format(
-            "[ep.rfi] (pulsar mask, harvesting, impulsive veto) runs on the "
-            "CPU only, but performance.backend = \"{}\": use backend = "
-            "\"cpu\" (--backend cpu), or remove [ep.rfi]",
-            to_string(backend)));
+    if (rfi.has_value() && rfi->is_active() && rfi->impulsive_veto &&
+        backend != Backend::kCPU) {
+        throw std::invalid_argument(
+            fmt::format("[ep.rfi] impulsive_veto runs on the CPU only, but "
+                        "performance.backend = \"{}\": use backend = \"cpu\" "
+                        "(--backend cpu), or set impulsive_veto = false",
+                        to_string(backend)));
     }
 }
 
