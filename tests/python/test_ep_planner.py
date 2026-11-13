@@ -155,6 +155,27 @@ def test_ep_target_snr_is_independent_and_invalidates_cache(tmp_path: Path) -> N
         libloki.prune.EPRegionPlannerTime(changed, ref_segs=[0], plan_cache_file=cache)
 
 
+@pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
+def test_ep_cuda_plan_cache_is_keyed_on_rfi_control(tmp_path: Path) -> None:
+    # A pulsar mask adds device buffers to a CUDA plan, harvest or not.
+    cfg = _search_config(nthreads=1)
+    window = libloki.prune.ParamWindow(141.0, 142.0)
+    mask = libloki.prune.PruneRFIConfig(pulsar_mask=[window])
+    cache = tmp_path / "rfi_plan.h5"
+    libloki.prune.EPRegionPlannerTime(cfg, backend="cuda").save_cache(str(cache))
+    with pytest.raises(ValueError, match="rfi_active"):
+        libloki.prune.EPRegionPlannerTime(
+            cfg, rfi_config=mask, plan_cache_file=str(cache), backend="cuda"
+        )
+    # A CPU plan does not count them.
+    cpu_cache = tmp_path / "rfi_plan_cpu.h5"
+    libloki.prune.EPRegionPlannerTime(cfg, ref_segs=[0]).save_cache(str(cpu_cache))
+    reloaded = libloki.prune.EPRegionPlannerTime(
+        cfg, rfi_config=mask, ref_segs=[0], plan_cache_file=str(cpu_cache)
+    )
+    assert reloaded.nchunks >= 1
+
+
 def test_ep_plan_cache_is_keyed_on_ffa_segmentation(tmp_path: Path) -> None:
     cfg = _search_config(nthreads=1)
     cache = tmp_path / "segmentation_plan.h5"

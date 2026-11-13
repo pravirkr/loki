@@ -397,6 +397,8 @@ public:
                              detail::kEPMemoryModelVersion);
         file.createAttribute("batch_size", m_memory.batch_size);
         file.createAttribute("n_workers", m_memory.n_workers);
+        file.createAttribute("rfi_active",
+                             static_cast<uint8_t>(m_memory.rfi_active));
         file.createAttribute("harvest_enabled",
                              static_cast<uint8_t>(m_memory.harvest.enabled));
         file.createAttribute("max_harvests", m_memory.harvest.max_harvests);
@@ -642,6 +644,11 @@ public:
         if (same_backend) {
             check_attr_u64("n_workers",
                            static_cast<std::uint64_t>(m_memory.n_workers));
+        }
+        // RFI control adds device buffers to a CUDA plan; a CPU plan does
+        // not count them, and a plan from the other backend is rechecked.
+        if (same_backend && m_memory.kind == detail::EPMemoryKind::kCuda) {
+            check_attr_u64("rfi_active", m_memory.rfi_active ? 1U : 0U);
         }
         check_attr_u64("harvest_enabled", m_memory.harvest.enabled ? 1U : 0U);
         check_attr_u64("max_harvests", m_memory.harvest.max_harvests);

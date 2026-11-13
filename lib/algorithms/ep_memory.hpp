@@ -76,7 +76,8 @@ constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 ///     multiple of kEPRingGranularity (was bit_ceil).
 /// 12: final winning-width reporting, uint32 per surviving CPU leaf.
 /// 13: CPU Fourier phase-step table included in transient FFA bytes.
-constexpr std::uint32_t kEPMemoryModelVersion = 13U;
+/// 14: CUDA RFI control without harvesting does not count harvest staging.
+constexpr std::uint32_t kEPMemoryModelVersion = 14U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -431,9 +432,9 @@ SizeType ep_cuda_ep_workspace_bytes(const EPMemoryContext& ctx,
 /// Per-group device bytes of the CUDA policy: the EP workspace plus the
 /// irfft scratch the prune functors of each chunk allocate.
 /// Device bytes of CUDA RFI control for one chunk group: the mask bitset and
-/// seed index list (one cell per FFA coordinate), and the staging of one
-/// batch's harvest candidates (their leaves and scores, reported) and of
-/// the recorded folds. Zero without RFI control.
+/// seed index list (one cell per FFA coordinate) and, with harvesting
+/// enabled, the staging of one batch's harvest candidates (their leaves and
+/// scores, reported) and of the recorded folds. Zero without RFI control.
 template <SupportedFoldType FoldType>
 SizeType ep_cuda_rfi_bytes(const EPMemoryContext& ctx,
                            SizeType nbins,
@@ -449,8 +450,11 @@ SizeType ep_cuda_rfi_bytes(const EPMemoryContext& ctx,
     const SizeType max_batch = ctx.batch_size * branch_max;
     const SizeType mask  = ((ncoords_ffa + 63) / 64) * sizeof(std::uint64_t);
     const SizeType seeds = ncoords_ffa * sizeof(std::uint32_t);
+    // The pruner allocates the staging only when it harvests.
     const SizeType staging =
-        max_batch * ((leaves_stride * sizeof(double)) + sizeof(float));
+        ctx.harvest.enabled
+            ? max_batch * ((leaves_stride * sizeof(double)) + sizeof(float))
+            : 0;
     const SizeType folds = ctx.harvest.store_folds
                                ? std::min(max_batch, ctx.harvest.max_harvests) *
                                      2 * nbins_arg * fold_bytes<FoldType>()

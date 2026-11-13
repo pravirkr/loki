@@ -190,9 +190,16 @@ on both backends; the veto runs on the CPU only (with `backend = "cuda"`,
 leaf, and the leaves of its source below the harvest threshold, can survive
 the level they were found at; their children fall in the masked cells at the
 next level, so a source harvested at the last level also stays among the
-final leaves. A CUDA plan cache records the harvest settings: turning
-harvesting on or off needs a new plan. The table is optional; without it the search and its output are
-unchanged.
+final leaves. A CUDA plan counts the device memory of the mask (and, when
+harvesting, of the harvest staging), and its plan cache records whether the
+table is active and the harvest settings: turning either on or off needs a
+new plan, whose chunk edges can differ, and so can the search grid of
+chunks the mask never touches. The table is optional; without it the
+search and its output are unchanged.
+
+A line zapped as a `birdie` is notched at its unaccelerated frequency
+only; its Doppler-drifted copies at large |a| can still give detections. A
+`pulsar_mask` window over the line removes them at every acceleration.
 
 ```toml
 [ep.rfi]

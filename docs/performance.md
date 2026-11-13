@@ -318,6 +318,29 @@ Rejected: a post-score pass on every batch from the first harvest level
 (the CPU's structure) disables the direct write and cost 10 % of a
 full-band jerk search (10.9 to 12.0 s) with nothing to harvest.
 
+#### A pulsar mask over a zapped line
+
+On a survey segment (2^26 samples, circular-orbit search at eta 2,
+10-500 Hz, CUDA, 8 chunks at a 20 GB limit) with a strong instrumental
+line and its harmonics zapped as `birdies` (0.15 Hz wide), 9 detections
+(S/N <= 7.5) remained 0.01-0.07 Hz below the line at |a| = 585-720 m/s^2:
+the birdie notches the unaccelerated spectrum, not the line's Doppler-drifted
+copies. A `pulsar_mask` window of 0.15 Hz over the line (harvest off)
+removed all 9 (6181 leaves masked) at the same search time (270 s). On
+the same plan with the window moved out of band (0 leaves masked), the
+search gave exactly those 9 detections more and every other detection
+with the same frequency and S/N: the mask removes the line and nothing
+else.
+
+The mask is in the CUDA plan's memory (the bitset and seed list, about
+0.3 MB here), so it moves the chunk edges of a plan at its limit. Across
+four layouts of this search (20 or 30 GB, with and without the mask), a binary
+pulsar in an unmasked chunk scored 8.5, 12.6, 13.9 and 16.6: at eta 2 its
+S/N depends on where the chunk edges put the grid. Compare a mask's
+effect within the chunks it touches, not by sources elsewhere. A mask-only
+configuration no longer counts the harvest staging, which only harvesting
+allocates (memory model 14).
+
 #### Default harvest floor (`harvest_min_snr = 40`)
 
 Harvesting is a failsafe that keeps a dominating source out of the tree,

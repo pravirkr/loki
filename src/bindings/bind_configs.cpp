@@ -325,8 +325,8 @@ void bind_configs(py::module_& m) {
 
     using RFI = search::EPRFIOptions;
     py::class_<RFI>(m_configs, "EPRFIOptions",
-                    "The [ep.rfi] table: RFI control of the EP pruning (CPU "
-                    "only)")
+                    "The [ep.rfi] table: RFI control of the EP pruning (the "
+                    "impulsive veto is CPU only)")
         .def(py::init<>())
         .def_readwrite("pulsar_mask", &RFI::pulsar_mask)
         .def_readwrite("n_harmonics", &RFI::n_harmonics)
