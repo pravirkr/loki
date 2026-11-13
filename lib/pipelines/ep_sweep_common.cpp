@@ -99,7 +99,8 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                        float min_pd,
                        std::string_view poly_basis,
                        float ref_ducy,
-                       float total_runtime) {
+                       float total_runtime,
+                       bool copy_rfi_config) {
     initialize_ep_results(result_file, chunk_cfgs, base_cfg, min_pd, poly_basis,
                           ref_ducy, total_runtime, "cpu");
     HighFive::File main_h5(result_file.string(), HighFive::File::ReadWrite);
@@ -115,6 +116,15 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
         if (std::filesystem::exists(chunk_result_file)) {
             HighFive::File const chunk_h5(chunk_result_file.string(),
                                           HighFive::File::ReadOnly);
+            // The chunk's RFI control, with its own harvest scheme.
+            if (copy_rfi_config && chunk_h5.exist("rfi_config")) {
+                if (H5Ocopy(chunk_h5.getId(), "rfi_config", chunk_group.getId(),
+                            "rfi_config", H5P_DEFAULT, H5P_DEFAULT) < 0) {
+                    throw std::runtime_error(fmt::format(
+                        "EPFreqSweep: failed to copy rfi_config for chunk {}",
+                        i));
+                }
+            }
             if (chunk_h5.exist("runs")) {
                 HighFive::Group const chunk_runs = chunk_h5.getGroup("runs");
                 HighFive::Group const dst_runs =

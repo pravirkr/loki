@@ -1,6 +1,7 @@
 #pragma once
 
 #include <limits>
+#include <optional>
 
 #include <fmt/format.h>
 #include <pybind11/iostream.h>
@@ -148,6 +149,7 @@ void bind_ep_region_planner(py::module& m, const std::string& name) {
 
 // Bind the RFI-control configuration types used by EPMultiPass
 inline void bind_prune_rfi(py::module& m) {
+    using algorithms::HarvestDefaults;
     using algorithms::kBirdieAccelPad;
     using algorithms::kHarvestDisabled;
     using algorithms::make_birdie_window;
@@ -185,6 +187,28 @@ inline void bind_prune_rfi(py::module& m) {
                 w.f_hi, w.a_lo, w.a_hi);
         });
 
+    py::class_<HarvestDefaults>(m, "HarvestDefaults",
+                                "Inputs of make_default_harvest_scheme: the "
+                                "engine builds the harvest scheme from its own "
+                                "pruning threshold scheme.")
+        .def(py::init([](SizeType min_level, float offset, float min_snr) {
+                 return HarvestDefaults{
+                     .min_level = min_level,
+                     .offset    = offset,
+                     .min_snr   = min_snr,
+                 };
+             }),
+             py::kw_only(), py::arg("min_level") = 10U,
+             py::arg("offset") = 10.0F, py::arg("min_snr") = 15.0F)
+        .def_readwrite("min_level", &HarvestDefaults::min_level)
+        .def_readwrite("offset", &HarvestDefaults::offset)
+        .def_readwrite("min_snr", &HarvestDefaults::min_snr)
+        .def("__repr__", [](const HarvestDefaults& h) {
+            return fmt::format(
+                "HarvestDefaults(min_level={}, offset={}, min_snr={})",
+                h.min_level, h.offset, h.min_snr);
+        });
+
     py::class_<PruneRFIConfig>(m, "PruneRFIConfig",
                                "RFI-control configuration for the EP pruning "
                                "search (pulsar mask, early harvesting, "
@@ -193,6 +217,7 @@ inline void bind_prune_rfi(py::module& m) {
         .def(
             py::init([](std::vector<ParamWindow> pulsar_mask,
                         SizeType n_harmonics, std::vector<float> harvest_scheme,
+                        std::optional<HarvestDefaults> harvest_defaults,
                         double harvest_mask_ntiles, SizeType max_harvests,
                         bool harvest_store_folds, bool impulsive_veto,
                         double impulsive_kappa, SizeType impulsive_min_level,
@@ -201,6 +226,7 @@ inline void bind_prune_rfi(py::module& m) {
                 cfg.pulsar_mask         = std::move(pulsar_mask);
                 cfg.n_harmonics         = n_harmonics;
                 cfg.harvest_scheme      = std::move(harvest_scheme);
+                cfg.harvest_defaults    = harvest_defaults;
                 cfg.harvest_mask_ntiles = harvest_mask_ntiles;
                 cfg.max_harvests        = max_harvests;
                 cfg.harvest_store_folds = harvest_store_folds;
@@ -213,6 +239,7 @@ inline void bind_prune_rfi(py::module& m) {
             py::kw_only(), py::arg("pulsar_mask") = std::vector<ParamWindow>(),
             py::arg("n_harmonics")         = 0U,
             py::arg("harvest_scheme")      = std::vector<float>(),
+            py::arg("harvest_defaults")    = std::nullopt,
             py::arg("harvest_mask_ntiles") = 4.0,
             py::arg("max_harvests")        = 4096U,
             py::arg("harvest_store_folds") = true,
@@ -222,6 +249,14 @@ inline void bind_prune_rfi(py::module& m) {
         .def_readwrite("pulsar_mask", &PruneRFIConfig::pulsar_mask)
         .def_readwrite("n_harmonics", &PruneRFIConfig::n_harmonics)
         .def_readwrite("harvest_scheme", &PruneRFIConfig::harvest_scheme)
+        .def_readwrite("harvest_defaults", &PruneRFIConfig::harvest_defaults)
+        .def(
+            "expand_harvest",
+            [](const PruneRFIConfig& self,
+               const std::vector<float>& threshold_scheme) {
+                return self.expand_harvest(threshold_scheme);
+            },
+            py::arg("threshold_scheme"))
         .def_readwrite("harvest_mask_ntiles",
                        &PruneRFIConfig::harvest_mask_ntiles)
         .def_readwrite("max_harvests", &PruneRFIConfig::max_harvests)

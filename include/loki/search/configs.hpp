@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -8,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/io/observation.hpp"
@@ -360,6 +362,42 @@ private:
 };
 
 /**
+ * @brief The [ep.rfi] table: RFI control of the EP pruning (pulsar mask,
+ * early harvesting, impulsive-segment veto). See algorithms::PruneRFIConfig.
+ *
+ * @details CPU only. The harvest thresholds follow each chunk's pruning
+ * threshold scheme (make_default_harvest_scheme with harvest_min_level,
+ * harvest_offset and harvest_min_snr). Options of a mechanism that is off are
+ * kept but unused.
+ */
+struct EPRFIOptions {
+    /// Frequency windows [f_lo, f_hi] in Hz, masked at every acceleration.
+    std::vector<std::array<double, 2>> pulsar_mask;
+    /// Also mask the windows at f*k and f/k for k in [2, n_harmonics].
+    SizeType n_harmonics{0};
+    bool harvest{false};
+    SizeType harvest_min_level{10};
+    float harvest_offset{10.0F};
+    float harvest_min_snr{15.0F};
+    double harvest_mask_ntiles{4.0};
+    SizeType max_harvests{4096};
+    bool harvest_store_folds{true};
+    bool impulsive_veto{false};
+    double impulsive_kappa{6.0};
+    SizeType impulsive_min_level{6};
+    float impulsive_min_snr{8.0F};
+
+    /// @brief True if a mask, harvesting or the veto is on.
+    [[nodiscard]] bool is_active() const noexcept {
+        return !pulsar_mask.empty() || harvest || impulsive_veto;
+    }
+    /// @brief Range checks; messages name the key as ep.rfi.<key>.
+    void validate() const;
+    /// @brief The library configuration (harvest_defaults when harvesting).
+    [[nodiscard]] algorithms::PruneRFIConfig to_prune_rfi_config() const;
+};
+
+/**
  * @brief Plain struct representation of an EP TOML configuration file.
  *
  * Accepts every FFA table and key with the same meaning, plus the [ep] table
@@ -391,6 +429,15 @@ struct EPTomlConfig : FFATomlConfig {
     bool use_conservative_tile{false};
     /// Share of the pool a full world tree keeps on overflow, in (0, 1]
     double overflow_keep_fraction{0.5};
+    /// [ep.rfi]; absent = no RFI control.
+    std::optional<EPRFIOptions> rfi;
+
+    /// @brief The pruning's RFI control: inactive without [ep.rfi].
+    [[nodiscard]] algorithms::PruneRFIConfig prune_rfi_config() const;
+    /// @brief Throws std::invalid_argument if an active [ep.rfi] meets a
+    /// non-CPU backend (RFI control is CPU only). Call after command-line
+    /// overrides; to_ep_search_config() calls it.
+    void check_rfi_backend() const;
 
     // [output]
     /// Plan cache file. Used by `search ep --plan-only` and by a search that

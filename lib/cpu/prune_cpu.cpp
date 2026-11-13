@@ -1318,6 +1318,9 @@ private:
     // onto the (accel, freq) grid that resolve() snaps to.
     void setup_rfi_control(SizeType nsegments) {
         m_rfi_config.validate(nsegments);
+        // Harvest thresholds follow this search's own threshold scheme.
+        m_rfi_config = m_rfi_config.expand_harvest(m_threshold_scheme);
+        m_rfi_config.validate(nsegments);
         const auto n_params = m_cfg.get_nparams();
         error_check::check_greater_equal(
             n_params, SizeType{2},

@@ -180,6 +180,50 @@ common Python reader and PulsarX converter accept supported EP products with
 the same DM/frame/epoch requirements; nonzero derivatives above jerk are
 still rejected by PulsarX export.
 
+### RFI control of the pruning (`[ep.rfi]`)
+
+The EP pruning can mask frequency windows, harvest leaves far above the
+pruning threshold (a bright source or an RFI line) and veto leaves whose last
+segment adds an implausible share of their S/N. It runs on the CPU only:
+with `backend = "cuda"` an active table fails before any data is read. The
+table is optional; without it the search and its output are unchanged.
+
+```toml
+[ep.rfi]
+pulsar_mask = [[49.9, 50.1]]   # Hz, every acceleration; f*k and f/k too
+n_harmonics = 0                #   for k in [2, n_harmonics]
+harvest = true
+harvest_min_level = 10         # first pruning level that may harvest
+harvest_offset = 10.0          # above the level's pruning threshold
+harvest_min_snr = 15.0         # lowest harvest threshold
+harvest_mask_ntiles = 4.0
+max_harvests = 4096            # records per run; masking continues beyond
+harvest_store_folds = true
+impulsive_veto = false
+impulsive_kappa = 6.0
+impulsive_min_level = 6
+impulsive_min_snr = 8.0
+```
+
+A level's harvest threshold is `max(harvest_min_snr, threshold + harvest_offset)`
+from `harvest_min_level` on, built for each chunk from that chunk's own
+pruning threshold scheme. The chunk records it in
+`/chunks/<chunk>/rfi_config/harvest_scheme`, with the other settings as
+attributes and the mask as `pulsar_mask` (`f_lo, f_hi, a_lo, a_hi` rows). A
+harvested leaf is removed from the tree and its neighbourhood (the leaf's tile
+times `harvest_mask_ntiles`, plus its Doppler sweep over the observation) is
+masked for the rest of the run. Each run's harvests are in
+`/chunks/<chunk>/runs/<run>/harvest`: `param_sets` (as the final leaves, but
+referenced at `t_ref`, the reference time of the level that harvested them),
+`scores` (the partial S/N at that level), `levels`, `seg_idx`, `t_ref`, and
+`folds` when `harvest_store_folds` is on; `n_harvested_total` counts harvests
+beyond `max_harvests` too. The command line sets `--pulsar-mask F_LO:F_HI`
+(repeatable), `--harvest/--no-harvest`, `--harvest-min-snr` and
+`--impulsive-veto/--no-impulsive-veto`.
+
+Common candidates do not yet accept an active `[ep.rfi]`: run such a search
+with `--no-candidates` (`[candidates] enabled = false`).
+
 ### Folding a leaf with loki's own model
 
 `libloki.psr_utils.leaf_phase` gives the pulse phase, in cycles, of an EP leaf
@@ -662,5 +706,5 @@ folds without overwriting reported scores or changing pruning decisions.
 Common EP candidates currently require an inactive RFI configuration and
 Taylor models through crackle (the circular-orbit search included).
 Chebyshev normalization and RFI harvest/masking integration are outside this
-path. PulsarX export supports
+path (see [RFI control of the pruning](#rfi-control-of-the-pruning-eprfi)). PulsarX export supports
 terms through jerk and rejects nonzero higher derivatives.

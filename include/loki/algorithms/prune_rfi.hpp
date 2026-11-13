@@ -1,6 +1,7 @@
 #pragma once
 
 #include <limits>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -38,6 +39,23 @@ struct ParamWindow {
 };
 
 /**
+ * @brief Inputs of make_default_harvest_scheme(), for a harvest scheme that
+ * follows each pruning threshold scheme.
+ *
+ * @details The harvest scheme has one entry per pruning level, so its length
+ * depends on the segment count of each search (each chunk of a sweep). These
+ * inputs let an engine build it from its own threshold scheme.
+ */
+struct HarvestDefaults {
+    /// First pruning level (1-indexed) where harvesting is allowed.
+    SizeType min_level = 10;
+    /// Harvest threshold above the pruning threshold of the level.
+    float offset = 10.0F;
+    /// Lowest harvest threshold.
+    float min_snr = 15.0F;
+};
+
+/**
  * @brief RFI-control configuration for the EP (pruning) algorithm.
  *
  * @details All mechanisms are opt-in. With the defaults, the pruning loop is
@@ -62,6 +80,10 @@ struct PruneRFIConfig {
     /// pruning threshold scheme). Empty disables harvesting; kHarvestDisabled
     /// disables harvesting at a given level.
     std::vector<float> harvest_scheme;
+    /// Build harvest_scheme from the engine's pruning threshold scheme with
+    /// make_default_harvest_scheme() (see expand_harvest()). Exclusive with a
+    /// non-empty harvest_scheme.
+    std::optional<HarvestDefaults> harvest_defaults;
     /// Half-width of a harvested window in units of the leaf's current tile
     /// size (df, da), in addition to the Doppler sweep over the observation.
     double harvest_mask_ntiles = 4.0;
@@ -82,13 +104,21 @@ struct PruneRFIConfig {
 
     /// @brief Returns true if any mechanism is active.
     [[nodiscard]] bool is_active() const noexcept {
-        return !pulsar_mask.empty() || !harvest_scheme.empty() ||
-               impulsive_veto;
+        return !pulsar_mask.empty() || has_harvest() || impulsive_veto;
     }
-    /// @brief Returns true if candidates may be recorded to the harvest store.
+    /// @brief Returns true if candidates may be recorded to the harvest store
+    /// (an explicit harvest_scheme, or harvest_defaults).
     [[nodiscard]] bool has_harvest() const noexcept {
-        return !harvest_scheme.empty();
+        return !harvest_scheme.empty() || harvest_defaults.has_value();
     }
+
+    /**
+     * @brief This configuration with harvest_scheme built from
+     * @p threshold_scheme and harvest_defaults (which the copy clears).
+     * Without harvest_defaults, an unchanged copy.
+     */
+    [[nodiscard]] PruneRFIConfig
+    expand_harvest(std::span<const float> threshold_scheme) const;
 
     /**
      * @brief Validate the configuration against the number of segments.

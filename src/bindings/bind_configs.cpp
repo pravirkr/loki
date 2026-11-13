@@ -322,6 +322,28 @@ void bind_configs(py::module_& m) {
         .def_static("default_toml_string",
                     [] { return std::string(FTC::default_toml_string()); });
 
+    using RFI = search::EPRFIOptions;
+    py::class_<RFI>(m_configs, "EPRFIOptions",
+                    "The [ep.rfi] table: RFI control of the EP pruning (CPU "
+                    "only)")
+        .def(py::init<>())
+        .def_readwrite("pulsar_mask", &RFI::pulsar_mask)
+        .def_readwrite("n_harmonics", &RFI::n_harmonics)
+        .def_readwrite("harvest", &RFI::harvest)
+        .def_readwrite("harvest_min_level", &RFI::harvest_min_level)
+        .def_readwrite("harvest_offset", &RFI::harvest_offset)
+        .def_readwrite("harvest_min_snr", &RFI::harvest_min_snr)
+        .def_readwrite("harvest_mask_ntiles", &RFI::harvest_mask_ntiles)
+        .def_readwrite("max_harvests", &RFI::max_harvests)
+        .def_readwrite("harvest_store_folds", &RFI::harvest_store_folds)
+        .def_readwrite("impulsive_veto", &RFI::impulsive_veto)
+        .def_readwrite("impulsive_kappa", &RFI::impulsive_kappa)
+        .def_readwrite("impulsive_min_level", &RFI::impulsive_min_level)
+        .def_readwrite("impulsive_min_snr", &RFI::impulsive_min_snr)
+        .def_property_readonly("is_active", &RFI::is_active)
+        .def("validate", &RFI::validate)
+        .def("to_prune_rfi_config", &RFI::to_prune_rfi_config);
+
     using ETC = search::EPTomlConfig;
     py::class_<ETC, FTC>(m_configs, "EPTomlConfig")
         .def(py::init<>())
@@ -341,6 +363,9 @@ void bind_configs(py::module_& m) {
         .def_readwrite("use_conservative_tile", &ETC::use_conservative_tile)
         .def_readwrite("plan_cache", &ETC::plan_cache)
         .def_readwrite("use_plan_cache", &ETC::use_plan_cache)
+        .def_readwrite("rfi", &ETC::rfi)
+        .def("prune_rfi_config", &ETC::prune_rfi_config)
+        .def("check_rfi_backend", &ETC::check_rfi_backend)
         .def("to_ep_search_config", &ETC::to_ep_search_config,
              py::arg("nsamps") = std::nullopt, py::arg("tsamp") = std::nullopt)
         .def("to_toml_string", &ETC::to_toml_string)

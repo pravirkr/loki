@@ -36,7 +36,10 @@ namespace loki::pipelines {
  * rechecked with the current backend, and a plan that does not fit is
  * rejected. An active
  * rfi_config (pulsar mask, harvesting, impulsive veto) is not implemented on
- * CUDA and is rejected with std::invalid_argument.
+ * CUDA and is rejected with std::invalid_argument. On the CPU, harvest
+ * defaults (PruneRFIConfig::harvest_defaults) are expanded for each chunk
+ * from its own threshold scheme, and an active config is recorded in
+ * `chunks/<chunk>/rfi_config`.
  */
 class EPFreqSweep {
 public:

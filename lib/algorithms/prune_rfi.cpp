@@ -56,6 +56,22 @@ void PruneRFIConfig::validate(SizeType nsegments) const {
         }
         validate_harvest_geometry(harvest_mask_ntiles);
     }
+    if (harvest_defaults) {
+        error_check::check(harvest_scheme.empty(),
+                           "PruneRFIConfig: set harvest_scheme or "
+                           "harvest_defaults, not both");
+        error_check::check(
+            harvest_defaults->min_level >= 1 &&
+                harvest_defaults->min_level + 1 <= nsegments,
+            fmt::format("PruneRFIConfig: harvest_defaults.min_level must be "
+                        "in [1, nsegments - 1 = {}] (got {})",
+                        nsegments - 1, harvest_defaults->min_level));
+        error_check::check(utils::is_finite(harvest_defaults->offset) &&
+                               utils::is_finite(harvest_defaults->min_snr),
+                           "PruneRFIConfig: harvest_defaults.offset and "
+                           "min_snr must be finite");
+        validate_harvest_geometry(harvest_mask_ntiles);
+    }
     if (impulsive_veto) {
         error_check::check_greater(impulsive_kappa, 0.0,
                                    "PruneRFIConfig: impulsive_kappa must be "
@@ -68,6 +84,18 @@ void PruneRFIConfig::validate(SizeType nsegments) const {
         error_check::check(!utils::is_nan(impulsive_min_snr),
                            "PruneRFIConfig: impulsive_min_snr must not be NaN");
     }
+}
+
+PruneRFIConfig
+PruneRFIConfig::expand_harvest(std::span<const float> threshold_scheme) const {
+    PruneRFIConfig expanded = *this;
+    if (harvest_defaults) {
+        expanded.harvest_scheme = make_default_harvest_scheme(
+            threshold_scheme, harvest_defaults->min_level,
+            harvest_defaults->offset, harvest_defaults->min_snr);
+        expanded.harvest_defaults.reset();
+    }
+    return expanded;
 }
 
 ParamWindow make_pulsar_window(

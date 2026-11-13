@@ -47,13 +47,6 @@ using toml_utils::reject_nonfinite_floats;
 
 /// Keys removed from the schema, with what replaces them.
 [[nodiscard]] std::string_view removed_key_hint(std::string_view path) {
-    if (path == "rfi" || path.starts_with("rfi.") ||
-        path.find("harvest") != std::string_view::npos ||
-        path.find("pulsar_mask") != std::string_view::npos ||
-        path.find("impulsive") != std::string_view::npos) {
-        return "RFI options (pulsar mask, harvesting, impulsive veto) are not "
-               "available in the EP search yet";
-    }
     if (path == "cuda" || path.starts_with("cuda.")) {
         return "the [cuda] table was removed; use [performance] backend = "
                "\"cuda\" and device = <id>";
@@ -97,6 +90,65 @@ const toml_utils::Schema<Orbit>& orbit_schema() {
                      [](auto& o) -> auto& { return o.p_orb_min_tobs; }),
         field<Orbit>("", "m_c_max", [](auto& o) -> auto& { return o.m_c_max; }),
         field<Orbit>("", "m_p_min", [](auto& o) -> auto& { return o.m_p_min; }),
+    };
+    return schema;
+}
+
+/// The [ep.rfi] table.
+const toml_utils::Schema<EPRFIOptions>& rfi_schema() {
+    using toml_utils::custom;
+    using toml_utils::field;
+    using R = EPRFIOptions;
+    static const toml_utils::Schema<R> schema{
+        custom<R>(
+            "", "pulsar_mask",
+            [](const toml::table& t, const std::string& path, R& r) {
+                const auto* arr = t["pulsar_mask"].as_array();
+                if (arr == nullptr) {
+                    throw std::invalid_argument(fmt::format(
+                        "{} must be an array of [f_lo, f_hi]", path));
+                }
+                r.pulsar_mask.clear();
+                for (const auto& el : *arr) {
+                    const auto* pair = el.as_array();
+                    if (pair == nullptr || pair->size() != 2) {
+                        throw std::invalid_argument(fmt::format(
+                            "{} entries must be [f_lo, f_hi] in Hz", path));
+                    }
+                    r.pulsar_mask.push_back({array_number((*pair)[0], path),
+                                             array_number((*pair)[1], path)});
+                }
+            },
+            [](const R& r, toml::table& t) {
+                toml::array windows;
+                for (const auto& [f_lo, f_hi] : r.pulsar_mask) {
+                    windows.push_back(toml::array{f_lo, f_hi});
+                }
+                t.insert("pulsar_mask", std::move(windows));
+            }),
+        field<R>("", "n_harmonics",
+                 [](auto& r) -> auto& { return r.n_harmonics; }),
+        field<R>("", "harvest", [](auto& r) -> auto& { return r.harvest; }),
+        field<R>("", "harvest_min_level",
+                 [](auto& r) -> auto& { return r.harvest_min_level; }),
+        field<R>("", "harvest_offset",
+                 [](auto& r) -> auto& { return r.harvest_offset; }),
+        field<R>("", "harvest_min_snr",
+                 [](auto& r) -> auto& { return r.harvest_min_snr; }),
+        field<R>("", "harvest_mask_ntiles",
+                 [](auto& r) -> auto& { return r.harvest_mask_ntiles; }),
+        field<R>("", "max_harvests",
+                 [](auto& r) -> auto& { return r.max_harvests; }),
+        field<R>("", "harvest_store_folds",
+                 [](auto& r) -> auto& { return r.harvest_store_folds; }),
+        field<R>("", "impulsive_veto",
+                 [](auto& r) -> auto& { return r.impulsive_veto; }),
+        field<R>("", "impulsive_kappa",
+                 [](auto& r) -> auto& { return r.impulsive_kappa; }),
+        field<R>("", "impulsive_min_level",
+                 [](auto& r) -> auto& { return r.impulsive_min_level; }),
+        field<R>("", "impulsive_min_snr",
+                 [](auto& r) -> auto& { return r.impulsive_min_snr; }),
     };
     return schema;
 }
@@ -385,6 +437,9 @@ const toml_utils::Schema<EPTomlConfig>& ep_schema() {
                      [](auto& c) -> auto& { return c.use_conservative_tile; }),
             field<E>("ep", "overflow_keep_fraction",
                      [](auto& c) -> auto& { return c.overflow_keep_fraction; }),
+            toml_utils::sub_table<E>(
+                "ep", "rfi", [](auto& c) -> auto& { return c.rfi; },
+                rfi_schema()),
             field<E>("output", "plan_cache",
                      [](auto& c) -> auto& { return c.plan_cache; }),
             field<E>("output", "use_plan_cache",
@@ -653,7 +708,11 @@ std::vector<std::string> ffa_config_keys() {
 }
 
 std::vector<std::string> ep_config_keys() {
-    return with_orbit_keys(toml_utils::schema_keys(ep_schema()));
+    auto keys = with_orbit_keys(toml_utils::schema_keys(ep_schema()));
+    for (const auto& f : rfi_schema()) {
+        keys.push_back(fmt::format("ep.rfi.{}", f.key));
+    }
+    return keys;
 }
 
 std::string FFATomlConfig::to_toml_string() const {
@@ -2122,6 +2181,9 @@ void validate_ep_config(const EPTomlConfig& cfg) {
             fmt::format("ep.overflow_keep_fraction must be in (0, 1] (got {})",
                         cfg.overflow_keep_fraction));
     }
+    if (cfg.rfi.has_value()) {
+        cfg.rfi->validate();
+    }
 }
 
 } // namespace
@@ -2290,6 +2352,35 @@ use_conservative_tile = false
 # larger value keeps more of the best leaves but trims more often.
 overflow_keep_fraction = 0.5
 
+# RFI control of the pruning (CPU backend only). Omit the table for none.
+# pulsar_mask: frequency windows [f_lo, f_hi] in Hz, masked at every
+#   acceleration; n_harmonics also masks f*k and f/k for k in [2, n].
+# harvest: record and remove leaves far above the pruning threshold (a bright
+#   source or RFI line), and mask their neighbourhood for the rest of the run.
+#   From level harvest_min_level on, a level's harvest threshold is
+#   max(harvest_min_snr, pruning threshold + harvest_offset), computed for each
+#   chunk from its own threshold scheme. The window is harvest_mask_ntiles
+#   tiles wide plus the Doppler sweep. At most max_harvests records per run
+#   (masking continues beyond); harvest_store_folds keeps their profiles.
+# impulsive_veto: drop a leaf (S/N >= impulsive_min_snr, from level
+#   impulsive_min_level on) whose last segment adds more than
+#   impulsive_kappa times a coherent signal's share of the S/N squared.
+# Options of a mechanism that is off are kept but unused.
+# [ep.rfi]
+# pulsar_mask = [[49.9, 50.1], [59.9, 60.1]]
+# n_harmonics = 0
+# harvest = false
+# harvest_min_level = 10
+# harvest_offset = 10.0
+# harvest_min_snr = 15.0
+# harvest_mask_ntiles = 4.0
+# max_harvests = 4096
+# harvest_store_folds = true
+# impulsive_veto = false
+# impulsive_kappa = 6.0
+# impulsive_min_level = 6
+# impulsive_min_snr = 8.0
+
 # Alternative to acc_* and jerk_*: limits of physical circular orbits. The
 # acceleration, jerk (snap, crackle) limits and a Doppler-widened frequency
 # range are derived from them (f_min and f_max are then intrinsic spin
@@ -2425,6 +2516,8 @@ EPSearchConfig
 EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
                                   std::optional<double> override_tsamp) const {
     validate_ep_config(*this);
+    // Checked here, not on parse: the command line may still set the backend.
+    check_rfi_backend();
     // Checked here, not on parse: the command line may still set the runs.
     if (n_runs.has_value() && ref_segs.has_value()) {
         throw std::invalid_argument(
@@ -2465,6 +2558,86 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
                           orbit_m_c, orbit_m_p, propagator_significance,
                           validation_significance, use_conservative_tile,
                           target_snr, overflow_keep_fraction);
+}
+
+void EPRFIOptions::validate() const {
+    for (const auto& [f_lo, f_hi] : pulsar_mask) {
+        if (!utils::is_finite(f_lo) || !utils::is_finite(f_hi) || f_lo <= 0.0 ||
+            f_hi < f_lo) {
+            throw std::invalid_argument(fmt::format(
+                "ep.rfi.pulsar_mask windows need 0 < f_lo <= f_hi (got [{}, "
+                "{}])",
+                f_lo, f_hi));
+        }
+    }
+    if (n_harmonics > 1024) {
+        throw std::invalid_argument("ep.rfi.n_harmonics must be at most 1024");
+    }
+    if (harvest_min_level < 1) {
+        throw std::invalid_argument("ep.rfi.harvest_min_level must be >= 1");
+    }
+    if (!utils::is_finite(harvest_offset)) {
+        throw std::invalid_argument("ep.rfi.harvest_offset must be finite");
+    }
+    if (!utils::is_finite(harvest_min_snr) || harvest_min_snr <= 0.0F) {
+        throw std::invalid_argument("ep.rfi.harvest_min_snr must be positive");
+    }
+    if (!utils::is_finite(harvest_mask_ntiles) || harvest_mask_ntiles <= 0.0) {
+        throw std::invalid_argument(
+            "ep.rfi.harvest_mask_ntiles must be positive");
+    }
+    if (max_harvests < 1) {
+        throw std::invalid_argument("ep.rfi.max_harvests must be >= 1");
+    }
+    if (!utils::is_finite(impulsive_kappa) || impulsive_kappa <= 0.0) {
+        throw std::invalid_argument("ep.rfi.impulsive_kappa must be positive");
+    }
+    if (impulsive_min_level < 1) {
+        throw std::invalid_argument("ep.rfi.impulsive_min_level must be >= 1");
+    }
+    if (!utils::is_finite(impulsive_min_snr)) {
+        throw std::invalid_argument("ep.rfi.impulsive_min_snr must be finite");
+    }
+}
+
+algorithms::PruneRFIConfig EPRFIOptions::to_prune_rfi_config() const {
+    algorithms::PruneRFIConfig rfi;
+    rfi.pulsar_mask.reserve(pulsar_mask.size());
+    for (const auto& [f_lo, f_hi] : pulsar_mask) {
+        rfi.pulsar_mask.push_back(
+            algorithms::ParamWindow{.f_lo = f_lo, .f_hi = f_hi});
+    }
+    rfi.n_harmonics = n_harmonics;
+    if (harvest) {
+        rfi.harvest_defaults = algorithms::HarvestDefaults{
+            .min_level = harvest_min_level,
+            .offset    = harvest_offset,
+            .min_snr   = harvest_min_snr,
+        };
+    }
+    rfi.harvest_mask_ntiles = harvest_mask_ntiles;
+    rfi.max_harvests        = max_harvests;
+    rfi.harvest_store_folds = harvest_store_folds;
+    rfi.impulsive_veto      = impulsive_veto;
+    rfi.impulsive_kappa     = impulsive_kappa;
+    rfi.impulsive_min_level = impulsive_min_level;
+    rfi.impulsive_min_snr   = impulsive_min_snr;
+    return rfi;
+}
+
+algorithms::PruneRFIConfig EPTomlConfig::prune_rfi_config() const {
+    return rfi.has_value() ? rfi->to_prune_rfi_config()
+                           : algorithms::PruneRFIConfig{};
+}
+
+void EPTomlConfig::check_rfi_backend() const {
+    if (rfi.has_value() && rfi->is_active() && backend != Backend::kCPU) {
+        throw std::invalid_argument(fmt::format(
+            "[ep.rfi] (pulsar mask, harvesting, impulsive veto) runs on the "
+            "CPU only, but performance.backend = \"{}\": use backend = "
+            "\"cpu\" (--backend cpu), or remove [ep.rfi]",
+            to_string(backend)));
+    }
 }
 
 } // namespace loki::search

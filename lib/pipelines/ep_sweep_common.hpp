@@ -54,8 +54,10 @@ private:
  *
  * Chunk `i` is read from
  * `chunk_{i:04d}_pruning_nstages_{nsegments}_results.h5` and its "runs" group
- * is copied under `chunks/chunk_{i:04d}/runs`. The layout does not depend on
- * the backend that wrote the chunk files.
+ * is copied under `chunks/chunk_{i:04d}/runs`; with @p copy_rfi_config (an
+ * active PruneRFIConfig) its `rfi_config` group, which holds the chunk's own
+ * harvest scheme, too. The layout does not depend on the backend that wrote
+ * the chunk files.
  * @return Total pruning GFLOPs of all runs.
  */
 double
@@ -66,7 +68,8 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                        float min_pd,
                        std::string_view poly_basis,
                        float ref_ducy,
-                       float total_runtime);
+                       float total_runtime,
+                       bool copy_rfi_config = false);
 
 /// Owning host snapshot; no spans may refer to a reusable device workspace.
 struct EPResultPayload {

@@ -800,6 +800,34 @@ ep_candidate_planning_config(const loki::search::EPTomlConfig& config,
     return cfg;
 }
 
+/// `--pulsar-mask F_LO:F_HI` values as [f_lo, f_hi] windows.
+std::vector<std::array<double, 2>>
+parse_pulsar_mask(const std::vector<std::string>& values) {
+    std::vector<std::array<double, 2>> windows;
+    for (const auto& value : values) {
+        const auto colon = value.find(':');
+        try {
+            if (colon == std::string::npos) {
+                throw std::invalid_argument("missing ':'");
+            }
+            std::size_t used_lo = 0;
+            std::size_t used_hi = 0;
+            const auto lo_text  = value.substr(0, colon);
+            const auto hi_text  = value.substr(colon + 1);
+            const double f_lo   = std::stod(lo_text, &used_lo);
+            const double f_hi   = std::stod(hi_text, &used_hi);
+            if (used_lo != lo_text.size() || used_hi != hi_text.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+            windows.push_back({f_lo, f_hi});
+        } catch (const std::exception&) {
+            throw std::invalid_argument(fmt::format(
+                "--pulsar-mask expects F_LO:F_HI in Hz (got '{}')", value));
+        }
+    }
+    return windows;
+}
+
 /// Plans the EP chunks of @p cfg (or loads them from @p cache_path, writing
 /// the cache when it does not exist) and prints them. No sweep is built.
 void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
@@ -818,7 +846,8 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
     if (cfg.get_use_fourier()) {
         const loki::algorithms::EPRegionPlanner<loki::ComplexType> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            load_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+            load_path, toml_cfg.prune_rfi_config(), n_workers, toml_cfg.n_runs,
+            toml_cfg.ref_segs, exec);
         if (force_replan && cache_path.has_value()) {
             planner.save_cache(*cache_path);
         }
@@ -826,7 +855,8 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
     } else {
         const loki::algorithms::EPRegionPlanner<float> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            load_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+            load_path, toml_cfg.prune_rfi_config(), n_workers, toml_cfg.n_runs,
+            toml_cfg.ref_segs, exec);
         if (force_replan && cache_path.has_value()) {
             planner.save_cache(*cache_path);
         }
@@ -839,6 +869,7 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
 int run_plan_ep(loki::search::EPTomlConfig toml_cfg,
                 bool clamp_default_runs = false) {
     check_frequency_range(toml_cfg);
+    toml_cfg.check_rfi_backend();
     const loki::Exec exec = search_exec(toml_cfg);
     if (!toml_cfg.nsamps.has_value() || !toml_cfg.tsamp.has_value()) {
         throw std::invalid_argument(
@@ -1032,7 +1063,8 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
         try {
             const loki::algorithms::EPRegionPlanner<FoldType> cached(
                 cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-                path, {}, workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+                path, toml_cfg.prune_rfi_config(), workers, toml_cfg.n_runs,
+                toml_cfg.ref_segs, exec);
             return path;
         } catch (const std::exception& error) {
             SPDLOG_WARN("EP plan cache '{}' is stale, replanning: {}",
@@ -1041,7 +1073,8 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
     }
     const loki::algorithms::EPRegionPlanner<FoldType> fresh(
         cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-        std::nullopt, {}, workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+        std::nullopt, toml_cfg.prune_rfi_config(), workers, toml_cfg.n_runs,
+        toml_cfg.ref_segs, exec);
     fresh.save_cache(path);
     return path;
 }
@@ -1096,6 +1129,14 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
                   bool dry_run,
                   bool clamp_default_runs = false) {
     check_frequency_range(toml_cfg);
+    // Before any data is read, in a dry run too.
+    toml_cfg.check_rfi_backend();
+    if (toml_cfg.rfi && toml_cfg.rfi->is_active() &&
+        toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor") {
+        throw std::invalid_argument(
+            "[ep.rfi] does not work with common EP candidates yet: add "
+            "--no-candidates (or set [candidates] enabled = false)");
+    }
     const loki::Exec exec = search_exec(toml_cfg);
     if (dry_run) {
         const auto dims = dry_run_dims(toml_cfg);
@@ -1144,15 +1185,16 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     const auto cache      = prepare_ep_plan_cache(toml_cfg, ep_cfg, exec);
     const bool common_candidates =
         toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor";
-    auto sweep = common_candidates
-                     ? loki::pipelines::EPFreqSweep(
-                           ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
-                           toml_cfg.poly_basis, toml_cfg.ref_ducy, {}, cache,
-                           toml_cfg.n_runs, toml_cfg.ref_segs, exec)
-                     : loki::pipelines::EPFreqSweep(
-                           ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
-                           toml_cfg.ref_ducy, {}, cache, toml_cfg.n_runs,
-                           toml_cfg.ref_segs, exec);
+    const auto rfi_config = toml_cfg.prune_rfi_config();
+    auto sweep            = common_candidates
+                                ? loki::pipelines::EPFreqSweep(
+                                      ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
+                                      toml_cfg.poly_basis, toml_cfg.ref_ducy, rfi_config,
+                                      cache, toml_cfg.n_runs, toml_cfg.ref_segs, exec)
+                                : loki::pipelines::EPFreqSweep(
+                                      ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
+                                      toml_cfg.ref_ducy, rfi_config, cache,
+                                      toml_cfg.n_runs, toml_cfg.ref_segs, exec);
     if (toml_cfg.candidates.enabled && !common_candidates) {
         SPDLOG_WARN("Common EP candidates currently support polynomial Taylor "
                     "only; writing run diagnostics");
@@ -1920,6 +1962,10 @@ int main(int argc, char** argv) {
     std::string ep_plan_cache_path;
     std::string ep_backend_name;
     std::vector<SizeType> ep_ref_segs;
+    std::optional<bool> ep_harvest;
+    std::optional<bool> ep_impulsive_veto;
+    std::optional<float> ep_harvest_min_snr;
+    std::vector<std::string> ep_pulsar_mask;
 
     std::string ep_preproc_method;
     auto* ep_grp_io = ep->add_option_group("Input/Output Options");
@@ -2102,6 +2148,24 @@ int main(int argc, char** argv) {
         "Fraction of the stage's survivors and batch a full world tree keeps "
         "when a batch overflows it, in (0, 1] (default: 0.5)");
 
+    auto* ep_grp_rfi = ep->add_option_group(
+        "RFI control (CPU only; sets [ep.rfi], see the config template)");
+    ep_grp_rfi
+        ->add_option("--pulsar-mask", ep_pulsar_mask,
+                     "Frequency window F_LO:F_HI in Hz masked at every "
+                     "acceleration; repeat for more (replaces "
+                     "ep.rfi.pulsar_mask)")
+        ->take_all();
+    ep_grp_rfi->add_flag("--harvest,!--no-harvest", ep_harvest,
+                         "Early harvesting of leaves far above the pruning "
+                         "threshold (ep.rfi.harvest)");
+    ep_grp_rfi->add_option("--harvest-min-snr", ep_harvest_min_snr,
+                           "Lowest harvest threshold (ep.rfi.harvest_min_snr, "
+                           "default: 15)");
+    ep_grp_rfi->add_flag("--impulsive-veto,!--no-impulsive-veto",
+                         ep_impulsive_veto,
+                         "Impulsive-segment veto (ep.rfi.impulsive_veto)");
+
     auto* ep_grp_perf = ep->add_option_group("Performance & Limits");
     ep_grp_perf->add_option(
         "--threads", ep_cfg.nthreads,
@@ -2199,6 +2263,27 @@ int main(int argc, char** argv) {
     }
     if (!ep_ref_segs.empty()) {
         ep_cfg.ref_segs = ep_ref_segs;
+    }
+    if (!ep_pulsar_mask.empty() || ep_harvest || ep_impulsive_veto ||
+        ep_harvest_min_snr) {
+        auto& rfi = ep_cfg.rfi ? *ep_cfg.rfi : ep_cfg.rfi.emplace();
+        if (!ep_pulsar_mask.empty()) {
+            try {
+                rfi.pulsar_mask = parse_pulsar_mask(ep_pulsar_mask);
+            } catch (const std::exception& ex) {
+                loki::cli::Console::get().error(ex.what());
+                return 1;
+            }
+        }
+        if (ep_harvest) {
+            rfi.harvest = *ep_harvest;
+        }
+        if (ep_harvest_min_snr) {
+            rfi.harvest_min_snr = *ep_harvest_min_snr;
+        }
+        if (ep_impulsive_veto) {
+            rfi.impulsive_veto = *ep_impulsive_veto;
+        }
     }
 
     // Ctrl-C, or SIGTERM (e.g. Slurm's scancel), stops the run at its next

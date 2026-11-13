@@ -242,7 +242,7 @@ public:
         // Batch merge all chunk HDF5 files into unified result file
         const double accumulated_flops = detail::merge_ep_sweep_results(
             tmp_dir, result_file, chunk_cfgs, m_base_cfg, m_min_pd,
-            m_poly_basis, m_ref_ducy, total_runtime);
+            m_poly_basis, m_ref_ducy, total_runtime, m_rfi_config.is_active());
 
         spdlog::info(
             "EPFreqSweep complete: {} chunks processed in {:.2f} seconds "

@@ -97,23 +97,6 @@ TEST_CASE("EPTomlConfig reads the [preprocessing] table", "[config][ep]") {
         std::invalid_argument);
 }
 
-TEST_CASE("EPTomlConfig rejects RFI options, which the EP search lacks",
-          "[config][ep]") {
-    const auto message_for = [](const std::string& toml) -> std::string {
-        try {
-            (void)loki::search::EPTomlConfig::from_string(toml);
-        } catch (const std::invalid_argument& err) {
-            return err.what();
-        }
-        return {};
-    };
-    REQUIRE(message_for(make_doc("harvest_scheme = [5.0]\n")).find("RFI") !=
-            std::string::npos);
-    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
-                          make_doc("", "", "", "[rfi]\npulsar_mask = []\n")),
-                      std::invalid_argument);
-}
-
 TEST_CASE("The FFA reader rejects an [ep] table", "[config][ep]") {
     REQUIRE_THROWS_AS(loki::search::FFATomlConfig::from_string(
                           "[search]\nf_min = 1.0\nf_max = 10.0\n[ep]\n"
