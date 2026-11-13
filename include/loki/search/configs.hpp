@@ -373,7 +373,8 @@ private:
 struct EPRFIOptions {
     /// Frequency windows [f_lo, f_hi] in Hz, masked at every acceleration.
     std::vector<std::array<double, 2>> pulsar_mask;
-    /// Also mask the windows at f*k and f/k for k in [2, n_harmonics].
+    /// Also mask every window (pulsar_mask and harvest windows) at f*k and
+    /// f/k for k in [2, n_harmonics].
     SizeType n_harmonics{0};
     bool harvest{false};
     SizeType harvest_min_level{10};

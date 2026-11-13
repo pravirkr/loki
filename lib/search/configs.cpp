@@ -2354,7 +2354,8 @@ overflow_keep_fraction = 0.5
 
 # RFI control of the pruning (CPU backend only). Omit the table for none.
 # pulsar_mask: frequency windows [f_lo, f_hi] in Hz, masked at every
-#   acceleration; n_harmonics also masks f*k and f/k for k in [2, n].
+#   acceleration. n_harmonics also masks f*k and f/k for k in [2, n], for
+#   the mask windows and for every harvest window.
 # harvest: record and remove leaves far above the pruning threshold (a bright
 #   source or RFI line), and mask their neighbourhood for the rest of the run.
 #   From level harvest_min_level on, a level's harvest threshold is

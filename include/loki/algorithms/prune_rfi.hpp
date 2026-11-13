@@ -74,7 +74,8 @@ struct HarvestDefaults {
 struct PruneRFIConfig {
     /// Static exclusion windows (physical units).
     std::vector<ParamWindow> pulsar_mask;
-    /// Also mask f*k and f/k for k in [2, n_harmonics] (0 disables).
+    /// Also mask f*k and f/k for k in [2, n_harmonics] (0 disables), for
+    /// every pulsar_mask window and every harvest window.
     SizeType n_harmonics = 0;
     /// Per-level upper score threshold (size nsegments - 1, aligned with the
     /// pruning threshold scheme). Empty disables harvesting; kHarvestDisabled

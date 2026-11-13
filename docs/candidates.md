@@ -191,7 +191,7 @@ table is optional; without it the search and its output are unchanged.
 ```toml
 [ep.rfi]
 pulsar_mask = [[49.9, 50.1]]   # Hz, every acceleration; f*k and f/k too
-n_harmonics = 0                #   for k in [2, n_harmonics]
+n_harmonics = 0                #   for k in [2, n_harmonics]; harvest windows too
 harvest = true
 harvest_min_level = 10         # first pruning level that may harvest
 harvest_offset = 10.0          # above the level's pruning threshold

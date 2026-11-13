@@ -225,3 +225,36 @@ retention that the mask's spectrum predicts for each window: zapped over
 other power is 0.95-1.02 for f up to 0.15, and 0.995-1.011 above 10 Hz
 on the bright-binary series. `phase_kept` (the previous zap) is
 bit-identical to before.
+
+### RFI control of the EP pruning (`[ep.rfi]`, CPU)
+
+A 2^24-sample series with a bright pulsar (S/N about 275) and four
+injected accelerated pulsars (final S/N 12-16), 60-130 Hz,
+|a| <= 400 m/s^2, 16 runs, 4 threads, 16 GB (max_sugg 2^18.7, 2 chunks in
+every case):
+
+| Input | Overloads | Runs (of 16) keeping each injection | Final leaves | Search |
+|---|---|---|---|---|
+| Raw, no RFI control | 130, every run | 0 / 0 / 0 / 0 | 5.2 M | - |
+| Raw, `harvest = true` (defaults) | 0 | 14 / 11 / 12 / 12 | 78 k | 13.5 s |
+| Bright pulsar hard-zapped, no RFI control | 0 | 13 / 10 / 12 / 13 | 75 k | - |
+
+Harvesting at the default thresholds removed the bright pulsar (388
+harvests in 32 runs, at most 22 per run) and recovered the injections as
+well as an external hard zap did. Planning (the CPU threshold design)
+dominated wall time in these runs (40-60 s).
+
+The default harvest threshold, `max(15, threshold + 10)`, is about 16.5
+at the late levels of a 128-segment jerk search, so an RFI line of final
+S/N 12 is never harvested; `harvest_offset = 3` with
+`harvest_min_snr = 9` harvested it once per run in 15 of 32 runs and
+removed all of its detections, as a frequency mask did. Such a low
+threshold also harvests real pulsars. On a survey observation with
+several known binary pulsars, `harvest_offset = 6` harvested one of them
+in 30 runs (final S/N 18.7 to 7.0), offsets 3-4 removed three others
+completely, and even the default offset harvested a bright one in one
+run, while the observation's strongest line needed offset 3. Brightness
+alone does not separate lines from pulsars, so the default offset stays
+high. A harvest threshold below a source's partial S/N removes the
+source: in a test, a weak injected pulsar was harvested along with the
+bright ones.
