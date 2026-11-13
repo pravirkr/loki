@@ -34,6 +34,7 @@
  */
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -63,6 +64,21 @@ constexpr SizeType kEPBatchSize = 1024U;
 /// minute per reference segment instead of seconds.
 constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 
+/// Parents times phase bins of one CUDA batch that keep the GPU busy: the
+/// batch of 2^16 measured at nbins 64. Below it the per-batch overhead
+/// dominates (docs/performance.md, "CUDA batch and branch_max").
+constexpr SizeType kEPCudaBatchWork = SizeType{1} << 22U;
+
+/// CUDA batch of a chunk with @p nbins phase bins: kEPCudaBatchWork / nbins
+/// as a power of two, at most @p max_batch (the policy's batch, which the
+/// planner halves when a minimum chunk does not fit).
+constexpr SizeType ep_cuda_batch_for_nbins(SizeType nbins,
+                                           SizeType max_batch) noexcept {
+    const SizeType wanted = std::bit_floor(
+        std::max<SizeType>(kEPCudaBatchWork / std::max<SizeType>(nbins, 1), 1));
+    return std::min(max_batch, wanted);
+}
+
 /// Version of this model. Bump it with every change to the formulas: plan
 /// caches store it and are rejected when it differs.
 ///  3: CUDA policy (EPMemoryKind), transient FFA scratch of the CUDA model.
@@ -77,7 +93,9 @@ constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 /// 12: final winning-width reporting, uint32 per surviving CPU leaf.
 /// 13: CPU Fourier phase-step table included in transient FFA bytes.
 /// 14: CUDA RFI control without harvesting does not count harvest staging.
-constexpr std::uint32_t kEPMemoryModelVersion = 14U;
+/// 15: branch_max is the forecast's worst leaf, without a floor of 32;
+///     the CUDA batch of a chunk is kEPCudaBatchWork / nbins.
+constexpr std::uint32_t kEPMemoryModelVersion = 15U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.

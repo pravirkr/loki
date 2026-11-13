@@ -184,13 +184,19 @@ Differences from the CPU policy:
   `kDeviceReserveGB` (1 GB) is what the GPU planners leave for the CUDA
   context, kernel images and those arrays, and the unmodelled reserve
   (0.5 GB) is a second margin.
-- The preferred batch is 2^16 parents on the GPU (`kEPBatchSizeCuda`) and 1024 on the
-  CPU (`kEPBatchSize`). A batch is one kernel round trip and one world-tree
-  synchronisation, so the GPU needs a large one: at 1024, one run of 2^25
-  samples took about 63 s, at 2^16 about 15 s. The batch is part of the memory
-  model (the world tree and the prune scratch scale with `batch * branch_max`).
-  If a minimum-width CUDA chunk cannot fit, planning retries with successively
-  halved batches, down to one parent. It never reduces forecast capacity
+- The CPU batch is 1024 parents (`kEPBatchSize`). A GPU batch is one kernel
+  round trip and one world-tree synchronisation, so it must carry enough work:
+  a CUDA chunk is planned with `kEPCudaBatchWork / nbins` parents
+  (`ep_cuda_batch_for_nbins`: 2^22 parent-bins, 2^16 parents at nbins 64 and
+  4096 at nbins 1024), at most 2^16 (`kEPBatchSizeCuda`). Below that work a
+  batch's fixed overhead dominates (at 1024 parents, one run of
+  2^25 samples took about 63 s, at 2^16 about 15 s). The batch is part of the
+  memory model (the world tree and the prune scratch scale with
+  `batch * branch_max`). `branch_max` is the chunk's worst leaf
+  (`BranchingForecast::max_children`: the most children any parent of its
+  grid can have), with no floor; a parameter that branched past it is
+  rejected. If a minimum-width CUDA chunk cannot fit, planning retries with
+  successively halved batches, down to one parent. It never reduces forecast capacity
   to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the
   world tree trims at batch boundaries, so results can depend on the batch.

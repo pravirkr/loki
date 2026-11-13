@@ -341,6 +341,51 @@ effect within the chunks it touches, not by sources elsewhere. A mask-only
 configuration no longer counts the harvest staging, which only harvesting
 allocates (memory model 14).
 
+#### CUDA batch and branch_max
+
+A CUDA chunk's world tree holds its forecast live leaves plus one branched
+batch, `batch * branch_max` slots, each `nbins` wide. With a fixed batch of
+2^16 and `branch_max` floored at 32, that headroom (2^21 slots) dominated the
+low-frequency chunks of a full-band jerk search (2^26 samples, 10-720 Hz,
+30 GB, one chunk per region): the 10-11 Hz chunk (nbins 1024) needed
+18.1 GB for a forecast of 3206 live leaves and set the plan's 19.8 GB peak.
+
+`branch_max` is now the chunk's worst leaf, with no floor: 15 at the top,
+9 in most regions and 3 at nbins 1024 on that search. The plan peak fell to
+5.6 GB (that chunk 3.1 GB) with the same detections and search time, and no
+run on any test series branched past it.
+
+The batch is the work of one kernel round trip. Search time per chunk of the
+same search against the batch (s):
+
+| batch \ nbins | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+|---|---|---|---|---|---|---|---|
+| 65536 | 1.76 | 0.95 | 0.52 | 0.40 | 0.36 | 0.43 | 1.16 |
+| 16384 | 3.34 | 1.59 | 0.64 | 0.43 | 0.37 | 0.44 | 1.19 |
+| 4096 | 9.04 | 3.74 | 1.18 | 0.57 | 0.43 | 0.48 | 1.14 |
+| 1024 | 32.8 | 13.2 | 3.40 | 1.21 | 0.66 | 0.68 | 1.24 |
+| 256 | 122 | 48.8 | 12.2 | 3.73 | 1.66 | 1.54 | 1.89 |
+
+The cost follows `batch * nbins`: above about 2^22 a chunk runs at full
+speed, below it the per-batch overhead dominates. A chunk is planned with
+`2^22 / nbins` parents (at most 2^16): 4096 at nbins 1024, with no loss of
+speed (1.12 s). The plan peak of the search above is 5.5 GB.
+
+The headroom no longer absorbs a tree far above the noise forecast. On the
+same search the 10-11 Hz chunk, which holds an instrumental line at about
+ten times its forecast population, now trims (25 overloads, 101 of the
+line's 2094 detections lost); every other chunk is unchanged. With the
+harvest on, a series with a bright pulsar gave the same result as before
+(0 overloads, the same injected pulsars recovered, a tree 2.8 times
+smaller). Without it, bright sources overload more (a raw full-band jerk
+search: 1332 to 1795 overloads). Bright sources and lines belong to the
+preprocessing (zap, `birdies`), the pulsar mask and the harvest, not to
+spare tree capacity.
+
+Superseded: a batch from the forecast live tree (`bit_ceil(live)`, at
+least 1024, with `branch_max` still 32) cut the same peak only to 11.7 GB:
+the 11-22 Hz chunk's forecast (34130 leaves) kept it at 2^16.
+
 #### Default harvest floor (`harvest_min_snr = 40`)
 
 Harvesting is a failsafe that keeps a dominating source out of the tree,

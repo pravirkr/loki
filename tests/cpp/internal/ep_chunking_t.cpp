@@ -301,7 +301,7 @@ TEST_CASE("EP chunking searches a smaller shared size when the replan is "
     // The heavy run's minimum-width chunk does not fit next to the light
     // run's full shared size: the light run must be split further so the
     // shared size shrinks.
-    constexpr double kLimitGb = 0.08;
+    constexpr double kLimitGb = 0.065;
     const auto cfg            = make_cfg(30.0, 150.0, /*nthreads=*/2);
     const auto designs        = make_late_shared_designs(cfg);
     auto ctx                  = make_ctx(cfg);
@@ -515,6 +515,20 @@ TEST_CASE("EP forecasts account for adjacent populations, once per chunk",
           chunk.predicted_live + chunk.batch_size * chunk.branch_max);
 }
 
+TEST_CASE("CUDA batch keeps the work per batch at 2^22 parent-bins",
+          "[ep_chunking]") {
+    using loki::algorithms::detail::ep_cuda_batch_for_nbins;
+    constexpr SizeType kMax = SizeType{1} << 16U;
+    CHECK(ep_cuda_batch_for_nbins(16, kMax) == kMax);
+    CHECK(ep_cuda_batch_for_nbins(64, kMax) == kMax);
+    CHECK(ep_cuda_batch_for_nbins(128, kMax) == kMax / 2);
+    CHECK(ep_cuda_batch_for_nbins(1024, kMax) == 4096);
+    // Not a power of two: rounded down.
+    CHECK(ep_cuda_batch_for_nbins(1000, kMax) == 4096);
+    // The planner's halved batch caps it.
+    CHECK(ep_cuda_batch_for_nbins(1024, 1024) == 1024);
+}
+
 TEST_CASE("CUDA EP lowers the batch only when a minimum chunk cannot fit",
           "[ep_chunking]") {
     const auto cfg     = make_cfg(140.0, 145.0, 1);
@@ -526,11 +540,11 @@ TEST_CASE("CUDA EP lowers the batch only when a minimum chunk cannot fit",
     REQUIRE(!ample.chunk_cfgs.empty());
     CHECK(ample.chunk_cfgs.front().batch_size == ctx.batch_size);
     const auto tight =
-        plan_chunks<float>(cfg, "taylor", designs, 0.0, 0.06, ctx);
+        plan_chunks<float>(cfg, "taylor", designs, 0.0, 0.03, ctx);
     REQUIRE(!tight.chunk_cfgs.empty());
     CHECK(tight.chunk_cfgs.front().batch_size < ctx.batch_size);
     CHECK(std::has_single_bit(tight.chunk_cfgs.front().batch_size));
-    check_plan_fits(tight, ctx, 0.06);
+    check_plan_fits(tight, ctx, 0.03);
 }
 
 namespace {

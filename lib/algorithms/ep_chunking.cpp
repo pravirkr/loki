@@ -373,10 +373,13 @@ private:
                          std::span<const double> complexity,
                          std::span<const double> margin) const {
         EvaluatedChunk c{
-            .cfg                 = g.cfg,
-            .ncoords             = g.ncoords,
-            .branch_max          = g.branch_max,
-            .batch_size          = m_memory.batch_size,
+            .cfg        = g.cfg,
+            .ncoords    = g.ncoords,
+            .branch_max = g.branch_max,
+            .batch_size =
+                m_memory.kind == EPMemoryKind::kCuda
+                    ? ep_cuda_batch_for_nbins(nbins, m_memory.batch_size)
+                    : m_memory.batch_size,
             .nsegments           = g.nsegments,
             .fold_size           = g.fold_size,
             .buffer_size         = g.buffer_size,

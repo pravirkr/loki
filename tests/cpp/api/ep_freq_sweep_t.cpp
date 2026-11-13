@@ -102,7 +102,7 @@ void check_memory_bounded_chunks(const PulsarSearchConfig& cfg,
         CHECK(chunk.actual_f_end >= chunk.nominal_f_end);
         CHECK(chunk.chunk_memory_gb <= cfg.get_max_process_memory_gb());
         CHECK(chunk.max_sugg >= 1024U);
-        CHECK(chunk.branch_max >= 32U);
+        CHECK(chunk.branch_max >= 1U);
         CHECK(!chunk.threshold_scheme.empty());
         CHECK(!chunk.branching_pattern.empty());
         CHECK(chunk.peak_complexity >= 1.0);
@@ -169,7 +169,7 @@ TEST_CASE("EPRegionPlanner wide band covers two regions and reports maxima",
     for (SizeType i = 0; i < chunks.size(); ++i) {
         const loki::plans::FFAPlan<float> plan(chunks[i].cfg);
         const auto forecast = plan.forecast_branching("taylor");
-        const auto needed   = std::max(forecast.max_children, SizeType{32});
+        const auto needed   = std::max(forecast.max_children, SizeType{1});
         CHECK(chunks[i].branch_max >= needed);
         CHECK(chunk_stats[i].branch_max == chunks[i].branch_max);
     }
