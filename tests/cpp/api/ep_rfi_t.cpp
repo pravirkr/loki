@@ -73,6 +73,7 @@ std::string message_for(const std::string& toml) {
 
 constexpr auto kFullRfi = "pulsar_mask = [[49.9, 50.1], [59.5, 60.5]]\n"
                           "n_harmonics = 3\n"
+                          "fractional_harmonics = true\n"
                           "harvest = true\n"
                           "harvest_min_level = 4\n"
                           "harvest_offset = 6.5\n"
@@ -171,6 +172,7 @@ TEST_CASE("[ep.rfi] round-trips every key", "[config][ep][rfi]") {
     CHECK(rfi.pulsar_mask[1][0] == 59.5);
     CHECK(rfi.pulsar_mask[1][1] == 60.5);
     CHECK(rfi.n_harmonics == 3);
+    CHECK(rfi.fractional_harmonics);
     CHECK(rfi.harvest);
     CHECK(rfi.harvest_min_level == 4);
     CHECK(rfi.harvest_offset == 6.5F);
@@ -210,6 +212,7 @@ TEST_CASE("[ep.rfi] maps onto PruneRFIConfig", "[config][ep][rfi]") {
     CHECK(lib.pulsar_mask[0].a_lo == std::numeric_limits<double>::lowest());
     CHECK(lib.pulsar_mask[0].a_hi == std::numeric_limits<double>::max());
     CHECK(lib.n_harmonics == 3);
+    CHECK(lib.fractional_harmonics);
     CHECK(lib.harvest_scheme.empty());
     REQUIRE(lib.harvest_defaults.has_value());
     CHECK(lib.harvest_defaults->min_level == 4);
@@ -240,6 +243,9 @@ TEST_CASE("[ep.rfi] rejects unknown keys, wrong types and bad values",
     CHECK_FALSE(message_for(make_doc("harvest_scheme = [5.0]\n")).empty());
     CHECK_FALSE(message_for(make_doc("harvest = 1\n")).empty());
     CHECK_FALSE(message_for(make_doc("n_harmonics = -1\n")).empty());
+    CHECK(
+        message_for(make_doc("n_harmonics = 33\nfractional_harmonics = true\n"))
+            .find("ep.rfi.fractional_harmonics") != std::string::npos);
     CHECK_FALSE(message_for(make_doc("pulsar_mask = [50.0, 51.0]\n")).empty());
     CHECK_FALSE(
         message_for(make_doc("pulsar_mask = [[50.0, 51.0, 52.0]]\n")).empty());

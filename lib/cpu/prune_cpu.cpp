@@ -971,9 +971,13 @@ private:
             std::abs(m_leaf_scratch[((n_params - 1) * kParamStride) + 1]);
         const auto t_ref = coord_cur.first;
 
-        const auto window = make_harvest_window(
-            f, a, df, da, t_ref, get_tobs_scheme(), m_rfi->harvest_mask_ntiles);
-        m_mask.add_window(window, m_rfi->n_harmonics);
+        const auto a_lim = m_cfg.get_param_limits()[n_params - 2];
+        const auto a_max = std::max(std::abs(a_lim.min), std::abs(a_lim.max));
+        const auto window =
+            make_harvest_window(f, a, df, da, t_ref, get_tobs_scheme(),
+                                m_rfi->harvest_mask_ntiles, a_max);
+        m_mask.add_window(window, m_rfi->n_harmonics,
+                          m_rfi->fractional_harmonics);
         ++m_n_harvested_total;
 
         if (m_harvest.size() < m_rfi->max_harvests) {
@@ -1331,13 +1335,15 @@ private:
             search::GridMask(limits[n_params - 2], counts[n_params - 2],
                              limits[n_params - 1], counts[n_params - 1]);
         m_mask_base.add_windows(m_rfi_config.pulsar_mask,
-                                m_rfi_config.n_harmonics);
+                                m_rfi_config.n_harmonics,
+                                m_rfi_config.fractional_harmonics);
         if (m_rfi_config.is_active()) {
             spdlog::info(
-                "EPMultiPass: RFI control: {} mask window(s) ({} harmonics) "
+                "EPMultiPass: RFI control: {} mask window(s) ({} harmonics{}) "
                 "-> {} of {} grid cells masked; harvesting {}; impulsive "
                 "veto {}",
                 m_rfi_config.pulsar_mask.size(), m_rfi_config.n_harmonics,
+                m_rfi_config.fractional_harmonics ? ", fractional" : "",
                 m_mask_base.count(), m_mask_base.get_n_cells(),
                 m_rfi_config.has_harvest() ? "on" : "off",
                 m_rfi_config.impulsive_veto ? "on" : "off");

@@ -13,6 +13,9 @@ namespace loki::algorithms {
 /// Uses std::numeric_limits<float>::max() for full -ffast-math safety.
 inline constexpr float kHarvestDisabled = std::numeric_limits<float>::max();
 
+/// Largest n_harmonics with fractional_harmonics (up to n^2 windows each).
+inline constexpr SizeType kMaxFractionalHarmonics = 32;
+
 /// Default half-width in acceleration (m/s^2) for terrestrial birdie windows.
 inline constexpr double kBirdieAccelPad = 1.0e-3;
 
@@ -77,6 +80,10 @@ struct PruneRFIConfig {
     /// Also mask f*k and f/k for k in [2, n_harmonics] (0 disables), for
     /// every pulsar_mask window and every harvest window.
     SizeType n_harmonics = 0;
+    /// Mask every reduced ratio p/q != 1 with p, q in [1, n_harmonics]
+    /// instead (fractional harmonics such as 3/2 and 3/4; a superset of the
+    /// integer ones). n_harmonics is then at most kMaxFractionalHarmonics.
+    bool fractional_harmonics = false;
     /// Per-level upper score threshold (size nsegments - 1, aligned with the
     /// pruning threshold scheme). Empty disables harvesting; kHarvestDisabled
     /// disables harvesting at a given level.
@@ -165,8 +172,12 @@ make_birdie_window(double f, double f_pad, double a_pad = kBirdieAccelPad);
 /**
  * @brief Exclusion window around a harvested candidate.
  *
- * @details Pads frequency by `ntiles * df` plus the Doppler sweep over
- * `reach = max(t_ref, tobs - t_ref)`, and acceleration by `ntiles * da`.
+ * @details Pads acceleration by `ntiles * da`, and frequency by `ntiles * df`
+ * plus the Doppler sweep over `reach = max(t_ref, tobs - t_ref)` of the
+ * largest acceleration in the window, `min(|a| + ntiles * da, a_max)`: a
+ * leaf harvested before its acceleration is resolved (a = 0 at an early
+ * level) still covers the drift of the source at any acceleration the window
+ * admits.
  *
  * @param f Source frequency at `t_ref` (Hz).
  * @param a Source acceleration (m/s^2).
@@ -175,14 +186,18 @@ make_birdie_window(double f, double f_pad, double a_pad = kBirdieAccelPad);
  * @param t_ref Leaf reference time (s).
  * @param tobs Observation length (s).
  * @param ntiles Tile-width multiplier (must be positive).
+ * @param a_max Largest |acceleration| of the search (m/s^2, >= 0); caps the
+ * acceleration used for the sweep.
  */
-[[nodiscard]] ParamWindow make_harvest_window(double f,
-                                              double a,
-                                              double df,
-                                              double da,
-                                              double t_ref,
-                                              double tobs,
-                                              double ntiles);
+[[nodiscard]] ParamWindow
+make_harvest_window(double f,
+                    double a,
+                    double df,
+                    double da,
+                    double t_ref,
+                    double tobs,
+                    double ntiles,
+                    double a_max = std::numeric_limits<double>::infinity());
 
 /**
  * @brief Build a conservative harvest threshold scheme derived from the

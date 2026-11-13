@@ -33,6 +33,8 @@ def test_ep_rfi_table_is_optional():
 def test_ep_rfi_table_reads_and_maps_to_the_library():
     rfi = """[ep.rfi]
 pulsar_mask = [[49.9, 50.1]]
+n_harmonics = 4
+fractional_harmonics = true
 harvest = true
 harvest_min_level = 4
 harvest_min_snr = 12.0
@@ -47,6 +49,8 @@ impulsive_veto = true
     assert lib.harvest_defaults.min_level == 4
     assert lib.harvest_defaults.min_snr == 12.0
     assert lib.pulsar_mask[0].f_lo == 49.9
+    assert lib.n_harmonics == 4
+    assert lib.fractional_harmonics
     again = libloki.configs.EPTomlConfig.from_string(cfg.to_toml_string())
     assert again.to_toml_string() == cfg.to_toml_string()
 

@@ -192,6 +192,7 @@ table is optional; without it the search and its output are unchanged.
 [ep.rfi]
 pulsar_mask = [[49.9, 50.1]]   # Hz, every acceleration; f*k and f/k too
 n_harmonics = 0                #   for k in [2, n_harmonics]; harvest windows too
+fractional_harmonics = false   # every reduced p/q != 1, p, q <= n_harmonics
 harvest = true
 harvest_min_level = 10         # first pruning level that may harvest
 harvest_offset = 10.0          # above the level's pruning threshold
@@ -204,6 +205,11 @@ impulsive_kappa = 6.0
 impulsive_min_level = 6
 impulsive_min_snr = 8.0
 ```
+
+With `fractional_harmonics`, every window is also masked at each reduced
+ratio `p/q != 1` with `p, q <= n_harmonics` (`n_harmonics` at most 32): a
+bright harvested source's 3/2 and 3/4 then stay out of the tree as well as
+its integer harmonics.
 
 A level's harvest threshold is `max(harvest_min_snr, threshold + harvest_offset)`
 from `harvest_min_level` on, built for each chunk from that chunk's own

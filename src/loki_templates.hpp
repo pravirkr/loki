@@ -214,40 +214,45 @@ inline void bind_prune_rfi(py::module& m) {
                                "search (pulsar mask, early harvesting, "
                                "stage-consistency veto). All mechanisms are "
                                "opt-in.")
-        .def(
-            py::init([](std::vector<ParamWindow> pulsar_mask,
-                        SizeType n_harmonics, std::vector<float> harvest_scheme,
-                        std::optional<HarvestDefaults> harvest_defaults,
-                        double harvest_mask_ntiles, SizeType max_harvests,
-                        bool harvest_store_folds, bool impulsive_veto,
-                        double impulsive_kappa, SizeType impulsive_min_level,
-                        float impulsive_min_snr) {
-                PruneRFIConfig cfg;
-                cfg.pulsar_mask         = std::move(pulsar_mask);
-                cfg.n_harmonics         = n_harmonics;
-                cfg.harvest_scheme      = std::move(harvest_scheme);
-                cfg.harvest_defaults    = harvest_defaults;
-                cfg.harvest_mask_ntiles = harvest_mask_ntiles;
-                cfg.max_harvests        = max_harvests;
-                cfg.harvest_store_folds = harvest_store_folds;
-                cfg.impulsive_veto      = impulsive_veto;
-                cfg.impulsive_kappa     = impulsive_kappa;
-                cfg.impulsive_min_level = impulsive_min_level;
-                cfg.impulsive_min_snr   = impulsive_min_snr;
-                return cfg;
-            }),
-            py::kw_only(), py::arg("pulsar_mask") = std::vector<ParamWindow>(),
-            py::arg("n_harmonics")         = 0U,
-            py::arg("harvest_scheme")      = std::vector<float>(),
-            py::arg("harvest_defaults")    = std::nullopt,
-            py::arg("harvest_mask_ntiles") = 4.0,
-            py::arg("max_harvests")        = 4096U,
-            py::arg("harvest_store_folds") = true,
-            py::arg("impulsive_veto") = false, py::arg("impulsive_kappa") = 6.0,
-            py::arg("impulsive_min_level") = 6U,
-            py::arg("impulsive_min_snr")   = 8.0F)
+        .def(py::init([](std::vector<ParamWindow> pulsar_mask,
+                         SizeType n_harmonics, bool fractional_harmonics,
+                         std::vector<float> harvest_scheme,
+                         std::optional<HarvestDefaults> harvest_defaults,
+                         double harvest_mask_ntiles, SizeType max_harvests,
+                         bool harvest_store_folds, bool impulsive_veto,
+                         double impulsive_kappa, SizeType impulsive_min_level,
+                         float impulsive_min_snr) {
+                 PruneRFIConfig cfg;
+                 cfg.pulsar_mask          = std::move(pulsar_mask);
+                 cfg.n_harmonics          = n_harmonics;
+                 cfg.fractional_harmonics = fractional_harmonics;
+                 cfg.harvest_scheme       = std::move(harvest_scheme);
+                 cfg.harvest_defaults     = harvest_defaults;
+                 cfg.harvest_mask_ntiles  = harvest_mask_ntiles;
+                 cfg.max_harvests         = max_harvests;
+                 cfg.harvest_store_folds  = harvest_store_folds;
+                 cfg.impulsive_veto       = impulsive_veto;
+                 cfg.impulsive_kappa      = impulsive_kappa;
+                 cfg.impulsive_min_level  = impulsive_min_level;
+                 cfg.impulsive_min_snr    = impulsive_min_snr;
+                 return cfg;
+             }),
+             py::kw_only(), py::arg("pulsar_mask") = std::vector<ParamWindow>(),
+             py::arg("n_harmonics")          = 0U,
+             py::arg("fractional_harmonics") = false,
+             py::arg("harvest_scheme")       = std::vector<float>(),
+             py::arg("harvest_defaults")     = std::nullopt,
+             py::arg("harvest_mask_ntiles")  = 4.0,
+             py::arg("max_harvests")         = 4096U,
+             py::arg("harvest_store_folds")  = true,
+             py::arg("impulsive_veto")       = false,
+             py::arg("impulsive_kappa")      = 6.0,
+             py::arg("impulsive_min_level")  = 6U,
+             py::arg("impulsive_min_snr")    = 8.0F)
         .def_readwrite("pulsar_mask", &PruneRFIConfig::pulsar_mask)
         .def_readwrite("n_harmonics", &PruneRFIConfig::n_harmonics)
+        .def_readwrite("fractional_harmonics",
+                       &PruneRFIConfig::fractional_harmonics)
         .def_readwrite("harvest_scheme", &PruneRFIConfig::harvest_scheme)
         .def_readwrite("harvest_defaults", &PruneRFIConfig::harvest_defaults)
         .def(
@@ -285,6 +290,7 @@ inline void bind_prune_rfi(py::module& m) {
     m.def("make_harvest_window", &make_harvest_window, py::arg("f"),
           py::arg("a"), py::arg("df"), py::arg("da"), py::arg("t_ref"),
           py::arg("tobs"), py::arg("ntiles"),
+          py::arg("a_max") = std::numeric_limits<double>::infinity(),
           "Exclusion window around a harvested candidate.");
 
     m.def(

@@ -258,3 +258,19 @@ alone does not separate lines from pulsars, so the default offset stays
 high. A harvest threshold below a source's partial S/N removes the
 source: in a test, a weak injected pulsar was harvested along with the
 bright ones.
+
+Harvest windows and fractional harmonics, on a survey segment (2^24
+samples, 60-130 Hz, |a| <= 35 m/s^2, 32 runs) with a bright binary pulsar
+(final S/N 111) whose 3/2 harmonic reached S/N 26:
+
+| Harvest setting | Harvests | Bright pulsar left (runs) | 3/2 left (runs) | Detections |
+|---|---|---|---|---|
+| none | 0 | 30 | 30 | 463 |
+| default, window sweep from the leaf's acceleration | 66 | 1 | 0 (harvested itself) | 307 |
+| default, window sweep from the window's largest acceleration | 63 | 0 | 0 (harvested itself) | 306 |
+| as above, `n_harmonics = 4`, `fractional_harmonics` | 33 | 0 | 0 (masked) | 208 |
+
+The pulsar was harvested at level 10, where its acceleration was not yet
+resolved (a = 0 with a tile of 70 m/s^2), so a sweep from the leaf's own
+acceleration left the window 6 grid cells wide. Masks are per chunk: the
+pulsar's 3/4 harmonic (S/N 15) lay in another chunk and stayed.

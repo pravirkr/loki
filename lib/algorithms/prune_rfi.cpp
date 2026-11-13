@@ -56,6 +56,11 @@ void PruneRFIConfig::validate(SizeType nsegments) const {
         }
         validate_harvest_geometry(harvest_mask_ntiles);
     }
+    error_check::check(
+        !fractional_harmonics || n_harmonics <= kMaxFractionalHarmonics,
+        fmt::format("PruneRFIConfig: fractional_harmonics needs n_harmonics "
+                    "<= {} (got {})",
+                    kMaxFractionalHarmonics, n_harmonics));
     if (harvest_defaults) {
         error_check::check(harvest_scheme.empty(),
                            "PruneRFIConfig: set harvest_scheme or "
@@ -147,7 +152,8 @@ ParamWindow make_harvest_window(double f,
                                 double da,
                                 double t_ref,
                                 double tobs,
-                                double ntiles) {
+                                double ntiles,
+                                double a_max) {
     error_check::check_greater(f, 0.0,
                                "make_harvest_window: f must be positive");
     error_check::check_greater_equal(df, 0.0,
@@ -162,10 +168,13 @@ ParamWindow make_harvest_window(double f,
                                "make_harvest_window: ntiles must be positive");
     error_check::check(utils::is_finite(ntiles),
                        "make_harvest_window: ntiles must be finite");
-    const auto reach = std::max(t_ref, tobs - t_ref);
-    const auto sweep = f * std::abs(a) * reach * utils::kInvCval;
-    const auto f_pad = (ntiles * df) + sweep;
-    const auto a_pad = ntiles * da;
+    error_check::check(!utils::is_nan(a_max) && a_max >= 0.0,
+                       "make_harvest_window: a_max must be >= 0");
+    const auto a_pad   = ntiles * da;
+    const auto a_reach = std::min(std::abs(a) + a_pad, a_max);
+    const auto reach   = std::max(t_ref, tobs - t_ref);
+    const auto sweep   = f * a_reach * reach * utils::kInvCval;
+    const auto f_pad   = (ntiles * df) + sweep;
     return ParamWindow{
         .f_lo = f - f_pad,
         .f_hi = f + f_pad,

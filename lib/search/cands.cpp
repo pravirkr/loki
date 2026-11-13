@@ -856,6 +856,8 @@ void PruneResultWriter::write_metadata(
     }
     create_1d_dataset<float>(rfi, "harvest_scheme", rfi_config.harvest_scheme);
     rfi.createAttribute("n_harmonics", rfi_config.n_harmonics);
+    rfi.createAttribute("fractional_harmonics",
+                        static_cast<uint8_t>(rfi_config.fractional_harmonics));
     rfi.createAttribute("harvest_mask_ntiles", rfi_config.harvest_mask_ntiles);
     rfi.createAttribute("max_harvests", rfi_config.max_harvests);
     rfi.createAttribute("harvest_store_folds",

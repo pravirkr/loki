@@ -128,6 +128,8 @@ const toml_utils::Schema<EPRFIOptions>& rfi_schema() {
             }),
         field<R>("", "n_harmonics",
                  [](auto& r) -> auto& { return r.n_harmonics; }),
+        field<R>("", "fractional_harmonics",
+                 [](auto& r) -> auto& { return r.fractional_harmonics; }),
         field<R>("", "harvest", [](auto& r) -> auto& { return r.harvest; }),
         field<R>("", "harvest_min_level",
                  [](auto& r) -> auto& { return r.harvest_min_level; }),
@@ -2355,7 +2357,9 @@ overflow_keep_fraction = 0.5
 # RFI control of the pruning (CPU backend only). Omit the table for none.
 # pulsar_mask: frequency windows [f_lo, f_hi] in Hz, masked at every
 #   acceleration. n_harmonics also masks f*k and f/k for k in [2, n], for
-#   the mask windows and for every harvest window.
+#   the mask windows and for every harvest window. fractional_harmonics masks
+#   every reduced p/q != 1 with p, q <= n_harmonics instead (3/2, 3/4, ...;
+#   n_harmonics <= 32).
 # harvest: record and remove leaves far above the pruning threshold (a bright
 #   source or RFI line), and mask their neighbourhood for the rest of the run.
 #   From level harvest_min_level on, a level's harvest threshold is
@@ -2370,6 +2374,7 @@ overflow_keep_fraction = 0.5
 # [ep.rfi]
 # pulsar_mask = [[49.9, 50.1], [59.9, 60.1]]
 # n_harmonics = 0
+# fractional_harmonics = false
 # harvest = false
 # harvest_min_level = 10
 # harvest_offset = 10.0
@@ -2574,6 +2579,11 @@ void EPRFIOptions::validate() const {
     if (n_harmonics > 1024) {
         throw std::invalid_argument("ep.rfi.n_harmonics must be at most 1024");
     }
+    if (fractional_harmonics &&
+        n_harmonics > algorithms::kMaxFractionalHarmonics) {
+        throw std::invalid_argument(
+            "ep.rfi.fractional_harmonics needs n_harmonics <= 32");
+    }
     if (harvest_min_level < 1) {
         throw std::invalid_argument("ep.rfi.harvest_min_level must be >= 1");
     }
@@ -2608,7 +2618,8 @@ algorithms::PruneRFIConfig EPRFIOptions::to_prune_rfi_config() const {
         rfi.pulsar_mask.push_back(
             algorithms::ParamWindow{.f_lo = f_lo, .f_hi = f_hi});
     }
-    rfi.n_harmonics = n_harmonics;
+    rfi.n_harmonics          = n_harmonics;
+    rfi.fractional_harmonics = fractional_harmonics;
     if (harvest) {
         rfi.harvest_defaults = algorithms::HarvestDefaults{
             .min_level = harvest_min_level,

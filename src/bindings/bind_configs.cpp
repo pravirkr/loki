@@ -329,6 +329,7 @@ void bind_configs(py::module_& m) {
         .def(py::init<>())
         .def_readwrite("pulsar_mask", &RFI::pulsar_mask)
         .def_readwrite("n_harmonics", &RFI::n_harmonics)
+        .def_readwrite("fractional_harmonics", &RFI::fractional_harmonics)
         .def_readwrite("harvest", &RFI::harvest)
         .def_readwrite("harvest_min_level", &RFI::harvest_min_level)
         .def_readwrite("harvest_offset", &RFI::harvest_offset)

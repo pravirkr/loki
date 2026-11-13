@@ -376,6 +376,9 @@ struct EPRFIOptions {
     /// Also mask every window (pulsar_mask and harvest windows) at f*k and
     /// f/k for k in [2, n_harmonics].
     SizeType n_harmonics{0};
+    /// Mask every reduced p/q != 1 with p, q <= n_harmonics instead
+    /// (fractional harmonics; n_harmonics <= 32).
+    bool fractional_harmonics{false};
     bool harvest{false};
     SizeType harvest_min_level{10};
     float harvest_offset{10.0F};
