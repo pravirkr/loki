@@ -1981,8 +1981,9 @@ int main(int argc, char** argv) {
         "--memory-gb", ffa_cfg.max_process_memory_gb,
         "Memory cap in GB of 2^30 bytes (as Slurm's --mem=16G): total "
         "process RSS on CPU, device memory on CUDA");
-    grp_perf->add_option("--octave-scale", ffa_cfg.octave_scale,
-                         "Octave scaling factor (default: 2.0)");
+    grp_perf->add_option("--region-growth-factor", ffa_cfg.region_growth_factor,
+                         "Period growth factor between search regions "
+                         "(default: 1.5)");
     grp_perf->add_option("--nbins-max", ffa_cfg.nbins_max,
                          "Maximum allowed folding bins (default: 1024)");
     grp_perf->add_option("--nbins-min-lossy-bf", ffa_cfg.nbins_min_lossy_bf,
@@ -2242,8 +2243,10 @@ int main(int argc, char** argv) {
         "--memory-gb", ep_cfg.max_process_memory_gb,
         "Memory cap in GB of 2^30 bytes (as Slurm's --mem=16G): total "
         "process RSS on CPU, device memory on CUDA");
-    ep_grp_perf->add_option("--octave-scale", ep_cfg.octave_scale,
-                            "Octave scaling factor (default: 2.0)");
+    ep_grp_perf->add_option("--region-growth-factor",
+                            ep_cfg.region_growth_factor,
+                            "Period growth factor between search regions "
+                            "(default: 1.5)");
     ep_grp_perf->add_option("--nbins-max", ep_cfg.nbins_max,
                             "Maximum allowed folding bins (default: 1024)");
     ep_grp_perf->add_option(

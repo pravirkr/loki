@@ -189,6 +189,28 @@ its detections in weaker runs are dropped: with 32 leaves per cell, sources
 lost many of the runs that detected them (for example 21 to 12, and
 16 to 7), although every best S/N survived. Cells are per run.
 
+### Region growth factor (`region_growth_factor`)
+
+The planners split the period range into regions whose period grows by
+`region_growth_factor`; nbins and eta grow with the period, so the grid's
+phase tolerance, `eta / nbins` turns at f_max, is the same in every region
+(the duty-cycle resolution of the search, written as `phase_tolerance`). The
+factor only sets how far a region's bins widen in time from its fast end to
+its slow end. Full-band jerk search (10-720 Hz, 2^26 samples, nbins 16,
+eta 1, 32 runs, CUDA), 28 injected jerk pulsars per series:
+
+| Factor | Regions | S/N vs 2.0, duty 1/16 (48 below 600 Hz) | Search | Plan CUDA / CPU |
+|---|---|---|---|---|
+| 2.0 | 7 | - | 5.6 s | 18 s / 313 s |
+| 1.5 | 11 | +2.5 +- 1.9 % | 8.3 s | 26 s / 452 s |
+| 1.2 | 24 | +4.2 +- 1.8 % | 11.7 s | 56 s / 1080 s |
+
+A single source's S/N moves by about 12 % (rms) between factors, even
+where nbins is the same: the chunk extent changes the seed grid and the
+thresholds. Pulses narrower than the phase tolerance are lost at every
+factor (a 0.25 ms pulse below 100 Hz); lower eta, or split the band into
+searches with their own nbins, to search narrower duty cycles. Default 1.5.
+
 ### Spectral zap modes
 
 `zap_mode = "noise"` (`docs/preprocessing.md`) replaces every birdie-window

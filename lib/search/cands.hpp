@@ -291,7 +291,7 @@ struct FFAResultMetadata {
     double wtsp{};
     SizeType nbins_min{};
     SizeType nbins_max{};
-    double octave_scale{};
+    double region_growth_factor{};
     double eta{};
     bool use_fourier{};
     std::optional<SizeType> bseg_brute;

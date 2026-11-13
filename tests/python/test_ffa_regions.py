@@ -9,7 +9,9 @@ from loki import libloki
 
 
 def test_generate_ffa_regions_covers_band_by_octaves() -> None:
-    regions = libloki.plans.generate_ffa_regions(1 / 200, 1 / 25, 64e-6, 64, 1.0)
+    regions = libloki.plans.generate_ffa_regions(
+        1 / 200, 1 / 25, 64e-6, 64, 1.0, region_growth_factor=2.0
+    )
     assert regions.dtype.names == ("f_start", "f_end", "nbins", "eta")
     order = np.argsort(regions["f_start"])
     f_start, f_end = regions["f_start"][order], regions["f_end"][order]

@@ -90,7 +90,7 @@ make_cfg(SizeType nparams, bool kadane = false, SizeType nbins = kNbins) {
             /*use_fourier=*/false,
             /*nthreads=*/1,
             /*max_process_memory_gb=*/4.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/std::max<SizeType>(1024, nbins),
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,

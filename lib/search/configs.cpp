@@ -320,8 +320,8 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    [](auto& c) -> auto& { return c.device; }),
         field<Cfg>("performance", "max_process_memory_gb",
                    [](auto& c) -> auto& { return c.max_process_memory_gb; }),
-        field<Cfg>("performance", "octave_scale",
-                   [](auto& c) -> auto& { return c.octave_scale; }),
+        field<Cfg>("performance", "region_growth_factor",
+                   [](auto& c) -> auto& { return c.region_growth_factor; }),
         field<Cfg>("performance", "nbins_max",
                    [](auto& c) -> auto& { return c.nbins_max; }),
         field<Cfg>("performance", "nbins_min_lossy_bf",
@@ -618,8 +618,10 @@ nthreads = 4
 # Maximum memory cap in GB used for chunk planning
 max_process_memory_gb = 8.0
 
-# Octave scaling factor between successive search bands (2.0 = octave doubling)
-octave_scale = 2.0
+# Geometric growth factor of the period range from one search region to the
+# next (2.0 = octaves). nbins and eta grow with it, so the phase tolerance
+# (eta / nbins turns) is the same in every region.
+region_growth_factor = 1.5
 
 # Maximum number of fold bins for long-period bands
 nbins_max = 1024
@@ -905,7 +907,7 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
             use_fourier,
             effective_nthreads,
             max_process_memory_gb,
-            octave_scale,
+            region_growth_factor,
             nbins_max,
             nbins_min_lossy_bf,
             bseg_brute,
@@ -963,7 +965,7 @@ public:
          bool use_fourier,
          int nthreads,
          double max_process_memory_gb,
-         double octave_scale,
+         double region_growth_factor,
          SizeType nbins_max,
          SizeType nbins_min_lossy_bf,
          std::optional<SizeType> bseg_brute,
@@ -982,7 +984,7 @@ public:
           m_use_fourier(use_fourier),
           m_nthreads(nthreads),
           m_max_process_memory_gb(max_process_memory_gb),
-          m_octave_scale(octave_scale),
+          m_region_growth_factor(region_growth_factor),
           m_nbins_max(nbins_max),
           m_nbins_min_lossy_bf(nbins_min_lossy_bf),
           m_snr_min(snr_min),
@@ -1061,7 +1063,7 @@ public:
     bool get_use_fourier() const { return m_use_fourier; }
     int get_nthreads() const { return m_nthreads; }
     double get_max_process_memory_gb() const { return m_max_process_memory_gb; }
-    double get_octave_scale() const { return m_octave_scale; }
+    double get_region_growth_factor() const { return m_region_growth_factor; }
     SizeType get_nbins_max() const { return m_nbins_max; }
     SizeType get_nbins_min_lossy_bf() const { return m_nbins_min_lossy_bf; }
     SizeType get_bseg_brute() const { return m_bseg_brute; }
@@ -1187,7 +1189,7 @@ private:
         return FFASearchConfig(std::make_unique<Impl>(
             m_nsamps_input, m_tsamp, nbins, eta, param_limits, m_ducy_max,
             m_wtsp, m_use_fourier, m_nthreads, m_max_process_memory_gb,
-            m_octave_scale, m_nbins_max, m_nbins_min_lossy_bf,
+            m_region_growth_factor, m_nbins_max, m_nbins_min_lossy_bf,
             m_bseg_brute_explicit, nsegments, m_snr_min,
             m_max_passing_candidates, m_use_boxcar_kadane, bseg_ffa_lock));
     }
@@ -1206,7 +1208,7 @@ private:
     bool m_use_fourier;
     int m_nthreads;
     double m_max_process_memory_gb;
-    double m_octave_scale;
+    double m_region_growth_factor;
     SizeType m_nbins_max;
     SizeType m_nbins_min_lossy_bf;
     double m_snr_min;
@@ -1384,7 +1386,7 @@ private:
      * bench/scripts/ffa/bseg_brute_sensitivity.py: about 1% per halving of B
      * below ~8 cycles at nbins 32, with the loss falling as nbins grows). So
      * B is set from a target number of cycles at f_max, the fast end of the
-     * chunk, which the planner keeps within octave_scale of f_min.
+     * chunk, which the planner keeps within region_growth_factor of f_min.
      *
      * Takes the largest valid B at or below the candidate nearest to the
      * target; the smallest valid B if all candidates are above it.
@@ -1663,7 +1665,7 @@ FFASearchConfig::FFASearchConfig(SizeType nsamps,
                                  bool use_fourier,
                                  int nthreads,
                                  double max_process_memory_gb,
-                                 double octave_scale,
+                                 double region_growth_factor,
                                  SizeType nbins_max,
                                  SizeType nbins_min_lossy_bf,
                                  std::optional<SizeType> bseg_brute,
@@ -1681,7 +1683,7 @@ FFASearchConfig::FFASearchConfig(SizeType nsamps,
                                     use_fourier,
                                     nthreads,
                                     max_process_memory_gb,
-                                    octave_scale,
+                                    region_growth_factor,
                                     nbins_max,
                                     nbins_min_lossy_bf,
                                     bseg_brute,
@@ -1740,8 +1742,8 @@ int FFASearchConfig::get_nthreads() const noexcept {
 double FFASearchConfig::get_max_process_memory_gb() const noexcept {
     return m_impl->get_max_process_memory_gb();
 }
-double FFASearchConfig::get_octave_scale() const noexcept {
-    return m_impl->get_octave_scale();
+double FFASearchConfig::get_region_growth_factor() const noexcept {
+    return m_impl->get_region_growth_factor();
 }
 SizeType FFASearchConfig::get_nbins_max() const noexcept {
     return m_impl->get_nbins_max();
@@ -1939,7 +1941,7 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                                bool use_fourier,
                                int nthreads,
                                double max_process_memory_gb,
-                               double octave_scale,
+                               double region_growth_factor,
                                SizeType nbins_max,
                                SizeType nbins_min_lossy_bf,
                                std::optional<SizeType> bseg_brute,
@@ -1966,7 +1968,7 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                       use_fourier,
                       nthreads,
                       max_process_memory_gb,
-                      octave_scale,
+                      region_growth_factor,
                       nbins_max,
                       nbins_min_lossy_bf,
                       bseg_brute,
@@ -2407,8 +2409,10 @@ nthreads = 4
 # Maximum memory cap in GB: process RSS on CPU, device memory on CUDA
 max_process_memory_gb = 8.0
 
-# Octave scaling factor between successive search bands (2.0 = octave doubling)
-octave_scale = 2.0
+# Geometric growth factor of the period range from one search region to the
+# next (2.0 = octaves). nbins and eta grow with it, so the phase tolerance
+# (eta / nbins turns) is the same in every region.
+region_growth_factor = 1.5
 
 # Maximum number of EP fold bins for long-period bands (cannot exceed 1024)
 nbins_max = 1024

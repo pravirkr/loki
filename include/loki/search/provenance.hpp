@@ -55,7 +55,7 @@ struct RunStats {
 ///   chunk `chunk_memory_gb`: device memory on CUDA);
 /// - files with a `/detections` table: datasets `detections_per_nbins/nbins`
 ///   and `detections_per_nbins/count` (one row per profile bin count, i.e.
-///   per octave group).
+///   per search region).
 /// @throws std::runtime_error if the file cannot be opened for writing.
 void write_run_stats(const std::filesystem::path& results_file,
                      const RunStats& stats);

@@ -2,7 +2,7 @@
 """Sensitivity-versus-time sweep of ``performance.bseg_brute`` (one FFA chunk).
 
 For each injected pulsar the search window is a single chunk of ratio
-``--ratio`` (default 1.5, the planner's ``octave_scale``) around the true
+``--ratio`` (default 1.5, the planner's ``region_growth_factor``) around the true
 frequency, so one explicit ``bseg_brute`` applies to exactly one chunk. Every
 requested B is searched on the same time series; the best S/N near the truth
 is compared with the best S/N over all B values of that case, and the brute /

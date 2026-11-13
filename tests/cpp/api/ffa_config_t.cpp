@@ -32,7 +32,7 @@ TEST_CASE("FFASearchConfig standard construction and getters",
         /*use_fourier=*/true,
         /*nthreads=*/4,
         /*max_process_memory_gb=*/4.0,
-        /*octave_scale=*/2.0,
+        /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/32,
@@ -55,7 +55,7 @@ TEST_CASE("FFASearchConfig standard construction and getters",
     REQUIRE(cfg.get_nthreads() >= 1);
     REQUIRE(cfg.get_nthreads() <= 4);
     REQUIRE_THAT(cfg.get_max_process_memory_gb(), WithinAbs(4.0, 1e-9));
-    REQUIRE_THAT(cfg.get_octave_scale(), WithinAbs(2.0, 1e-9));
+    REQUIRE_THAT(cfg.get_region_growth_factor(), WithinAbs(2.0, 1e-9));
     REQUIRE(cfg.get_nbins_max() == 1024);
     REQUIRE(cfg.get_nbins_min_lossy_bf() == 64);
     REQUIRE(cfg.get_bseg_brute() == 32);
@@ -194,7 +194,7 @@ TEST_CASE("EPSearchConfig inherits and adds EP parameters", "[config][ep]") {
         /*use_fourier=*/true,
         /*nthreads=*/2,
         /*max_process_memory_gb=*/4.0,
-        /*octave_scale=*/2.0,
+        /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/32,
@@ -377,7 +377,7 @@ loki::SizeType default_bseg(loki::SizeType nbins,
     const loki::search::FFASearchConfig cfg(
         /*nsamps=*/2097152, /*tsamp=*/64e-6, nbins, /*eta=*/1.0, limits,
         /*ducy_max=*/0.2, /*wtsp=*/1.5, use_fourier, /*nthreads=*/1,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/1.5,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/1.5,
         /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64, std::nullopt,
         std::nullopt, /*snr_min=*/6.0, /*max_passing_candidates=*/1000,
         /*use_boxcar_kadane=*/false);

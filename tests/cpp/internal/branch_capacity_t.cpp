@@ -68,7 +68,7 @@ loki::search::PulsarSearchConfig overflow_config() {
         /*use_fourier=*/true,
         /*nthreads=*/1,
         /*max_process_memory_gb=*/8.0,
-        /*octave_scale=*/2.0,
+        /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/kNsamps / kNseg / 16,

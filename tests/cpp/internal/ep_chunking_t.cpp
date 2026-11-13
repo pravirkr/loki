@@ -55,7 +55,7 @@ PulsarSearchConfig make_cfg(double f_min, double f_max, int nthreads) {
             /*use_fourier=*/false,
             nthreads,
             /*max_process_memory_gb=*/8.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
@@ -69,10 +69,10 @@ PulsarSearchConfig make_cfg(double f_min, double f_max, int nthreads) {
 /// suggestions for a chunk spanning the whole region; the others the minimum.
 std::vector<RegionDesign> make_designs(const PulsarSearchConfig& cfg,
                                        double first_max_sugg) {
-    const auto regions =
-        generate_ffa_regions(1.0 / cfg.get_f_max(), 1.0 / cfg.get_f_min(),
-                             cfg.get_tsamp(), cfg.get_nbins(), cfg.get_eta(),
-                             cfg.get_octave_scale(), cfg.get_nbins_max());
+    const auto regions = generate_ffa_regions(
+        1.0 / cfg.get_f_max(), 1.0 / cfg.get_f_min(), cfg.get_tsamp(),
+        cfg.get_nbins(), cfg.get_eta(), cfg.get_region_growth_factor(),
+        cfg.get_nbins_max());
     std::vector<RegionDesign> designs;
     for (const auto& r : regions) {
         const auto rcfg =

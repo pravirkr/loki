@@ -611,7 +611,7 @@ frequency cell, whatever their S/N), so there is no `snr_floor_used`;
 overload counts stay in each run's `level_stats` (`n_overloads`).
 
 With a `/detections` table, `detections_per_nbins/nbins` and `count` give
-the detections per profile bin count, which is one row per octave group.
+the detections per profile bin count, which is one row per search region.
 EP `postprocess` is the time after the sweep's own `total_runtime`: writer
 drain, spool reading, sorting, clustering and writing the product.
 
@@ -704,7 +704,8 @@ are rejected rather than silently truncated.
 - **Types and names.** `width` and `nbins` are `uint32` (were `uint16`). Root
   `detection_id` is gone: use `/detections/id` and `/candidates/id`. The search
   attributes (`ffa_version`, `config_toml`, `tsamp`, `nsamps`, `tobs`, `f_min`,
-  `f_max`, `snr_min`, `ducy_max`, `wtsp`, `eta`, `bseg_*`, ...) moved to the
+  `f_max`, `snr_min`, `ducy_max`, `wtsp`, `eta`, `region_growth_factor`,
+  `phase_tolerance`, `bseg_*`, ...) moved to the
   `/search` group; the root keeps `param_names`, `complete` and the schema
   attributes.
 - **CPU memory.** The candidate budget `candidates.memory_gb` (default 1 GB) is

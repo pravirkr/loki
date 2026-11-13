@@ -24,24 +24,26 @@ using loki::search::PulsarSearchConfig;
 
 // --- generate_ffa_regions: correctness / foolproof-ness guards ---
 
-TEST_CASE("generate_ffa_regions rejects octave_scale <= 1.0", "[regions]") {
-    // octave_scale == 1.0 used to make p_cur_high == p_cur_low on every
+TEST_CASE("generate_ffa_regions rejects region_growth_factor <= 1.0",
+          "[regions]") {
+    // region_growth_factor == 1.0 used to make p_cur_high == p_cur_low on every
     // iteration of the covering loop, so it never advanced and hung
     // forever. It must now be rejected immediately instead of hanging.
     REQUIRE_THROWS_AS(generate_ffa_regions(/*p_min=*/0.002, /*p_max=*/1.0,
                                            /*tsamp=*/1e-5,
                                            /*nbins_min=*/32, /*eta_min=*/1.0,
-                                           /*octave_scale=*/1.0),
+                                           /*region_growth_factor=*/1.0),
                       std::runtime_error);
-    REQUIRE_THROWS_AS(
-        generate_ffa_regions(0.002, 1.0, 1e-5, 32, 1.0, /*octave_scale=*/0.9),
-        std::runtime_error);
+    REQUIRE_THROWS_AS(generate_ffa_regions(0.002, 1.0, 1e-5, 32, 1.0,
+                                           /*region_growth_factor=*/0.9),
+                      std::runtime_error);
 }
 
-TEST_CASE("generate_ffa_regions accepts octave_scale > 1.0 and terminates",
-          "[regions]") {
-    const auto regions =
-        generate_ffa_regions(0.002, 1.0, 1e-5, 32, 1.0, /*octave_scale=*/1.5);
+TEST_CASE(
+    "generate_ffa_regions accepts region_growth_factor > 1.0 and terminates",
+    "[regions]") {
+    const auto regions = generate_ffa_regions(0.002, 1.0, 1e-5, 32, 1.0,
+                                              /*region_growth_factor=*/1.5);
     REQUIRE_FALSE(regions.empty());
     // Coverage should span the full requested frequency range: the first
     // region's upper edge is 1/p_min, the last region's lower edge is
@@ -56,7 +58,7 @@ TEST_CASE("generate_ffa_regions adjacent octave bands share frequency edges",
     const auto regions =
         generate_ffa_regions(/*p_min=*/0.04, /*p_max=*/1.0, /*tsamp=*/1e-3,
                              /*nbins_min=*/32, /*eta_min=*/1.0,
-                             /*octave_scale=*/2.0);
+                             /*region_growth_factor=*/2.0);
     REQUIRE(regions.size() >= 2);
     constexpr double kTol = 1e-9;
     for (SizeType i = 0; i + 1 < regions.size(); ++i) {
@@ -239,7 +241,7 @@ TEST_CASE("generate_ffa_regions splits a capped bin count into octave bands",
     constexpr double kTsamp = 6.4e-5;
     const auto regions      = generate_ffa_regions(
         /*p_min=*/0.1, /*p_max=*/1.0, kTsamp, /*nbins_min=*/256,
-        /*eta_min=*/1.0, /*octave_scale=*/2.0, /*nbins_max=*/256);
+        /*eta_min=*/1.0, /*region_growth_factor=*/2.0, /*nbins_max=*/256);
     REQUIRE(regions.size() == 4);
     constexpr double kTol = 1e-9;
     CHECK(std::abs(regions.front().f_end - 10.0) < kTol);

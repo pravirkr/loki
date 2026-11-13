@@ -31,7 +31,7 @@ make_cfg(const std::vector<ParamLimit>& limits) {
             /*use_fourier=*/true,
             /*nthreads=*/1,
             /*max_process_memory_gb=*/8.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/std::nullopt,
@@ -83,7 +83,8 @@ TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",
     const loki::search::PulsarSearchConfig exact(
         /*nsamps=*/36000, /*tsamp=*/64e-6, /*nbins=*/32, /*eta=*/1.0, limits,
         /*ducy_max=*/0.3, /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0, /*nbins_max=*/1024,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
+        /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/1024, /*nsegments=*/8);
     REQUIRE(exact.get_bseg_brute() == 1125U);
     REQUIRE(exact.get_bseg_ffa() == 4500U);
@@ -99,7 +100,8 @@ TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",
     const loki::search::PulsarSearchConfig cfg(
         /*nsamps=*/35800, /*tsamp=*/64e-6, /*nbins=*/32, /*eta=*/1.0, limits,
         /*ducy_max=*/0.3, /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0, /*nbins_max=*/1024,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
+        /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/16, /*nsegments=*/128);
     REQUIRE(cfg.get_bseg_brute() == 17U);
     REQUIRE(cfg.get_bseg_ffa() == 272U);

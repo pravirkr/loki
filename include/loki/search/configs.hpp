@@ -74,7 +74,7 @@ struct FFATomlConfig {
     Backend backend{Backend::kCPU}; // "cpu" | "cuda"
     int device{0};                  // GPU ordinal, used by GPU backends
     double max_process_memory_gb{8.0};
-    double octave_scale{2.0};
+    double region_growth_factor{1.5};
     SizeType nbins_max{1024};
     SizeType nbins_min_lossy_bf{64};
     /// Minimum brute-fold segment length; empty = chosen by the planner.
@@ -131,7 +131,7 @@ public:
                     bool use_fourier                   = true,
                     int nthreads                       = 1,
                     double max_process_memory_gb       = 8.0,
-                    double octave_scale                = 2.0,
+                    double region_growth_factor        = 1.5,
                     SizeType nbins_max                 = 1024,
                     SizeType nbins_min_lossy_bf        = 64,
                     std::optional<SizeType> bseg_brute = std::nullopt,
@@ -164,7 +164,7 @@ public:
     bool get_use_fourier() const noexcept;
     int get_nthreads() const noexcept;
     double get_max_process_memory_gb() const noexcept;
-    double get_octave_scale() const noexcept;
+    double get_region_growth_factor() const noexcept;
     SizeType get_nbins_max() const noexcept;
     SizeType get_nbins_min_lossy_bf() const noexcept;
     /// Brute-fold segment length: ceil(nsamps / 2^L) for the 2^L brute
@@ -270,7 +270,7 @@ public:
                    bool use_fourier                   = true,
                    int nthreads                       = 1,
                    double max_process_memory_gb       = 8.0,
-                   double octave_scale                = 2.0,
+                   double region_growth_factor        = 1.5,
                    SizeType nbins_max                 = 1024,
                    SizeType nbins_min_lossy_bf        = 64,
                    std::optional<SizeType> bseg_brute = std::nullopt,

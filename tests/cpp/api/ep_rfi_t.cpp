@@ -103,7 +103,7 @@ PulsarSearchConfig make_sweep_cfg(double f_min, double f_max) {
             /*use_fourier=*/false,
             /*nthreads=*/2,
             /*max_process_memory_gb=*/4.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,

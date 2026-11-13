@@ -61,7 +61,7 @@ TEST_CASE("CPU FFA sweep is invariant to OpenMP thread count",
         const PulsarSearchConfig cfg(
             kNsamps, kTsamp, /*nbins=*/64, /*eta=*/1.0, limits,
             /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/true, nthreads,
-            /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+            /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
             /*nbins_max=*/128, /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/std::nullopt, /*nsegments=*/std::nullopt,
             /*snr_min=*/3.0, /*max_passing_candidates=*/1U << 20U);

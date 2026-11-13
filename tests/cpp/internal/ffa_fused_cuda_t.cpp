@@ -196,7 +196,8 @@ TEST_CASE("Fused frequency merges match the unfused levels bit for bit",
     const loki::search::FFASearchConfig cfg(
         /*nsamps=*/SizeType{1} << 15U, /*tsamp=*/1.0e-3, nbins, /*eta=*/1.0,
         limits, /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/false,
-        /*nthreads=*/1, /*max_process_memory_gb=*/1.0, /*octave_scale=*/2.0,
+        /*nthreads=*/1, /*max_process_memory_gb=*/1.0,
+        /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/SizeType{32});
     const loki::plans::FFAPlan<float> plan(cfg);
@@ -258,7 +259,8 @@ TEST_CASE("Fused frequency merges are exact on a level over 2^31 bytes",
         /*nsamps=*/SizeType{1} << 23U, /*tsamp=*/64.0e-6, kNbins,
         /*eta=*/1.0, limits, /*ducy_max=*/0.2, /*wtsp=*/1.5,
         /*use_fourier=*/false, /*nthreads=*/1, /*max_process_memory_gb=*/32.0,
-        /*octave_scale=*/2.0, /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64,
+        /*region_growth_factor=*/2.0, /*nbins_max=*/1024,
+        /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/SizeType{128});
     const loki::plans::FFAPlan<float> plan(cfg);
     const auto ncoords    = plan.get_ncoords();

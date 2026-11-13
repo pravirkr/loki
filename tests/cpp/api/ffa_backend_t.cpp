@@ -41,7 +41,7 @@ TEST_CASE("FFA backend dispatch CPU", "[ffa][backend]") {
     const PulsarSearchConfig cfg(
         kNsamps, kTsamp, /*nbins=*/32, /*eta=*/0.5, limits,
         /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, /*bseg_brute=*/128);
 
     SECTION("FFATime with Exec::cpu") {
@@ -65,7 +65,7 @@ TEST_CASE("FFA backend dispatch CPU", "[ffa][backend]") {
             kNsamps, kTsamp, /*nbins=*/32, /*eta=*/0.5, limits,
             /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/true,
             /*nthreads=*/1,
-            /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+            /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, /*bseg_brute=*/128);
         FFAFourier ffa(fourier_cfg, /*show_progress=*/false, Exec::cpu(1));
         std::vector<ComplexType> fold(ffa.get_plan().get_buffer_size());
@@ -95,7 +95,7 @@ TEST_CASE("FFA backend dispatch CPU", "[ffa][backend]") {
             kNsamps, kTsamp, /*nbins=*/64, /*eta=*/0.5, limits,
             /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/true,
             /*nthreads=*/1,
-            /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+            /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, /*bseg_brute=*/128);
         FFAFourier ffa_lossy(lossy_cfg, /*show_progress=*/false, Exec::cpu(1));
         std::vector<float> lossy_time(2 *
@@ -140,7 +140,7 @@ TEST_CASE("compute_ffa_scores CPU vs CUDA parity", "[ffa][backend][cuda]") {
             const PulsarSearchConfig cfg(
                 kNsamps, kTsamp, /*nbins=*/32, /*eta=*/0.5, limits,
                 /*ducy_max=*/0.2, /*wtsp=*/1.5, use_fourier, /*nthreads=*/1,
-                /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+                /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
                 /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32,
                 /*bseg_brute=*/128);
 
@@ -184,7 +184,7 @@ TEST_CASE("compute_ffa_scores CPU vs CUDA parity at fused-tile edges",
     const PulsarSearchConfig cfg(
         kNsamps, kTsamp, nbins, /*eta=*/0.5, limits, /*ducy_max=*/0.2,
         /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, /*bseg_brute=*/32);
 
     auto [cpu_scores, cpu_plan] =
@@ -271,12 +271,12 @@ TEST_CASE("FFA non-power-of-2 nsamps matches zero-padded reference and CUDA",
             const loki::search::FFASearchConfig cfg_np2(
                 kNsamps, kTsamp, nbins, /*eta=*/0.5, limits,
                 /*ducy_max=*/0.2, /*wtsp=*/1.5, use_fourier, /*nthreads=*/2,
-                /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+                /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
                 /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, kBsegBrute);
             const loki::search::FFASearchConfig cfg_pad(
                 kNsampsPadded, kTsamp, nbins, /*eta=*/0.5, limits,
                 /*ducy_max=*/0.2, /*wtsp=*/1.5, use_fourier, /*nthreads=*/2,
-                /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+                /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
                 /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, kBsegBrute);
 
             auto [scores_np2, plan_np2] =

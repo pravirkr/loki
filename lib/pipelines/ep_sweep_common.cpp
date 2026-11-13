@@ -48,6 +48,12 @@ void initialize_ep_results(
     main_h5.createAttribute("poly_basis", std::string(poly_basis));
     main_h5.createAttribute("ref_ducy", ref_ducy);
     main_h5.createAttribute("total_runtime", total_runtime);
+    main_h5.createAttribute("region_growth_factor",
+                            base_cfg.get_region_growth_factor());
+    // Duty-cycle resolution of the grid: eta / nbins turns in every region.
+    main_h5.createAttribute("phase_tolerance",
+                            base_cfg.get_eta() /
+                                static_cast<double>(base_cfg.get_nbins()));
 
     auto main_chunks_group = main_h5.createGroup("chunks");
     const SizeType nchunks = chunk_cfgs.size();

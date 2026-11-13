@@ -55,7 +55,7 @@ namespace {
     return f;
 }
 
-constexpr std::string_view kCacheVersion = "1.20.0";
+constexpr std::string_view kCacheVersion = "1.21.0";
 
 /// Threshold-scheme simulation of the planner. The seeds are fixed: the
 /// scheme sets the chunking, so plans of one configuration must not change
@@ -368,7 +368,8 @@ public:
             "use_fourier", static_cast<uint8_t>(m_base_cfg.get_use_fourier()));
         file.createAttribute("max_process_memory_gb",
                              m_base_cfg.get_max_process_memory_gb());
-        file.createAttribute("octave_scale", m_base_cfg.get_octave_scale());
+        file.createAttribute("region_growth_factor",
+                             m_base_cfg.get_region_growth_factor());
         file.createAttribute("nbins_max", m_base_cfg.get_nbins_max());
         file.createAttribute("nbins_min_lossy_bf",
                              m_base_cfg.get_nbins_min_lossy_bf());
@@ -466,7 +467,7 @@ public:
         if (file_version != kCacheVersion) {
             throw std::invalid_argument(fmt::format(
                 "EPRegionPlanner: cache file '{}' has version {}, expected {} "
-                "(stale plans carry an invalid branch_max; re-plan)",
+                "(a plan from another loki version; re-plan)",
                 filepath.string(), file_version, kCacheVersion));
         }
 
@@ -528,7 +529,8 @@ public:
             check_attr_double("max_process_memory_gb",
                               m_base_cfg.get_max_process_memory_gb());
         }
-        check_attr_double("octave_scale", m_base_cfg.get_octave_scale());
+        check_attr_double("region_growth_factor",
+                          m_base_cfg.get_region_growth_factor());
         check_attr_size("nbins_max", m_base_cfg.get_nbins_max());
         // The FFA segmentation sets every chunk's coordinates and buffers.
         check_attr_size("nbins_min_lossy_bf",
@@ -877,11 +879,15 @@ private:
 
         const auto ffa_regions = generate_ffa_regions(
             p_min, p_max, m_base_cfg.get_tsamp(), m_base_cfg.get_nbins(),
-            m_base_cfg.get_eta(), m_base_cfg.get_octave_scale(),
+            m_base_cfg.get_eta(), m_base_cfg.get_region_growth_factor(),
             m_base_cfg.get_nbins_max());
 
-        spdlog::info("EPRegionPlanner: planned {} coarse FFA regions",
-                     ffa_regions.size());
+        spdlog::info("EPRegionPlanner: planned {} coarse FFA regions (growth "
+                     "factor {:g}, phase tolerance {:.4g} turns in every "
+                     "region)",
+                     ffa_regions.size(), m_base_cfg.get_region_growth_factor(),
+                     m_base_cfg.get_eta() /
+                         static_cast<double>(m_base_cfg.get_nbins()));
 
         const auto max_drift = calculate_max_drift(m_base_cfg);
         if (max_drift < 0.0 || max_drift >= 1.0) {

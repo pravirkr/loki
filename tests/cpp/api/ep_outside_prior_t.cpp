@@ -44,7 +44,7 @@ TEST_CASE("EP leaves are reported at the midpoint, up to a_max + j_max T / 2, "
     const PulsarSearchConfig cfg(
         kNsamps, kTsamp, /*nbins=*/32, /*eta=*/1.0, limits, /*ducy_max=*/0.3,
         /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/2,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/1024,
         /*nsegments=*/8, /*snr_min=*/5.0,
         /*max_passing_candidates=*/1U << 22U, /*prune_poly_order=*/3);

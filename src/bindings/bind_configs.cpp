@@ -52,43 +52,44 @@ void bind_configs(py::module_& m) {
         .def("validate", &CO::validate);
 
     py::class_<FFASearchConfig>(m_configs, "FFASearchConfig")
-        .def(py::init([](SizeType nsamps, double tsamp, SizeType nbins,
-                         double eta, const PyArrayT<double>& param_limits,
-                         double ducy_max, double wtsp, bool use_fourier,
-                         int nthreads, double max_process_memory_gb,
-                         double octave_scale, SizeType nbins_max,
-                         SizeType nbins_min_lossy_bf,
-                         std::optional<SizeType> bseg_brute,
-                         std::optional<SizeType> nsegments, double snr_min,
-                         SizeType max_passing_candidates,
-                         bool use_boxcar_kadane) {
-                 if (param_limits.ndim() != 2 || param_limits.shape(1) != 2) {
-                     throw std::invalid_argument(
-                         "param_limits must be a 2D NumPy array with shape "
-                         "(n_params, 2)");
-                 }
+        .def(py::init(
+                 [](SizeType nsamps, double tsamp, SizeType nbins, double eta,
+                    const PyArrayT<double>& param_limits, double ducy_max,
+                    double wtsp, bool use_fourier, int nthreads,
+                    double max_process_memory_gb, double region_growth_factor,
+                    SizeType nbins_max, SizeType nbins_min_lossy_bf,
+                    std::optional<SizeType> bseg_brute,
+                    std::optional<SizeType> nsegments, double snr_min,
+                    SizeType max_passing_candidates, bool use_boxcar_kadane) {
+                     if (param_limits.ndim() != 2 ||
+                         param_limits.shape(1) != 2) {
+                         throw std::invalid_argument(
+                             "param_limits must be a 2D NumPy array with shape "
+                             "(n_params, 2)");
+                     }
 
-                 const auto n_params =
-                     static_cast<SizeType>(param_limits.shape(0));
+                     const auto n_params =
+                         static_cast<SizeType>(param_limits.shape(0));
 
-                 std::vector<ParamLimit> limits(n_params);
-                 for (SizeType i = 0; i < n_params; ++i) {
-                     limits[i] = {
-                         .min = *param_limits.data(i, 0),
-                         .max = *param_limits.data(i, 1),
-                     };
-                 }
-                 return std::make_unique<FFASearchConfig>(
-                     nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
-                     use_fourier, nthreads, max_process_memory_gb, octave_scale,
-                     nbins_max, nbins_min_lossy_bf, bseg_brute, nsegments,
-                     snr_min, max_passing_candidates, use_boxcar_kadane);
-             }),
+                     std::vector<ParamLimit> limits(n_params);
+                     for (SizeType i = 0; i < n_params; ++i) {
+                         limits[i] = {
+                             .min = *param_limits.data(i, 0),
+                             .max = *param_limits.data(i, 1),
+                         };
+                     }
+                     return std::make_unique<FFASearchConfig>(
+                         nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
+                         use_fourier, nthreads, max_process_memory_gb,
+                         region_growth_factor, nbins_max, nbins_min_lossy_bf,
+                         bseg_brute, nsegments, snr_min, max_passing_candidates,
+                         use_boxcar_kadane);
+                 }),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
              py::arg("wtsp") = 1.5, py::arg("use_fourier") = true,
              py::arg("nthreads") = 1, py::arg("max_process_memory_gb") = 8.0,
-             py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
+             py::arg("region_growth_factor") = 1.5, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
              py::arg("nsegments") = std::nullopt, py::arg("snr_min") = 7.0,
@@ -169,7 +170,7 @@ void bind_configs(py::module_& m) {
                  [](SizeType nsamps, double tsamp, SizeType nbins, double eta,
                     const PyArrayT<double>& param_limits, double ducy_max,
                     double wtsp, bool use_fourier, int nthreads,
-                    double max_process_memory_gb, double octave_scale,
+                    double max_process_memory_gb, double region_growth_factor,
                     SizeType nbins_max, SizeType nbins_min_lossy_bf,
                     std::optional<SizeType> bseg_brute,
                     std::optional<SizeType> nsegments, double snr_min,
@@ -199,7 +200,7 @@ void bind_configs(py::module_& m) {
                      return std::make_unique<PulsarSearchConfig>(
                          nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
                          use_fourier, nthreads, max_process_memory_gb,
-                         octave_scale, nbins_max, nbins_min_lossy_bf,
+                         region_growth_factor, nbins_max, nbins_min_lossy_bf,
                          bseg_brute, nsegments, snr_min, max_passing_candidates,
                          prune_poly_order, p_orb_min, m_c_max, m_p_min,
                          propagator_significance, validation_significance,
@@ -210,7 +211,7 @@ void bind_configs(py::module_& m) {
              py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
              py::arg("wtsp") = 1.5, py::arg("use_fourier") = true,
              py::arg("nthreads") = 1, py::arg("max_process_memory_gb") = 8.0,
-             py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
+             py::arg("region_growth_factor") = 1.5, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
              py::arg("nsegments") = std::nullopt, py::arg("snr_min") = 7.0,
@@ -305,7 +306,7 @@ void bind_configs(py::module_& m) {
             })
         .def_readwrite("device", &FTC::device)
         .def_readwrite("max_process_memory_gb", &FTC::max_process_memory_gb)
-        .def_readwrite("octave_scale", &FTC::octave_scale)
+        .def_readwrite("region_growth_factor", &FTC::region_growth_factor)
         .def_readwrite("nbins_max", &FTC::nbins_max)
         .def_readwrite("nbins_min_lossy_bf", &FTC::nbins_min_lossy_bf)
         .def_readwrite("bseg_brute", &FTC::bseg_brute)

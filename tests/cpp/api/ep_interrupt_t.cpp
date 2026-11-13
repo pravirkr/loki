@@ -51,7 +51,7 @@ PulsarSearchConfig make_cfg() {
             /*use_fourier=*/false,
             /*nthreads=*/2,
             /*max_process_memory_gb=*/4.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
@@ -188,7 +188,7 @@ void check_ffa_interrupt(Exec exec) {
     const PulsarSearchConfig cfg(
         kNsamps, 6.4e-5, /*nbins=*/64, /*eta=*/1.0, limits, /*ducy_max=*/0.2,
         /*wtsp=*/1.5, /*use_fourier=*/true, /*nthreads=*/2,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
         /*nbins_max=*/128, /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/std::nullopt, /*nsegments=*/std::nullopt,
         /*snr_min=*/3.0, /*max_passing_candidates=*/1U << 20U);

@@ -653,7 +653,7 @@ FFAResultMetadata::FFAResultMetadata(const search::FFASearchConfig& cfg,
       wtsp(cfg.get_wtsp()),
       nbins_min(cfg.get_nbins()),
       nbins_max(cfg.get_nbins_max()),
-      octave_scale(cfg.get_octave_scale()),
+      region_growth_factor(cfg.get_region_growth_factor()),
       eta(cfg.get_eta()),
       use_fourier(cfg.get_use_fourier()),
       bseg_brute(cfg.get_bseg_brute()),
@@ -680,8 +680,13 @@ void FFAResultWriter::write_metadata(const FFAResultMetadata& metadata) {
     h5_file().createAttribute("wtsp", metadata.wtsp);
     h5_file().createAttribute("nbins_min", metadata.nbins_min);
     h5_file().createAttribute("nbins_max", metadata.nbins_max);
-    h5_file().createAttribute("octave_scale", metadata.octave_scale);
+    h5_file().createAttribute("region_growth_factor",
+                              metadata.region_growth_factor);
     h5_file().createAttribute("eta", metadata.eta);
+    // Duty-cycle resolution of the grid: eta / nbins turns in every region.
+    h5_file().createAttribute("phase_tolerance",
+                              metadata.eta /
+                                  static_cast<double>(metadata.nbins_min));
     h5_file().createAttribute("use_fourier", metadata.use_fourier);
     if (metadata.bseg_brute.has_value()) {
         h5_file().createAttribute("bseg_brute", *metadata.bseg_brute);
