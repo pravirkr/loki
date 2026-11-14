@@ -18,8 +18,8 @@ namespace {
 using loki::ParamLimit;
 using loki::SizeType;
 
-loki::search::PulsarSearchConfig
-make_cfg(const std::vector<ParamLimit>& limits) {
+loki::search::PulsarSearchConfig make_cfg(const std::vector<ParamLimit>& limits,
+                                          bool conservative = false) {
     constexpr SizeType kNsamps = 1U << 22U;
     return {kNsamps,
             64e-6,
@@ -38,18 +38,27 @@ make_cfg(const std::vector<ParamLimit>& limits) {
             /*nsegments=*/32,
             /*snr_min=*/6.0,
             /*max_passing_candidates=*/1U << 22U,
-            /*prune_poly_order=*/limits.size()};
+            /*prune_poly_order=*/limits.size(),
+            /*p_orb_min=*/1e-5,
+            /*m_c_max=*/10.0,
+            /*m_p_min=*/1.4,
+            /*propagator_significance=*/2.0,
+            /*validation_significance=*/5.0,
+            /*use_conservative_tile=*/conservative};
 }
 
 void check_ref_seg_independent(const std::vector<ParamLimit>& limits,
-                               std::string_view poly_basis) {
-    const loki::plans::FFAPlan<loki::ComplexType> plan(make_cfg(limits));
+                               std::string_view poly_basis,
+                               bool conservative = false) {
+    const loki::plans::FFAPlan<loki::ComplexType> plan(
+        make_cfg(limits, conservative));
     const SizeType nsegments = plan.get_nsegments().back();
     REQUIRE(nsegments > 2);
     const auto ref = plan.forecast_branching(poly_basis, 0);
     for (SizeType ref_seg = 1; ref_seg < nsegments; ++ref_seg) {
         INFO("basis " << poly_basis << " nparams " << limits.size()
-                      << " ref_seg " << ref_seg);
+                      << " conservative " << conservative << " ref_seg "
+                      << ref_seg);
         const auto forecast = plan.forecast_branching(poly_basis, ref_seg);
         REQUIRE(forecast.max_children == ref.max_children);
         REQUIRE(forecast.mean == ref.mean);
@@ -70,6 +79,14 @@ TEST_CASE("Branching forecast does not depend on the reference segment",
     check_ref_seg_independent({snap, jerk, accel, freq}, "taylor");
     check_ref_seg_independent({crackle, snap, jerk, accel, freq}, "taylor");
     check_ref_seg_independent({jerk, accel, freq}, "chebyshev");
+    // A crackle range that splits within the levels, so the circular bound
+    // includes hole expansion, with both tiles.
+    const ParamLimit wide_crackle{.min = -3e-3, .max = 3e-3};
+    for (const bool conservative : {false, true}) {
+        check_ref_seg_independent({jerk, accel, freq}, "taylor", conservative);
+        check_ref_seg_independent({wide_crackle, snap, jerk, accel, freq},
+                                  "taylor", conservative);
+    }
 }
 
 TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",

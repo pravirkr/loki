@@ -97,9 +97,12 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  bool use_conservative_tile,
                                  double propagator_significance);
 
-// mean is the weighted average (including the snap-occupancy factor).
-// max_children is the worst frequency's full product, including crackle
-// and taken before that occupancy factor.
+// mean is the weighted average of the d4..d1 products (including the
+// snap-occupancy factor). max_children is the largest child count of any
+// parent: every width, crackle included, is carried as the kernels refine
+// it, and each level's d4..d1 product is multiplied by the crackle split that
+// hole expansion can apply to every child. With the conservative tile the
+// carried crackle width also widens the others, and so the mean.
 plans::BranchingForecast
 generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,

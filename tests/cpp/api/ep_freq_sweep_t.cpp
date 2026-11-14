@@ -340,6 +340,23 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         }
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::runtime_error);
     }
+
+    // 8. A branch_max below the chunk's forecast (a plan from an older
+    // forecast) is rejected on load, so the CLI replans
+    {
+        REQUIRE(orig_chunks[0].branch_max > 1);
+        const auto bad = outdir / "cache_bad_branch_max.h5";
+        std::filesystem::copy_file(
+            cache_file, bad, std::filesystem::copy_options::overwrite_existing);
+        {
+            const HighFive::File f(bad.string(), HighFive::File::ReadWrite);
+            f.getGroup("chunks")
+                .getGroup("chunk_0000")
+                .getAttribute("branch_max")
+                .write(orig_chunks[0].branch_max - 1);
+        }
+        CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
+    }
 }
 
 TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",

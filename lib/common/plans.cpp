@@ -46,7 +46,11 @@ struct FFAPlanBase::Impl {
     std::vector<std::vector<double>> dparams;              // Grid step sizes
     std::vector<std::vector<double>> dparams_act; // Grid step size (actual)
 
-    explicit Impl(search::FFASearchConfig cfg) : m_cfg(std::move(cfg)) {
+    // m_cfg keeps the FFA part of an EP config, so the EP tile choice is
+    // read here, before it is sliced away.
+    explicit Impl(const search::FFASearchConfig& cfg)
+        : m_cfg(cfg),
+          m_conservative_tile(cfg.get_use_conservative_tile()) {
         configure_plan();
         validate_plan();
     }
@@ -256,8 +260,26 @@ struct FFAPlanBase::Impl {
         return forecast_branching(poly_basis, ref_seg).mean;
     }
 
+    // The mean feeds the thresholds and has always been simulated with the
+    // FFA config's tile (never conservative). The workspace bound must follow
+    // the kernels, which widen cells with the conservative tile of an EP
+    // config, so it is replayed with that tile.
     BranchingForecast forecast_branching(std::string_view poly_basis,
                                          SizeType ref_seg) const {
+        auto forecast = simulate_branching(poly_basis, ref_seg,
+                                           m_cfg.get_use_conservative_tile());
+        if (poly_basis == "taylor" &&
+            m_conservative_tile != m_cfg.get_use_conservative_tile()) {
+            forecast.max_children =
+                simulate_branching(poly_basis, ref_seg, m_conservative_tile)
+                    .max_children;
+        }
+        return forecast;
+    }
+
+    BranchingForecast simulate_branching(std::string_view poly_basis,
+                                         SizeType ref_seg,
+                                         bool use_conservative_tile) const {
         const auto param_arr         = compute_param_grid(n_levels - 1);
         const SizeType n_segs_active = get_nsegments_active();
         if (poly_basis == "taylor") {
@@ -265,19 +287,19 @@ struct FFAPlanBase::Impl {
                 return core::generate_bp_poly_taylor(
                     param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
                     n_segs_active, m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg,
-                    m_cfg.get_use_conservative_tile());
+                    use_conservative_tile);
             }
             if (n_params == 5) {
                 return core::generate_bp_circ_taylor(
                     param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
                     n_segs_active, m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg,
-                    m_cfg.get_use_conservative_tile());
+                    use_conservative_tile);
             }
             throw std::invalid_argument("nparams > 5 not supported for "
                                         "branching pattern generation");
         }
         if (poly_basis == "chebyshev") {
-            if (m_cfg.get_use_conservative_tile()) {
+            if (use_conservative_tile) {
                 throw std::invalid_argument(
                     "Conservative tile is not supported for chebyshev "
                     "branching pattern generation");
@@ -300,6 +322,7 @@ struct FFAPlanBase::Impl {
 
 private:
     search::FFASearchConfig m_cfg;
+    bool m_conservative_tile{false};
 
     void configure_plan() {
         const auto levels = m_cfg.get_niters_ffa() + 1;

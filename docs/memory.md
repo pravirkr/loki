@@ -195,7 +195,17 @@ Differences from the CPU policy:
   `batch * branch_max`). `branch_max` is the chunk's worst leaf
   (`BranchingForecast::max_children`: the most children any parent of its
   grid can have), with no floor; a parameter that branched past it is
-  rejected. If a minimum-width CUDA chunk cannot fit, planning retries with
+  rejected. Every child gets its parent's refined cell widths, whatever its
+  values, so a leaf's widths depend only on its frequency and the level, and
+  the forecast replays them exactly. In the circular (crackle) model a
+  parent has its snap..velocity product of children, and hole expansion can
+  copy each of them once per crackle cell; a parent whose children all lie
+  in the hole is a valid tree state, so the bound is that product times the
+  crackle split, and it is reached
+  (`tests/cpp/internal/circ_branch_bound_t.cpp` drives the kernels against
+  it). With `use_conservative_tile` the widths are replayed with that tile.
+  A cached plan whose `branch_max` is below the chunk's forecast is
+  replanned. If a minimum-width CUDA chunk cannot fit, planning retries with
   successively halved batches, down to one parent. It never reduces forecast capacity
   to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the

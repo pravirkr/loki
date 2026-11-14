@@ -417,6 +417,29 @@ Superseded: a batch from the forecast live tree (`bit_ceil(live)`, at
 least 1024, with `branch_max` still 32) cut the same peak only to 11.7 GB:
 the 11-22 Hz chunk's forecast (34130 leaves) kept it at 2^16.
 
+Without the floor, the circular (crackle) forecast undercounted: it never
+carried the crackle cell width past the first level, so it never counted the
+crackle split that hole expansion applies. A circular search (2^26 samples,
+eta 2, nbins 16, CUDA, batch 65536) of a 494.6-504 Hz slice planned
+`branch_max` 9 and aborted at its first crackle split ("Branching a batch
+needs 596502 leaves but the branch workspace holds 589824"). The forecast
+now replays all five widths, as the kernels refine them (memory.md): the
+slice plans `branch_max` 27 and 3.81 instead of 3.31 GB, and runs in 13.7 s.
+In the kernels' replay of a test band (every frequency, every child in the
+hole) the worst parent has exactly the forecast, 27 children against 9 for
+the product without crackle, on the CPU and on CUDA. Full circular plans of
+2^26 samples: 10-500 Hz at 30 GB (64 us samples) keeps its 13.9 GB peak (one
+of six chunks 15 -> 27); the same search at 4 GB (81.92 us, the slice's
+series) plans 42 chunks instead of 39; a 10-415 Hz search at eta 1 and 30 GB
+(81.92 us) keeps its 29.5 GB peak (26 chunks instead of 27). The global batch ladder
+went from 8 to 16 in both tight plans; the ladder is not monotone in the
+chunk layout. The forecast carries the crackle width in its own loop, and
+planning takes as long as before (the 4 GB plan: 202 against 198 s, run one
+after the other). A first version replayed all five widths in a second pass:
+it doubled the forecast and took 341 s. With `use_conservative_tile` the
+forecast still runs twice, because the threshold pattern has always been
+simulated without that tile and only the bound follows it.
+
 #### Default harvest floor (`harvest_min_snr = 40`)
 
 Harvesting is a failsafe that keeps a dominating source out of the tree,
