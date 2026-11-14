@@ -44,6 +44,7 @@
 #include "loki/common/types.hpp"
 #include "loki/io/candidate_file.hpp"
 #include "loki/io/preprocess.hpp"
+#include "loki/io/sift.hpp"
 #include "loki/io/timeseries.hpp"
 #include "loki/pipelines/ep_freq_sweep.hpp"
 #include "loki/pipelines/ffa_freq_sweep.hpp"
@@ -2429,6 +2430,245 @@ int run_publish(const PublishCli& cli) {
                : publish_as<loki::search::FFATomlConfig>(cli, src);
 }
 
+// ---------------------------------------------------------------------------
+// loki sift
+// ---------------------------------------------------------------------------
+
+struct SiftCli {
+    std::vector<std::string> patterns;
+    loki::io::SiftOptions options;
+    std::size_t top{50};
+    std::filesystem::path csv;
+    bool json{false};
+    bool members{false};
+};
+
+/// Whether @p name matches @p pattern ('*' any run, '?' one character).
+bool wildcard_match(std::string_view pattern, std::string_view name) {
+    std::size_t p     = 0;
+    std::size_t n     = 0;
+    std::size_t star  = std::string_view::npos;
+    std::size_t match = 0;
+    while (n < name.size()) {
+        if (p < pattern.size() &&
+            (pattern[p] == '?' || pattern[p] == name[n])) {
+            ++p;
+            ++n;
+        } else if (p < pattern.size() && pattern[p] == '*') {
+            star  = p++;
+            match = n;
+        } else if (star != std::string_view::npos) {
+            p = star + 1;
+            n = ++match;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '*') {
+        ++p;
+    }
+    return p == pattern.size();
+}
+
+/// The files of @p patterns: a path as given, or a quoted pattern with '*'
+/// or '?' in its file name (not in its directories), sorted.
+std::vector<std::filesystem::path>
+expand_patterns(const std::vector<std::string>& patterns) {
+    std::vector<std::filesystem::path> files;
+    for (const auto& pattern : patterns) {
+        const std::filesystem::path path(pattern);
+        const auto name = path.filename().string();
+        if (name.find_first_of("*?") == std::string::npos) {
+            files.push_back(path);
+            continue;
+        }
+        const auto dir = path.parent_path().empty() ? std::filesystem::path(".")
+                                                    : path.parent_path();
+        std::vector<std::filesystem::path> matched;
+        if (std::filesystem::is_directory(dir)) {
+            for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+                if (entry.is_regular_file() &&
+                    wildcard_match(name, entry.path().filename().string())) {
+                    matched.push_back(path.parent_path() /
+                                      entry.path().filename());
+                }
+            }
+        }
+        if (matched.empty()) {
+            throw std::invalid_argument(
+                fmt::format("no file matches '{}'", pattern));
+        }
+        std::ranges::sort(matched);
+        files.insert(files.end(), matched.begin(), matched.end());
+    }
+    return files;
+}
+
+std::string sift_harmonic(const loki::io::SiftGroup& g) {
+    return g.harmonic_of < 0
+               ? std::string()
+               : fmt::format("{}/{} of #{}", g.harmonic_numerator,
+                             g.harmonic_denominator, g.harmonic_of);
+}
+
+std::string sift_segments(const loki::io::SiftGroup& g) {
+    std::string text;
+    for (const auto segment : g.segments) {
+        if (!text.empty()) {
+            text += ' ';
+        }
+        text += std::to_string(segment);
+    }
+    return text;
+}
+
+std::string sift_json(const SiftCli& cli, const loki::io::SiftResult& r) {
+    std::string out = "{\n  \"files\": [";
+    for (std::size_t i = 0; i < r.files.size(); ++i) {
+        const auto& f = r.files[i];
+        out += fmt::format(
+            "{}\n    {{\"path\": {}, \"dm\": {}, \"start_mjd\": {}, "
+            "\"segment\": {}}}",
+            i == 0 ? "" : ",", json_string(f.path.string()),
+            json_optional(f.dm), json_optional(f.start_mjd), f.segment);
+    }
+    out += fmt::format("\n  ],\n  \"n_candidates\": {},\n  \"n_segments\": "
+                       "{},\n  \"groups\": [",
+                       r.n_candidates, r.n_segments);
+    for (std::size_t i = 0; i < r.groups.size(); ++i) {
+        const auto& g = r.groups[i];
+        const auto& b = g.members.front();
+        std::string curve;
+        for (const auto& [dm, snr] : g.dm_curve) {
+            curve += fmt::format("{}[{}, {}]", curve.empty() ? "" : ", ",
+                                 json_number(dm), json_number(snr));
+        }
+        std::string segments;
+        for (const auto s : g.segments) {
+            if (!segments.empty()) {
+                segments += ", ";
+            }
+            segments += std::to_string(s);
+        }
+        out += fmt::format(
+            "{}\n    {{\"index\": {}, \"snr\": {}, \"freq\": {}, \"fdot\": {}, "
+            "\"duty_cycle\": {}, \"file\": {}, \"id\": {}, \"dm\": {}, "
+            "\"n_members\": {}, \"segments\": [{}], \"dm_curve\": [{}], "
+            "\"edge_ratio\": {}, \"extrapolation_bins\": {}, "
+            "\"harmonic_of\": {}, \"harmonic_numerator\": {}, "
+            "\"harmonic_denominator\": {}, \"harmonic_offset_bins\": {}",
+            i == 0 ? "" : ",", i, json_number(b.snr), json_number(b.freq),
+            json_number(b.fdot), json_number(b.duty_cycle), b.file, b.id,
+            json_optional(r.files[b.file].dm), g.members.size(), segments,
+            curve, json_optional(g.edge_ratio),
+            json_optional(g.extrapolation_bins), g.harmonic_of,
+            g.harmonic_numerator, g.harmonic_denominator,
+            json_optional(g.harmonic_offset_bins));
+        if (cli.members) {
+            out += ", \"members\": [";
+            for (std::size_t m = 0; m < g.members.size(); ++m) {
+                const auto& x = g.members[m];
+                out += fmt::format(
+                    "{}{{\"file\": {}, \"id\": {}, \"snr\": {}, \"freq\": {}, "
+                    "\"fdot\": {}}}",
+                    m == 0 ? "" : ", ", x.file, x.id, json_number(x.snr),
+                    json_number(x.freq), json_number(x.fdot));
+            }
+            out += "]";
+        }
+        out += "}";
+    }
+    out += "\n  ]\n}\n";
+    return out;
+}
+
+void write_sift_csv(const std::filesystem::path& path,
+                    const loki::io::SiftResult& r) {
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error(
+            fmt::format("cannot write '{}'", path.string()));
+    }
+    out << "index,snr,freq,fdot,duty_cycle,dm,segment,file,id,n_members,"
+           "n_segments,segments,dm_lo,dm_hi,edge_ratio,extrapolation_bins,"
+           "harmonic_of,harmonic_numerator,harmonic_denominator,"
+           "harmonic_offset_bins,dm_curve\n";
+    const auto opt = [](const std::optional<double>& v) {
+        return v ? fmt::format("{:.17g}", *v) : std::string();
+    };
+    for (std::size_t i = 0; i < r.groups.size(); ++i) {
+        const auto& g = r.groups[i];
+        const auto& b = g.members.front();
+        std::string curve;
+        for (const auto& [dm, snr] : g.dm_curve) {
+            curve +=
+                fmt::format("{}{:g}:{:.2f}", curve.empty() ? "" : " ", dm, snr);
+        }
+        out << fmt::format(
+            "{},{:.9g},{:.17g},{:.17g},{:.6g},{},{},\"{}\",{},{},{},{},{},{},"
+            "{},{},{},{},{},{},{}\n",
+            i, b.snr, b.freq, b.fdot, b.duty_cycle, opt(r.files[b.file].dm),
+            r.files[b.file].segment, r.files[b.file].path.string(), b.id,
+            g.members.size(), g.segments.size(), sift_segments(g),
+            g.dm_curve.empty() ? ""
+                               : fmt::format("{:g}", g.dm_curve.front().first),
+            g.dm_curve.empty() ? ""
+                               : fmt::format("{:g}", g.dm_curve.back().first),
+            opt(g.edge_ratio), opt(g.extrapolation_bins), g.harmonic_of,
+            g.harmonic_numerator, g.harmonic_denominator,
+            opt(g.harmonic_offset_bins), curve);
+    }
+}
+
+std::string sift_text(const SiftCli& cli, const loki::io::SiftResult& r) {
+    std::string out = fmt::format(
+        "{} candidates (S/N >= {:g}) from {} files in {} segments: {} groups\n",
+        r.n_candidates, cli.options.snr_min, r.files.size(), r.n_segments,
+        r.groups.size());
+    out +=
+        fmt::format("{:>4} {:>7} {:>14} {:>10} {:>12} {:>8} {:>15} {:>5} "
+                    "{:>5} {:>6} {:>7}  {}\n",
+                    "#", "S/N", "f (Hz)", "P (ms)", "fdot (Hz/s)", "DM",
+                    "DM range", "segs", "duty", "edge", "extrap", "harmonic");
+    for (std::size_t i = 0; i < std::min(cli.top, r.groups.size()); ++i) {
+        const auto& g  = r.groups[i];
+        const auto& b  = g.members.front();
+        const auto& dm = r.files[b.file].dm;
+        out += fmt::format(
+            "{:>4} {:>7.2f} {:>14.8f} {:>10.5f} {:>12.4e} {:>8} {:>15} {:>5} "
+            "{:>5.3f} {:>6} {:>7}  {}\n",
+            i, b.snr, b.freq, 1e3 / b.freq, b.fdot,
+            dm ? fmt::format("{:.2f}", *dm) : "-",
+            g.dm_curve.empty()
+                ? "-"
+                : fmt::format("{:.2f}-{:.2f}", g.dm_curve.front().first,
+                              g.dm_curve.back().first),
+            g.segments.size(), b.duty_cycle,
+            g.edge_ratio ? fmt::format("{:.2f}", *g.edge_ratio) : "-",
+            g.extrapolation_bins ? fmt::format("{:.1f}", *g.extrapolation_bins)
+                                 : "-",
+            sift_harmonic(g));
+    }
+    return out;
+}
+
+int run_sift(const SiftCli& cli) {
+    const auto files  = expand_patterns(cli.patterns);
+    const auto start  = SteadyClock::now();
+    const auto result = loki::io::sift(files, cli.options);
+    if (!cli.csv.empty()) {
+        write_sift_csv(cli.csv, result);
+    }
+    if (cli.json) {
+        std::cout << sift_json(cli, result);
+    } else {
+        std::cout << sift_text(cli, result);
+    }
+    SPDLOG_INFO("Sifted {} files in {:.1f} s", files.size(),
+                seconds_since(start));
+    return 0;
+}
+
 } // namespace
 
 // NOLINTNEXTLINE(bugprone-exception-escape,misc-const-correctness): setup errors abort; main signature is fixed
@@ -3205,11 +3445,44 @@ int main(int argc, char** argv) {
         "--snr-min", publish_cli.snr_min,
         "EP: candidate S/N minimum (default: the search's)");
 
+    // =========================================================================
+    // Subcommand: sift
+    // =========================================================================
+    auto* sift = app.add_subcommand(
+        "sift",
+        "Group the candidates of many result files (DM trials x segments) by "
+        "frequency: S/N against DM, segments, harmonic relations");
+    SiftCli sift_cli;
+    sift->add_option("files", sift_cli.patterns,
+                     "Published result files; a quoted pattern such as "
+                     "'results/*.h5' is expanded")
+        ->required();
+    sift->add_option("--snr-min", sift_cli.options.snr_min,
+                     "Ignore candidates below this S/N (default: 7)");
+    sift->add_option("--tol", sift_cli.options.tolerance,
+                     "Group frequencies within this fraction (default: 2e-4)");
+    sift->add_option("--min-segs", sift_cli.options.min_segments,
+                     "Drop groups seen in fewer segments (default: 1)");
+    sift->add_option("--harmonic-order", sift_cli.options.harmonic_order_max,
+                     "Largest p, q of harmonic relations between groups; 0 "
+                     "disables (default: 16)");
+    sift->add_option("--harmonic-bins", sift_cli.options.harmonic_bins,
+                     "Harmonic relations must agree to within this many "
+                     "frequency bins in a file with both (default: 2)");
+    sift->add_option("-n,--top", sift_cli.top, "Groups to list (default: 50)");
+    sift->add_option("--csv", sift_cli.csv, "Also write every group as CSV");
+    sift->add_flag("--json", sift_cli.json,
+                   "Write every group as JSON to stdout");
+    sift->add_flag("--members", sift_cli.members,
+                   "With --json: list each group's members (file, id) for "
+                   "loki refold");
+
     simulate->fallthrough();
     search->fallthrough();
     inspect->fallthrough();
     refold->fallthrough();
     publish->fallthrough();
+    sift->fallthrough();
     ffa->fallthrough();
     ep->fallthrough();
 
@@ -3306,6 +3579,10 @@ int main(int argc, char** argv) {
 
         if (publish->parsed()) {
             return run_publish(publish_cli);
+        }
+
+        if (sift->parsed()) {
+            return run_sift(sift_cli);
         }
 
         if (search->parsed() && ffa->parsed()) {

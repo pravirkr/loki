@@ -16,6 +16,7 @@
 #include "loki/io/candidate_file.hpp"        // IWYU pragma: export
 #include "loki/io/observation.hpp"           // IWYU pragma: export
 #include "loki/io/preprocess.hpp"            // IWYU pragma: export
+#include "loki/io/sift.hpp"                  // IWYU pragma: export
 #include "loki/io/timeseries.hpp"            // IWYU pragma: export
 #include "loki/pipelines/ep_freq_sweep.hpp"  // IWYU pragma: export
 #include "loki/pipelines/ffa_freq_sweep.hpp" // IWYU pragma: export

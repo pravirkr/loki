@@ -797,6 +797,72 @@ loki publish out/raw_ffa_results.h5 -o out/run.h5   # a --no-candidates result
   published again with `-c` or `-i` and `--force`. A `--no-candidates` result is never
   removed.
 
+## Sifting many result files
+
+`loki sift` groups the candidates of many published result files, such as
+the DM trials and time segments of one source, by frequency, and describes
+each group:
+
+```bash
+loki sift 'results/*_ep_results.h5'                 # quoted: loki expands it
+loki sift 'results/*.h5' --min-segs 2 --csv groups.csv
+loki sift 'results/*.h5' --json --members > groups.json
+```
+
+- **Grouping.** Candidates at or above `--snr-min` (7) are sorted by
+  frequency and joined while consecutive frequencies differ by at most
+  `--tol` (2e-4, a fraction: the Earth's and a modest orbital Doppler shift
+  between segments). Groups seen in fewer than `--min-segs` segments are
+  dropped.
+- **DM and segment** come from each file's `/observation`, never from its
+  name: `dm`, and the segment from `start_mjd` (files with the same first
+  sample share one; without it, the same input series).
+- **Per group:** the best member (S/N, frequency, fdot, its file, DM and
+  candidate id), the best S/N per DM trial, the segments, and two
+  discriminators. `edge` is the best S/N at the lowest and highest DM of all
+  files over the group's best: a pulsar peaks inside the trials (small),
+  interference is flat in DM or strongest at the lowest trial (near 1).
+  `extrap` is how far, in frequency bins of the later segment, each
+  segment's best member is from the previous segment's Taylor extrapolation
+  (`f + fdot dt`): about 1 for an isolated pulsar, large for a binary or for
+  interference.
+- **Harmonics.** A group is a harmonic `p/q` of a stronger group (`p, q <=
+  --harmonic-order`, 16) when its best frequency is within the tolerance of
+  `p/q` times the stronger group's best, `p/q` is the only such ratio, its
+  best DM is inside the stronger group's DM range, and in a file with
+  members of both their strongest members agree with `p/q` to within
+  `--harmonic-bins` (2) bins of 1/T: within one file a harmonic shares its
+  parent's Doppler shift. The tolerance alone cannot tell, since at 2e-4 the
+  ratios cover about 1% of all frequencies: on the day above it related 155
+  of 467 groups, against 23 with the file check, which kept every
+  catalogue-labelled harmonic (offsets at most 0.17 bins).
+- **Output.** A table of the strongest `-n` (50) groups; `--csv` writes every
+  group, `--json` writes every group to stdout, and `--members` adds each
+  group's members (file index and candidate id) for
+  `loki refold --result FILE --id ID`. Result files are only read; raw and
+  spool files are refused (publish them first).
+
+On a full day of 110 files (22 DM trials x 5 segments, 13.1 million
+candidates at S/N 7, 4.4 GB on a network filesystem) it took 43 s.
+
+Matching groups to known pulsars needs the Earth's Doppler shift, so it is
+in Python: `loki-sift-match` (module `loki.sift`) runs the same grouping and
+matches each group's best frequency, divided by `1 + doppler`, with ratios
+`n/m <= 8/4` of a catalogue's frequencies:
+
+```bash
+loki-sift-match 'results/*.h5' --catalog known.csv \
+    --ra 05:34:31.9 --dec=+22:00:52 --site 50.5247,6.8836,319
+```
+
+The catalogue is a CSV with `name`, `f0` (Hz) or `p0_ms`, and optionally
+`dm` and `doppler` (a binary's largest fractional orbital Doppler shift,
+added to `--match-tol`). The Doppler correction uses astropy, an optional
+dependency; without `--ra`, `--dec` and `--site` the frequencies are matched
+as observed. In Python: `libloki.io.sift(files, options)`,
+`loki.sift.match_groups(result, catalog, doppler=...)` and
+`loki.sift.astropy_doppler(ra, dec, lat, lon, height)`.
+
 ## PulsarX conversion
 
 ```bash
