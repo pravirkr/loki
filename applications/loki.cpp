@@ -142,6 +142,27 @@ void configure_output(const OutputOptions& opts,
     spdlog::debug("{}: {}", version_text(), command);
 }
 
+/// Stores the search configuration as written, @p config_toml, in
+/// @p result_file (root and `search` group) where it is not stored yet.
+void record_config_toml(const std::filesystem::path& result_file,
+                        std::string_view config_toml) {
+    if (config_toml.empty()) {
+        return;
+    }
+    HighFive::File file(result_file.string(), HighFive::File::ReadWrite);
+    const std::string text(config_toml);
+    if (!file.hasAttribute("config_toml")) {
+        file.createAttribute("config_toml", text);
+    }
+    if (file.exist("search")) {
+        auto search = file.getGroup("search");
+        if (!search.hasAttribute("config_toml")) {
+            search.createAttribute("config_toml", text);
+        }
+    }
+    file.flush();
+}
+
 /// Records how @p result_file was produced: the effective config (after
 /// defaults and command-line overrides, with the sample count and interval
 /// the search read from its input), the command line and the version.
@@ -162,19 +183,39 @@ void record_provenance(const std::filesystem::path& result_file,
                          .command_line     = run_command_line(),
                          .loki_version     = LOKI_VERSION,
                      });
-    if (!config_toml.empty()) {
-        HighFive::File file(result_file.string(), HighFive::File::ReadWrite);
-        const std::string text(config_toml);
-        if (!file.hasAttribute("config_toml")) {
-            file.createAttribute("config_toml", text);
-        }
-        if (file.exist("search")) {
-            auto search = file.getGroup("search");
-            if (!search.hasAttribute("config_toml")) {
-                search.createAttribute("config_toml", text);
+    record_config_toml(result_file, config_toml);
+}
+
+/// Runs @p execute, a search that keeps `<spool>` when its post-processing
+/// fails. If it fails after keeping a new spool, records the provenance of
+/// the search there (as record_provenance) so `loki publish` can recover the
+/// configuration, then rethrows the original error.
+template <typename TomlConfig, typename Execute>
+void execute_recording_spool(Execute&& execute,
+                             const std::filesystem::path& spool,
+                             const TomlConfig& cfg,
+                             loki::SizeType nsamps,
+                             double tsamp,
+                             std::string_view config_toml = {}) {
+    std::error_code error;
+    const auto before =
+        std::filesystem::exists(spool, error)
+            ? std::optional(std::filesystem::last_write_time(spool, error))
+            : std::nullopt;
+    try {
+        std::forward<Execute>(execute)();
+    } catch (...) {
+        try {
+            if (std::filesystem::exists(spool, error) &&
+                (!before ||
+                 std::filesystem::last_write_time(spool, error) != *before)) {
+                record_provenance(spool, cfg, nsamps, tsamp, config_toml);
             }
+        } catch (const std::exception& e) {
+            spdlog::warn("could not record the configuration in '{}': {}",
+                         spool.string(), e.what());
         }
-        file.flush();
+        throw;
     }
 }
 
@@ -588,9 +629,14 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                                         /*show_progress=*/true, exec);
     const double plan_s     = seconds_since(plan_start);
     const auto search_start = SteadyClock::now();
-    sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                  ts.get_ts_v().first(actual_nsamps), outdir_path,
-                  toml_cfg.prefix, config_toml, observation);
+    execute_recording_spool(
+        [&] {
+            sweep.execute(ts.get_ts_e().first(actual_nsamps),
+                          ts.get_ts_v().first(actual_nsamps), outdir_path,
+                          toml_cfg.prefix, config_toml, observation);
+        },
+        outdir_path / fmt::format("{}_ffa_spool.h5", toml_cfg.prefix), toml_cfg,
+        actual_nsamps, ts.get_dt());
     const double search_s = seconds_since(search_start);
 
     const auto result_file =
@@ -1232,9 +1278,14 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     }
     const double plan_s     = seconds_since(plan_start);
     const auto search_start = SteadyClock::now();
-    sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                  ts.get_ts_v().first(actual_nsamps), outdir_path,
-                  toml_cfg.prefix, observation);
+    execute_recording_spool(
+        [&] {
+            sweep.execute(ts.get_ts_e().first(actual_nsamps),
+                          ts.get_ts_v().first(actual_nsamps), outdir_path,
+                          toml_cfg.prefix, observation);
+        },
+        outdir_path / fmt::format("{}_ep_spool.h5", toml_cfg.prefix), toml_cfg,
+        actual_nsamps, ts.get_dt(), config_toml);
     const double execute_s = seconds_since(search_start);
 
     const auto result_file =
@@ -2042,6 +2093,334 @@ int run_refold(RefoldCli cli) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// loki publish
+// ---------------------------------------------------------------------------
+
+struct PublishCli {
+    std::filesystem::path file;
+    std::filesystem::path output;
+    std::filesystem::path config;
+    std::filesystem::path input;
+    bool keep_spool{false};
+    // Candidate options; unset keeps the search's.
+    std::optional<double> memory_gb;
+    std::optional<bool> cluster;
+    std::optional<std::uint64_t> max_candidates;
+    std::optional<std::uint64_t> max_per_cell;
+    std::optional<bool> retain_detections;
+    std::optional<std::string> tempdir;
+    std::optional<double> snr_min;
+    // Observation metadata overrides.
+    std::optional<double> dm;
+    std::optional<double> start_mjd;
+    std::optional<bool> barycentric;
+};
+
+/// What a search left to publish: a spool kept after a failed
+/// post-processing, or the raw file of a `--no-candidates` search.
+struct PublishSource {
+    std::string algorithm; ///< "ffa" or "ep".
+    bool spool{false};     ///< A `*_spool.h5`: removed once published.
+    std::uint64_t nsamps{};
+    double tsamp{};
+    std::optional<std::string> config_effective;
+    std::optional<std::string> config_toml;
+    std::optional<std::string> command_line;
+    /// The options a search that reduced its EP runs used (its first
+    /// reduced run's `reduced_*` attributes; publish must match them).
+    std::optional<loki::search::CandidateOptions> reduced;
+    std::optional<double> reduced_snr_min;
+};
+
+PublishSource read_publish_source(const std::filesystem::path& path) {
+    const HighFive::File file(path.string(), HighFive::File::ReadOnly);
+    if (file.hasAttribute("schema_version")) {
+        throw std::invalid_argument(fmt::format(
+            "'{}' is already a published result file", path.string()));
+    }
+    PublishSource src;
+    if (file.hasAttribute("ffa_version")) {
+        src.algorithm = "ffa";
+    } else if (file.hasAttribute("ep_sweep_version")) {
+        src.algorithm = "ep";
+    } else {
+        throw std::invalid_argument(fmt::format(
+            "'{}' is not a loki FFA or EP search spool", path.string()));
+    }
+    const auto name = path.filename().string();
+    src.spool       = name.ends_with("_spool.h5");
+    const auto text = [&](const char* key) -> std::optional<std::string> {
+        if (!file.hasAttribute(key)) {
+            return std::nullopt;
+        }
+        auto value = file.getAttribute(key).read<std::string>();
+        return value.empty() ? std::nullopt : std::optional(std::move(value));
+    };
+    src.config_effective = text("config_effective");
+    src.config_toml      = text("config_toml");
+    src.command_line     = text("command_line");
+    file.getAttribute("nsamps").read(src.nsamps);
+    file.getAttribute("tsamp").read(src.tsamp);
+    if (src.algorithm == "ep") {
+        if (const auto basis = text("poly_basis");
+            basis && *basis != "taylor") {
+            throw std::invalid_argument(fmt::format(
+                "'{}' is a {} search; candidates support the Taylor basis "
+                "only",
+                path.string(), *basis));
+        }
+        if (!file.exist("chunks")) {
+            return src;
+        }
+        const auto chunks = file.getGroup("chunks");
+        for (const auto& chunk : chunks.listObjectNames()) {
+            const auto group = chunks.getGroup(chunk);
+            if (!group.exist("runs")) {
+                continue;
+            }
+            const auto runs = group.getGroup("runs");
+            for (const auto& run_name : runs.listObjectNames()) {
+                const auto run = runs.getGroup(run_name);
+                if (!run.hasAttribute("reduced_max_per_cell")) {
+                    continue;
+                }
+                const auto f64 = [&](const char* key) {
+                    return run.getAttribute(key).read<double>();
+                };
+                loki::search::CandidateOptions options;
+                options.max_per_cell = run.getAttribute("reduced_max_per_cell")
+                                           .read<std::uint64_t>();
+                options.cell_bins    = f64("reduced_cell_bins");
+                options.cell_log_width  = f64("reduced_cell_log_width");
+                options.dominance_kappa = f64("reduced_dominance_kappa");
+                options.radius          = f64("reduced_radius");
+                options.phase_radius    = f64("reduced_phase_radius");
+                src.reduced             = options;
+                src.reduced_snr_min     = f64("reduced_snr_min");
+                return src;
+            }
+        }
+    }
+    return src;
+}
+
+/// The product of @p cli: `-o`, else the spool's name with `_results.h5`.
+std::filesystem::path publish_output(const PublishCli& cli,
+                                     const PublishSource& src) {
+    auto output = cli.output;
+    if (output.empty()) {
+        const auto name          = cli.file.filename().string();
+        const std::string suffix = fmt::format("_{}_spool.h5", src.algorithm);
+        if (!name.ends_with(suffix)) {
+            throw std::invalid_argument(fmt::format(
+                "pass the result file to write with -o ('{}' is not a "
+                "'*{}')",
+                cli.file.string(), suffix));
+        }
+        output = cli.file.parent_path() /
+                 (name.substr(0, name.size() - suffix.size()) +
+                  fmt::format("_{}_results.h5", src.algorithm));
+    }
+    if (std::filesystem::exists(output)) {
+        throw std::invalid_argument(fmt::format(
+            "'{}' already exists; remove it or choose another path with -o",
+            output.string()));
+    }
+    return output;
+}
+
+/// The observation metadata of the searched series, as the search wrote it:
+/// the series header, then the configuration's [input] overrides, then
+/// @p cli's. @p found tells whether the series was found.
+template <typename TomlConfig>
+loki::io::ObservationMetadata publish_observation(const PublishCli& cli,
+                                                  const PublishSource& src,
+                                                  const TomlConfig& cfg,
+                                                  bool& found) {
+    loki::io::ObservationMetadata observation;
+    const std::filesystem::path series =
+        cli.input.empty() ? std::filesystem::path(cfg.timeseries_path)
+                          : cli.input;
+    if (!series.empty() && std::filesystem::exists(series)) {
+        const auto info = loki::io::TimeSeries::read_info(series);
+        if (std::abs(info.dt - src.tsamp) > 1e-9 * src.tsamp ||
+            info.nsamps < src.nsamps) {
+            throw std::invalid_argument(fmt::format(
+                "'{}' ({} samples of {} s) is not the searched series ({} "
+                "samples of {} s); pass that with -i",
+                series.string(), info.nsamps, info.dt, src.nsamps, src.tsamp));
+        }
+        observation = info.observation;
+        found       = true;
+    } else {
+        found = false;
+        SPDLOG_WARN("The searched series{} was not found: the result will "
+                    "lack its observation metadata (source, DM, start MJD); "
+                    "pass it with -i",
+                    series.empty() ? ""
+                                   : fmt::format(" '{}'", series.string()));
+    }
+    const auto set = [](auto& field, const auto& value) {
+        if (value) {
+            field = value;
+        }
+    };
+    set(observation.dm, cfg.observation.dm);
+    set(observation.start_mjd, cfg.observation.start_mjd);
+    set(observation.barycentric, cfg.observation.barycentric);
+    set(observation.dm, cli.dm);
+    set(observation.start_mjd, cli.start_mjd);
+    set(observation.barycentric, cli.barycentric);
+    return observation;
+}
+
+template <typename TomlConfig>
+int publish_as(const PublishCli& cli, const PublishSource& src) {
+    constexpr bool kEp = std::is_same_v<TomlConfig, loki::search::EPTomlConfig>;
+    // The search's configuration: -c, else the one the file stores.
+    std::optional<std::string> text;
+    std::string source;
+    if (!cli.config.empty()) {
+        text   = read_text_file(cli.config);
+        source = cli.config.string();
+    } else if (src.config_effective) {
+        text   = src.config_effective;
+        source = "the stored effective configuration";
+    } else if (src.config_toml) {
+        text   = src.config_toml;
+        source = "the stored configuration";
+    }
+    TomlConfig cfg;
+    if (text) {
+        try {
+            cfg = TomlConfig::from_string(*text);
+        } catch (const std::exception& e) {
+            throw std::invalid_argument(fmt::format(
+                "cannot read the search configuration ({}): {}\nPass the "
+                "search's configuration, updated to this version, with -c",
+                source, e.what()));
+        }
+        SPDLOG_INFO("Candidate options from {}", source);
+    } else {
+        SPDLOG_WARN("'{}' stores no configuration: publishing with the "
+                    "default candidate options (pass the search's with -c)",
+                    cli.file.string());
+    }
+
+    auto options                  = cfg.candidates;
+    options.enabled               = true;
+    std::optional<double> snr_min = cli.snr_min;
+    if (src.reduced && !cli.max_per_cell) {
+        // The search reduced its runs: publish exactly as it did.
+        options.max_per_cell    = src.reduced->max_per_cell;
+        options.cell_bins       = src.reduced->cell_bins;
+        options.cell_log_width  = src.reduced->cell_log_width;
+        options.dominance_kappa = src.reduced->dominance_kappa;
+        options.radius          = src.reduced->radius;
+        options.phase_radius    = src.reduced->phase_radius;
+        if (!snr_min) {
+            snr_min = src.reduced_snr_min;
+        }
+    }
+    if (cli.memory_gb) {
+        options.memory_gb = *cli.memory_gb;
+    }
+    if (cli.cluster) {
+        options.cluster = *cli.cluster;
+    }
+    if (cli.max_candidates) {
+        options.max_candidates = *cli.max_candidates;
+    }
+    if (cli.max_per_cell) {
+        options.max_per_cell = *cli.max_per_cell;
+    }
+    if (cli.retain_detections) {
+        options.retain_detections = *cli.retain_detections;
+    }
+    if (cli.tempdir) {
+        options.temporary_directory = *cli.tempdir;
+    }
+    if (!kEp && cli.snr_min) {
+        throw std::invalid_argument(
+            "--snr-min applies to EP files; an FFA spool keeps the "
+            "search's detections");
+    }
+    const auto output      = publish_output(cli, src);
+    bool series_found      = false;
+    const auto observation = publish_observation(cli, src, cfg, series_found);
+
+    const auto start = SteadyClock::now();
+    if constexpr (kEp) {
+        loki::pipelines::EPFreqSweep::publish_candidates(
+            cli.file, output, options, observation, snr_min);
+    } else {
+        loki::pipelines::FFAFreqSweep::publish_candidates(cli.file, output,
+                                                          options, observation);
+    }
+    const double publish_s = seconds_since(start);
+
+    // Provenance: the search's command line and configuration (with the
+    // options this publish used), and the command that published it.
+    std::string effective;
+    if (text) {
+        cfg.candidates = options;
+        if (snr_min) {
+            cfg.snr_min = *snr_min;
+        }
+        cfg.nsamps = src.nsamps;
+        cfg.tsamp  = src.tsamp;
+        effective  = cfg.to_toml_string();
+    }
+    loki::search::write_run_provenance(
+        output, {.config_effective = effective,
+                 .command_line     = src.command_line.value_or(""),
+                 .loki_version     = LOKI_VERSION});
+    record_config_toml(output, src.config_toml.value_or(""));
+    {
+        HighFive::File file(output.string(), HighFive::File::ReadWrite);
+        if (file.hasAttribute("publish_command_line")) {
+            file.deleteAttribute("publish_command_line");
+        }
+        file.createAttribute("publish_command_line", run_command_line());
+        file.flush();
+    }
+
+    // Read the product back before the spool goes.
+    const auto summary = loki::io::read_candidate_file_summary(output, 0);
+    if (!summary.complete || summary.schema_version.empty()) {
+        throw std::runtime_error(fmt::format(
+            "the published '{}' did not read back complete; '{}' is kept",
+            output.string(), cli.file.string()));
+    }
+    SPDLOG_INFO("Published {} candidates from '{}' to '{}' in {:.1f} s",
+                summary.n_rows, cli.file.string(), output.string(), publish_s);
+    if (kEp) {
+        print_ep_summary(output);
+    }
+    // A product published without the search's configuration or series
+    // cannot be completed later: keep the spool to publish again.
+    if (src.spool && !cli.keep_spool && (!text || !series_found)) {
+        SPDLOG_WARN("Kept the spool '{}': the result was published without "
+                    "the search's {}; publish again with {} for a complete "
+                    "result",
+                    cli.file.string(), text ? "series" : "configuration",
+                    text ? "-i" : "-c");
+    } else if (src.spool && !cli.keep_spool) {
+        std::filesystem::remove(cli.file);
+        SPDLOG_INFO("Removed the spool '{}' (--keep-spool keeps it)",
+                    cli.file.string());
+    }
+    return 0;
+}
+
+int run_publish(const PublishCli& cli) {
+    const auto src = read_publish_source(cli.file);
+    return src.algorithm == "ep"
+               ? publish_as<loki::search::EPTomlConfig>(cli, src)
+               : publish_as<loki::search::FFATomlConfig>(cli, src);
+}
+
 } // namespace
 
 // NOLINTNEXTLINE(bugprone-exception-escape,misc-const-correctness): setup errors abort; main signature is fixed
@@ -2734,10 +3113,74 @@ int main(int argc, char** argv) {
     grp_refold_io->add_flag("--json", refold_cli.json,
                             "Write the results as JSON to stdout");
 
+    // =========================================================================
+    // Subcommand: publish
+    // =========================================================================
+    auto* publish = app.add_subcommand(
+        "publish", "Publish the candidates of a kept search spool (or of a "
+                   "--no-candidates search) without searching again");
+    PublishCli publish_cli;
+    publish
+        ->add_option("file", publish_cli.file,
+                     "The *_ffa_spool.h5 or *_ep_spool.h5 a failed "
+                     "post-processing kept, or a --no-candidates result")
+        ->required()
+        ->check(CLI::ExistingFile);
+    auto* grp_publish_io = publish->add_option_group("Input and output");
+    grp_publish_io->add_option(
+        "-o,--output", publish_cli.output,
+        "Result file to write (default: the spool's name with _results.h5)");
+    grp_publish_io
+        ->add_option("-c,--config", publish_cli.config,
+                     "The search's configuration (default: the one the file "
+                     "stores, else the defaults)")
+        ->check(CLI::ExistingFile);
+    grp_publish_io->add_option(
+        "-i,--input", publish_cli.input,
+        "The searched series, for its observation metadata (default: the "
+        "configuration's)");
+    grp_publish_io->add_flag("--keep-spool", publish_cli.keep_spool,
+                             "Keep the spool after publishing it");
+    grp_publish_io->add_option("--dm", publish_cli.dm,
+                               "Override dispersion measure (pc cm^-3)");
+    grp_publish_io->add_option("--start-mjd", publish_cli.start_mjd,
+                               "Override MJD of the first input sample");
+    grp_publish_io->add_option(
+        "--barycentric", publish_cli.barycentric,
+        "Override timing frame: true (barycentric) or false (topocentric)");
+    auto* grp_publish_cand = publish->add_option_group(
+        "Candidate processing (default: the search's)");
+    grp_publish_cand->add_option("--memory-gb,--candidate-memory-gb",
+                                 publish_cli.memory_gb,
+                                 "Host memory budget for candidate processing");
+    grp_publish_cand->add_option("--candidate-tempdir", publish_cli.tempdir,
+                                 "Directory for bounded external sorting");
+    grp_publish_cand->add_flag_function(
+        "--cluster,!--no-cluster",
+        [&publish_cli](std::int64_t count) { publish_cli.cluster = count > 0; },
+        "Enable/disable phase-track clustering");
+    grp_publish_cand->add_flag_function(
+        "--retain-detections,!--no-retain-detections",
+        [&publish_cli](std::int64_t count) {
+            publish_cli.retain_detections = count > 0;
+        },
+        "Keep raw detections and membership");
+    grp_publish_cand->add_option(
+        "--max-candidates", publish_cli.max_candidates,
+        "Maximum folding candidates; zero is unlimited");
+    grp_publish_cand->add_option(
+        "--max-per-cell", publish_cli.max_per_cell,
+        "Strongest trials kept per frequency cell (default: as the search; "
+        "an EP search that reduced its runs needs the same)");
+    grp_publish_cand->add_option(
+        "--snr-min", publish_cli.snr_min,
+        "EP: candidate S/N minimum (default: the search's)");
+
     simulate->fallthrough();
     search->fallthrough();
     inspect->fallthrough();
     refold->fallthrough();
+    publish->fallthrough();
     ffa->fallthrough();
     ep->fallthrough();
 
@@ -2830,6 +3273,10 @@ int main(int argc, char** argv) {
 
         if (refold->parsed()) {
             return run_refold(std::move(refold_cli));
+        }
+
+        if (publish->parsed()) {
+            return run_publish(publish_cli);
         }
 
         if (search->parsed() && ffa->parsed()) {

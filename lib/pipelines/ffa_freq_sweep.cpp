@@ -142,9 +142,9 @@ void FFAFreqSweep::execute(std::span<const float> ts_e,
             discard_staging();
             spdlog::error(
                 "FFA post-processing {}; the search's detections are kept "
-                "in '{}'. Retry with FFAFreqSweep::publish_candidates (Python: "
+                "in '{}'. Publish them with `loki publish '{}'` (Python: "
                 "libloki.ffa.FFAFreqSweep.publish_candidates).",
-                reason, kept.string());
+                reason, kept.string(), kept.string());
         }
         throw;
     }

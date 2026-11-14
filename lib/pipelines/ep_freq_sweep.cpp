@@ -198,13 +198,11 @@ void EPFreqSweep::execute(std::span<const float> ts_e,
             const auto bytes = std::filesystem::file_size(kept, size_error);
             spdlog::error(
                 "EP candidate postprocessing {}; the completed search is kept "
-                "in '{}' ({:.1f} MB). Publish it with the same candidate "
-                "options, e.g. in Python "
-                "libloki.prune.EPFreqSweep.publish_candidates('{}', "
-                "'{}_ep_results.h5', candidates=...)",
+                "in '{}' ({:.1f} MB). Publish it with `loki publish '{}'` "
+                "(Python: libloki.prune.EPFreqSweep.publish_candidates)",
                 reason, kept.string(),
                 size_error ? 0.0 : static_cast<double>(bytes) / 1.0e6,
-                kept.string(), file_prefix);
+                kept.string());
         } else {
             spdlog::error("EP candidate postprocessing {}; completed runs "
                           "remain in '{}' ({})",

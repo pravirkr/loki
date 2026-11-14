@@ -146,7 +146,8 @@ void bind_io(py::module_& m) {
     };
     py::class_<io::TimeSeriesInfo>(m_io, "TimeSeriesInfo")
         .def_readonly("nsamps", &io::TimeSeriesInfo::nsamps)
-        .def_readonly("dt", &io::TimeSeriesInfo::dt);
+        .def_readonly("dt", &io::TimeSeriesInfo::dt)
+        .def_readonly("observation", &io::TimeSeriesInfo::observation);
     py::class_<io::TimeSeries>(m_io, "TimeSeries")
         .def(py::init([](const PyArrayT<float>& ts_e,
                          const PyArrayT<float>& ts_v, double dt) {

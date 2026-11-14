@@ -184,6 +184,16 @@ that detected it; the reduction with `max_per_cell = 0` is bit-identical
 to the unreduced product, and a search that reduces as it writes gives the
 same product as reducing its full spool at publication (CPU, exact).
 
+`loki publish` runs the same candidate stage as the search. Measured
+2026-11-14 on an EDGAR L40 node (bright pulsar, acceleration, 2^23 samples,
+32 runs, CUDA, 0.34 M final leaves, 0.30 M above `snr_min`): publishing the
+full `--no-candidates` file (26 MB, written by a 2.2 s search) took 0.18 s
+with the EP defaults, the 112 candidates of the search that reduced as it
+wrote. With `max_per_cell = 0` it took 79 s at `memory_gb = 4` against
+65 s for the same stage inside the search (465 candidates both ways), and
+both fail at `memory_gb = 1`. The cost is in grouping every leaf, not in
+publishing a spool.
+
 Measured and rejected: pooling every run's leaves into the same frequency
 cells (as first proposed). The strongest runs of a source fill its cell, so
 its detections in weaker runs are dropped: with 32 leaves per cell, sources

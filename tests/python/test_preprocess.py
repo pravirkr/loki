@@ -63,6 +63,20 @@ def test_zscore_matches_legacy_read(tmp_path) -> None:
     assert rep.method == io.PreprocessMethod.ZScore
 
 
+def test_read_info_observation(tmp_path) -> None:
+    raw = _noise(4096)
+    path = tmp_path / "info.tim"
+    io.TimeSeries(raw, np.ones_like(raw), TSAMP).write(str(path))
+    info = io.TimeSeries.read_info(str(path))
+    assert info.nsamps == raw.size
+    read_opts = io.ReadOptions()
+    read_opts.preprocess = False
+    obs = io.TimeSeries.read(str(path), read_opts).observation
+    assert info.observation.input_path == obs.input_path == str(path)
+    assert info.observation.original_nsamps == raw.size
+    assert info.observation.dm == obs.dm
+
+
 def test_timeseries_preprocess_in_place() -> None:
     raw = _noise(1 << 15)
     series = io.TimeSeries(raw, np.ones_like(raw), TSAMP)

@@ -20,7 +20,8 @@ search. FFA writes the flat detection file `<prefix>_ffa_results.h5` of
 earlier versions, one root row per passing trial with the search attributes
 at the root. It also carries two additive items, `detection_id` and
 `/regions`. This flat file is also the spool candidate processing starts
-from, so `FFAFreqSweep.publish_candidates` can publish it later. EP writes
+from, so `loki publish` (or `FFAFreqSweep.publish_candidates`) can
+publish it later. EP writes
 only its run diagnostics, as the constructor without candidates does; Taylor
 runs still save their winning `width`. `publish_candidates` refuses options
 with processing off.
@@ -164,7 +165,9 @@ width, bin count and native parameters.
 
 Publication is atomic. If postprocessing fails after the search completes,
 the previous product is preserved and completed runs are kept in
-`<prefix>_ep_spool.h5`. Retry without searching again:
+`<prefix>_ep_spool.h5`. Retry without searching again with
+`loki publish results/search_ep_spool.h5` (see
+[Publishing a kept spool](#publishing-a-kept-spool)), or in Python:
 
 ```python
 libloki.prune.EPFreqSweep.publish_candidates(
@@ -566,8 +569,11 @@ publication. An abandoned raw writer does not finalize in its destructor.
 If the search finishes but postprocessing fails (the candidate memory budget,
 a full scratch disk, an HDF5 error), the search's detections are kept as
 `<prefix>_ffa_spool.h5` beside the intended output and the error is
-rethrown. Publish them without searching again, with larger budgets if needed,
-passing the same observation metadata as the search:
+rethrown. Publish them without searching again with
+`loki publish out/run_ffa_spool.h5 --memory-gb 8` (see
+[Publishing a kept spool](#publishing-a-kept-spool)), or in Python, with
+larger budgets if needed, passing the same observation metadata as the
+search:
 
 ```python
 options = libloki.configs.CandidateOptions()
@@ -631,7 +637,7 @@ drain, spool reading, sorting, clustering and writing the product.
 During postprocessing the log reports progress every 30 s (phase, records
 done, records merged by the sort, elapsed time). SIGINT and SIGTERM stop it
 at the next record or batch. A run stopped after its search finished keeps
-`<prefix>_ep_spool.h5` for `publish_candidates`.
+`<prefix>_ep_spool.h5` for `loki publish`.
 
 ## Inspecting a result file
 
@@ -707,6 +713,47 @@ so a refold of its data can differ from the search's input at float level.
 In Python, `libloki.fold.refold(ts_e, ts_v, tsamp, t_ref, leaf, ...)` runs
 the same fold on a preprocessed series; C++ tools use `loki::search::refold`
 (`loki/search/refold.hpp`) and `loki::io::read_candidate_by_id`.
+
+## Publishing a kept spool
+
+`loki publish FILE` groups and publishes the candidates of a search
+without searching again. `FILE` is a `<prefix>_ffa_spool.h5` or
+`<prefix>_ep_spool.h5` that a search kept when its postprocessing failed or
+was interrupted, or the result file of a `--no-candidates` search:
+
+```bash
+loki publish out/run_ep_spool.h5                    # writes out/run_ep_results.h5
+loki publish out/run_ffa_spool.h5 --memory-gb 8     # a larger candidate budget
+loki publish out/raw_ffa_results.h5 -o out/run.h5   # a --no-candidates result
+```
+
+- **Output.** A spool publishes beside itself as `<prefix>_ffa_results.h5`
+  or `<prefix>_ep_results.h5`; any other file needs `-o`. An existing file
+  is never overwritten, and a published result file is refused.
+- **Candidate options.** From `-c`, else the configuration the file stores
+  (`loki search`, when it keeps a spool, records its effective configuration and
+  command line there), else the defaults, with a warning. `--memory-gb`,
+  `--candidate-tempdir`, `--cluster`/`--no-cluster`, `--max-candidates`,
+  `--max-per-cell`, `--retain-detections`/`--no-retain-detections` and
+  (EP) `--snr-min` override them. The stored configuration includes the
+  options the search failed with, so pass the one that failed (a larger
+  `--memory-gb`, a writable `--candidate-tempdir`). An EP spool whose runs
+  the search reduced publishes with the options it was reduced with (its
+  runs' `reduced_*` attributes); other options are refused, since the
+  dropped leaves are gone.
+- **Observation metadata.** From the header of the searched series (`-i`,
+  else the configuration's `[input] timeseries`), which must match the
+  file's sample interval and count; then the configuration's `[input]`
+  overrides, then `--dm`, `--start-mjd` and `--barycentric`. Without the
+  series the result lacks the source, DM and start MJD, with a warning.
+- **Provenance.** The product keeps the search's `command_line` and its
+  `config_effective` (with the options this publish used), and adds the
+  publishing command as `publish_command_line`.
+- **Cleanup.** Once the product reads back complete, a spool is removed
+  (`--keep-spool` keeps it), unless it was published without the search's
+  configuration or series: then it is kept, with a warning, so it can be
+  published again with `-c` or `-i`. A `--no-candidates` result is never
+  removed.
 
 ## PulsarX conversion
 

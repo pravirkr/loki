@@ -29,10 +29,13 @@ struct ReadOptions {
     int nthreads{1};
 };
 
-/// @brief Sample count and sample interval of a timeseries file.
+/// @brief Sample count, sample interval and observation metadata of a
+/// timeseries file, from its header.
 struct TimeSeriesInfo {
     SizeType nsamps{};
     double dt{};
+    /// As TimeSeries::read gives it (get_observation()).
+    ObservationMetadata observation;
 };
 
 /**

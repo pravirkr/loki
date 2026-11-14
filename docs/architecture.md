@@ -414,7 +414,9 @@ none of YAML's implicit typing (`no`, `1e3`, `1:30`). The configs are flat
   `search::write_run_provenance` after the run: `config_effective` (the
   config after defaults and command-line overrides), `command_line` and
   `loki_version`. The CLI writes them for FFA and EP searches, and both
-  also keep the raw config file text in `config_toml`.
+  also keep the raw config file text in `config_toml`. A spool kept by a
+  failed postprocessing gets them too, and `loki publish` carries them into
+  the product it writes, adding `publish_command_line`.
 
 ## Memory planning
 
