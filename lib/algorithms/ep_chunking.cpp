@@ -164,6 +164,41 @@ public:
           m_memory(memory) {}
 
     ChunkPlan run(std::span<const RegionDesign> designs) {
+        const SizeType default_batch = m_memory.batch_size;
+        auto plan                    = plan_sweep(designs);
+        if (m_memory.batch_size < default_batch) {
+            log_slow_batches(plan, default_batch);
+        }
+        return plan;
+    }
+
+private:
+    /// After the batch ladder: says once per plan how many chunks run with a
+    /// smaller batch than the default would give them, and by how much.
+    void log_slow_batches(const ChunkPlan& plan, SizeType default_batch) const {
+        SizeType n_lowered    = 0;
+        SizeType worst_factor = 1;
+        for (const auto& c : plan.chunk_stats) {
+            const SizeType full =
+                ep_cuda_batch_for_nbins(c.nbins, default_batch);
+            if (c.batch_size > 0 && c.batch_size < full) {
+                ++n_lowered;
+                worst_factor = std::max(worst_factor, full / c.batch_size);
+            }
+        }
+        if (n_lowered == 0) {
+            return;
+        }
+        spdlog::warn(
+            "EPRegionPlanner: to fit the memory limit the CUDA batch is at "
+            "most {} (default {}): {} of {} chunks run with up to {}x fewer "
+            "parents per batch and search slower (see \"CUDA batch and "
+            "branch_max\" in docs/performance.md)",
+            m_memory.batch_size, default_batch, n_lowered,
+            plan.chunk_stats.size(), worst_factor);
+    }
+
+    ChunkPlan plan_sweep(std::span<const RegionDesign> designs) {
         auto state = run_pass(designs, std::nullopt);
         while (state.failure && !state.failure->outside_cap &&
                m_memory.kind == EPMemoryKind::kCuda &&

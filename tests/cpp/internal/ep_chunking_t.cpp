@@ -3,13 +3,17 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <memory>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/algorithms/regions.hpp"
@@ -535,12 +539,21 @@ TEST_CASE("CUDA EP lowers the batch only when a minimum chunk cannot fit",
     const auto designs = make_designs(cfg, 1000.0);
     auto ctx           = make_cuda_ctx(cfg);
     ctx.batch_size     = 1U << 16U;
+    // The planner says once when the batch was lowered, and only then.
+    std::ostringstream log;
+    const auto logger = spdlog::default_logger();
+    auto sink         = std::make_shared<spdlog::sinks::ostream_sink_mt>(log);
+    logger->sinks().push_back(sink);
     const auto ample =
         plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, ctx);
-    REQUIRE(!ample.chunk_cfgs.empty());
-    CHECK(ample.chunk_cfgs.front().batch_size == ctx.batch_size);
+    const auto ample_log = log.str();
     const auto tight =
         plan_chunks<float>(cfg, "taylor", designs, 0.0, 0.03, ctx);
+    std::erase(logger->sinks(), sink);
+    CHECK(ample_log.find("CUDA batch is at most") == std::string::npos);
+    CHECK(log.str().find("CUDA batch is at most") != std::string::npos);
+    REQUIRE(!ample.chunk_cfgs.empty());
+    CHECK(ample.chunk_cfgs.front().batch_size == ctx.batch_size);
     REQUIRE(!tight.chunk_cfgs.empty());
     CHECK(tight.chunk_cfgs.front().batch_size < ctx.batch_size);
     CHECK(std::has_single_bit(tight.chunk_cfgs.front().batch_size));
