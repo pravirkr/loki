@@ -105,6 +105,18 @@ the FFA and EP workloads and the comparison tools).
   storage). `ep_cuda_brute_table_sizes` is now the single source for the
   memory model and the allocation.
 
+- Compressed per-run tables in result files: on an EP acceleration search
+  of 2^24 samples (8 chunks of 32 runs, CUDA), `level_stats` (one row per
+  pruning level, mostly small integers) was 2.9 MB of a 5.4 MB result, and
+  the HDF5 headers of about 2,100 small objects another 1.2 MB. Deflate with
+  byte shuffle shrinks `level_stats` and `snail_scheme` about sevenfold. A
+  compressed dataset needs a chunk index, which in the oldest HDF5 file
+  format cost more metadata than compression saved; written in the 1.10
+  format (one chunk, no index B-tree) the result is 2.3 MB (-58 %), and the
+  `--no-candidates` file 26.2 instead of 29.1 MB. Writing the 512 tables
+  costs about 66 ms more (104 to 170 ms); the search took 34 s. Values are
+  identical.
+
 ## Deferred, with the reason
 
 | Item | Why deferred |

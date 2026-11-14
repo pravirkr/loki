@@ -37,6 +37,7 @@
 
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
+#include "lib/io/h5_layout.hpp"
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
@@ -553,7 +554,8 @@ HighFive::File FFAResultWriter::open_file() const {
         open_mode = HighFive::File::Create;
     }
 
-    HighFive::File file(m_open_path.string(), open_mode);
+    HighFive::File file =
+        io::detail::open_result_file(m_open_path.string(), open_mode);
     if (!file.isValid()) {
         throw std::runtime_error("Failed to create valid HDF5 file");
     }
@@ -1096,14 +1098,18 @@ void PruneResultWriter::write_run_results(
     offset_s += scores_ep_view.first.size();
     write_chunk_scores_ep(scores_ep_view.second, offset_s);
 
-    run_group.createDataSet("snail_scheme", snail_scheme);
+    run_group.createDataSet(
+        "snail_scheme", snail_scheme,
+        io::detail::small_table_props({snail_scheme.size()}));
     if (!widths.empty() || n_leaves == 0) {
         error_check::check_equal(widths.size(), n_leaves,
                                  "write_run_results: width count mismatch");
         run_group.createDataSet("width", widths);
     }
     if (!level_stats.empty()) {
-        run_group.createDataSet("level_stats", level_stats);
+        run_group.createDataSet(
+            "level_stats", level_stats,
+            io::detail::small_table_props({level_stats.size()}));
     }
     if (!timer_stats.empty()) {
         run_group.createDataSet("timer_stats", timer_stats);
@@ -1148,7 +1154,8 @@ HighFive::File PruneResultWriter::open_file() const {
         open_mode = HighFive::File::Create;
     }
 
-    HighFive::File file(m_filepath.string(), open_mode);
+    HighFive::File file =
+        io::detail::open_result_file(m_filepath.string(), open_mode);
     if (!file.isValid()) {
         throw std::runtime_error("Failed to create valid HDF5 file");
     }
@@ -1227,7 +1234,8 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
     const auto open_mode = std::filesystem::exists(result_file)
                                ? HighFive::File::ReadWrite
                                : HighFive::File::Create;
-    HighFive::File main_h5(result_file.string(), open_mode);
+    HighFive::File main_h5 =
+        io::detail::open_result_file(result_file.string(), open_mode);
     const HighFive::Group main_runs_group = main_h5.exist("runs")
                                                 ? main_h5.getGroup("runs")
                                                 : main_h5.createGroup("runs");

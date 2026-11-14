@@ -29,6 +29,7 @@
 #include "loki/search/candidates.hpp"
 
 #include "lib/detail/utils.hpp"
+#include "lib/io/h5_layout.hpp"
 #include "lib/search/candidate_processing.hpp"
 #include "lib/search/harvested.hpp"
 
@@ -1072,7 +1073,8 @@ void publish_candidate_results(const std::filesystem::path& spool,
     std::uint64_t selected      = 0;
     try {
         {
-            HighFive::File result(publish.string(), HighFive::File::Excl);
+            HighFive::File result = io::detail::open_result_file(
+                publish.string(), HighFive::File::Excl);
             result.createAttribute("schema_version", std::string("1.0"));
             result.createAttribute("producer", std::string("loki"));
             result.createAttribute("producer_version",

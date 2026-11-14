@@ -936,6 +936,13 @@ are rejected rather than silently truncated.
 
 ### Reading old files
 
+Result files and spools are written in the HDF5 1.10 file format, and each
+EP run's `level_stats` and `snail_scheme` are deflate-compressed (with byte
+shuffle). Any reader built on HDF5 1.10 or newer with zlib (h5py, HighFive,
+the HDF5 tools) reads them transparently; paths, types and values are
+unchanged. HDF5 1.8 tools cannot open them. Files written before this change
+remain readable.
+
 Existing flat FFA files remain readable through `loki.candidates.CandidateFile`;
 missing observational metadata can be supplied during export. Readers must
 check `schema_version` rather than assume the root names still mean all

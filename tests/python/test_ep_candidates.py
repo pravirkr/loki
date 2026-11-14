@@ -168,6 +168,24 @@ def test_ep_candidates_preserve_runs_and_cluster_the_full_list(product, tmp_path
     assert summary["count"] > 0
 
 
+def test_ep_run_tables_are_compressed(product, tmp_path):
+    """level_stats and snail_scheme are deflated, in the HDF5 1.10 format,
+    in the search's product and in a republication of it."""
+    path, _, _, _ = product
+    output = tmp_path / "republished.h5"
+    libloki.prune.EPFreqSweep.publish_candidates(
+        path, output, candidates=options(), observation=observation()
+    )
+    for file in (path, output):
+        with h5py.File(file) as f:
+            assert f.libver[0] == "v110"
+            runs = f["search/sources/run_path"].asstr()[:]
+            assert len(runs) > 0
+            for run_path in runs:
+                for name in ("level_stats", "snail_scheme"):
+                    assert f[f"{run_path}/{name}"].compression == "gzip"
+
+
 @pytest.mark.parametrize(
     "policy", ["anchored", "unclustered", "no_raw", "capped", "empty"]
 )

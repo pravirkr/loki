@@ -20,6 +20,7 @@
 #include "loki/search/configs.hpp"
 
 #include "lib/algorithms/ep_memory.hpp"
+#include "lib/io/h5_layout.hpp"
 #include "lib/search/harvested.hpp"
 
 namespace loki::pipelines::detail {
@@ -34,7 +35,8 @@ void initialize_ep_results(
     float ref_ducy,
     float total_runtime,
     std::string_view backend) {
-    HighFive::File main_h5(result_file.string(), HighFive::File::Overwrite);
+    HighFive::File main_h5 = io::detail::open_result_file(
+        result_file.string(), HighFive::File::Overwrite);
     main_h5.createAttribute("ep_sweep_version", std::string("1.0.0-cpp"));
     main_h5.createAttribute("backend", std::string(backend));
     main_h5.createAttribute("complete", 0);
@@ -112,7 +114,8 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                        bool copy_rfi_config) {
     initialize_ep_results(result_file, chunk_cfgs, base_cfg, min_pd, poly_basis,
                           ref_ducy, total_runtime, "cpu");
-    HighFive::File main_h5(result_file.string(), HighFive::File::ReadWrite);
+    HighFive::File main_h5 = io::detail::open_result_file(
+        result_file.string(), HighFive::File::ReadWrite);
     double accumulated_flops = 0.0;
     for (SizeType i = 0; i < chunk_cfgs.size(); ++i) {
         const auto& chunk              = chunk_cfgs[i];
@@ -198,7 +201,8 @@ EPSweepWriter::EPSweepWriter(
     if (m_rfi_active) {
         // The chunk's RFI control, with its own harvest scheme, as the CPU
         // sweep's merge copies it.
-        HighFive::File file(m_partial_file.string(), HighFive::File::ReadWrite);
+        HighFive::File file = io::detail::open_result_file(
+            m_partial_file.string(), HighFive::File::ReadWrite);
         for (SizeType i = 0; i < chunks.size(); ++i) {
             auto rfi = file.createGroup(
                 fmt::format("chunks/chunk_{:04d}/rfi_config", i));
@@ -302,7 +306,8 @@ double EPSweepWriter::finish(float runtime) {
         std::rethrow_exception(m_error);
     }
     {
-        HighFive::File file(m_partial_file.string(), HighFive::File::ReadWrite);
+        HighFive::File file = io::detail::open_result_file(
+            m_partial_file.string(), HighFive::File::ReadWrite);
         file.getAttribute("total_runtime").write(runtime);
         file.getAttribute("total_pruning_gflops").write(m_gflops);
         if (m_rfi_active) {
