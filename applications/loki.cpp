@@ -2103,6 +2103,7 @@ struct PublishCli {
     std::filesystem::path config;
     std::filesystem::path input;
     bool keep_spool{false};
+    bool force{false}; ///< Replace an existing output.
     // Candidate options; unset keeps the search's.
     std::optional<double> memory_gb;
     std::optional<bool> cluster;
@@ -2223,9 +2224,16 @@ std::filesystem::path publish_output(const PublishCli& cli,
                   fmt::format("_{}_results.h5", src.algorithm));
     }
     if (std::filesystem::exists(output)) {
-        throw std::invalid_argument(fmt::format(
-            "'{}' already exists; remove it or choose another path with -o",
-            output.string()));
+        std::error_code error;
+        if (std::filesystem::equivalent(output, cli.file, error)) {
+            throw std::invalid_argument("the output is the file to publish");
+        }
+        if (!cli.force) {
+            throw std::invalid_argument(fmt::format(
+                "'{}' already exists; replace it with --force or choose "
+                "another path with -o",
+                output.string()));
+        }
     }
     return output;
 }
@@ -2402,8 +2410,8 @@ int publish_as(const PublishCli& cli, const PublishSource& src) {
     // cannot be completed later: keep the spool to publish again.
     if (src.spool && !cli.keep_spool && (!text || !series_found)) {
         SPDLOG_WARN("Kept the spool '{}': the result was published without "
-                    "the search's {}; publish again with {} for a complete "
-                    "result",
+                    "the search's {}; publish again with {} --force for a "
+                    "complete result",
                     cli.file.string(), text ? "series" : "configuration",
                     text ? "-i" : "-c");
     } else if (src.spool && !cli.keep_spool) {
@@ -3141,6 +3149,9 @@ int main(int argc, char** argv) {
         "configuration's)");
     grp_publish_io->add_flag("--keep-spool", publish_cli.keep_spool,
                              "Keep the spool after publishing it");
+    grp_publish_io->add_flag("--force", publish_cli.force,
+                             "Replace an existing result file (atomically, "
+                             "once the new one is written)");
     grp_publish_io->add_option("--dm", publish_cli.dm,
                                "Override dispersion measure (pc cm^-3)");
     grp_publish_io->add_option("--start-mjd", publish_cli.start_mjd,

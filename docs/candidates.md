@@ -729,7 +729,8 @@ loki publish out/raw_ffa_results.h5 -o out/run.h5   # a --no-candidates result
 
 - **Output.** A spool publishes beside itself as `<prefix>_ffa_results.h5`
   or `<prefix>_ep_results.h5`; any other file needs `-o`. An existing file
-  is never overwritten, and a published result file is refused.
+  is replaced only with `--force` (atomically, once the new product is
+  written), and a published result file is refused.
 - **Candidate options.** From `-c`, else the configuration the file stores
   (`loki search`, when it keeps a spool, records its effective configuration and
   command line there), else the defaults, with a warning. `--memory-gb`,
@@ -752,7 +753,7 @@ loki publish out/raw_ffa_results.h5 -o out/run.h5   # a --no-candidates result
 - **Cleanup.** Once the product reads back complete, a spool is removed
   (`--keep-spool` keeps it), unless it was published without the search's
   configuration or series: then it is kept, with a warning, so it can be
-  published again with `-c` or `-i`. A `--no-candidates` result is never
+  published again with `-c` or `-i` and `--force`. A `--no-candidates` result is never
   removed.
 
 ## PulsarX conversion

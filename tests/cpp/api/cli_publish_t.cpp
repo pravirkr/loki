@@ -206,6 +206,13 @@ TEST_CASE("publish CLI publishes a kept spool as the search would", "[cli]") {
             run_cli(fmt::format(R"(publish "{}")", spool.string()), log);
         CHECK(exists != 0);
         CHECK(exists_log.find("already exists") != std::string::npos);
+        const auto [forced, forced_log] = run_cli(
+            fmt::format(R"(publish "{}" --force --candidate-tempdir "{}")",
+                        spool.string(), dir.path().string()),
+            log);
+        INFO(forced_log);
+        CHECK(forced == 0);
+        CHECK_FALSE(std::filesystem::exists(spool));
     }
 
     SECTION("EP: without its configuration or series the spool is kept") {
