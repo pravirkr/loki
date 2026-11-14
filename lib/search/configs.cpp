@@ -367,6 +367,14 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    [](auto& c) -> auto& {
                        return c.candidates.harmonic_snr_distance;
                    }),
+        field<Cfg>("candidates", "harmonic_doppler_tolerance",
+                   [](auto& c) -> auto& {
+                       return c.candidates.harmonic_doppler_tolerance;
+                   }),
+        field<Cfg>("candidates", "harmonic_doppler_min_snr",
+                   [](auto& c) -> auto& {
+                       return c.candidates.harmonic_doppler_min_snr;
+                   }),
         field<Cfg>("candidates", "max_per_cell",
                    [](auto& c) -> auto& { return c.candidates.max_per_cell; }),
         field<Cfg>("candidates", "cell_bins",
@@ -663,9 +671,15 @@ phase_radius = 0.05
 retain_detections = true
 flag_harmonics = false
 remove_harmonics = false
-harmonic_denominator_max = 100
+# Harmonic ratios p/q with p, q <= harmonic_denominator_max (1:1 included)
+harmonic_denominator_max = 16
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
+# Parents of at least this S/N also take children within this fractional
+# frequency of p/q times their own, with no track test (bright binaries, e.g.
+# 3e-4); 0 disables. Each such parent covers ~2% of the frequencies.
+harmonic_doppler_tolerance = 0.0
+harmonic_doppler_min_snr = 20.0
 # Keep only the strongest max_per_cell trials of each frequency cell of each
 # source region, before grouping. 0 keeps every trial. Cells are cell_bins
 # Fourier bins (1/tobs) or cell_log_width in ln(frequency) wide; set exactly
@@ -2447,9 +2461,15 @@ phase_radius = 0.05
 retain_detections = true
 flag_harmonics = false
 remove_harmonics = false
-harmonic_denominator_max = 100
+# Harmonic ratios p/q with p, q <= harmonic_denominator_max (1:1 included)
+harmonic_denominator_max = 16
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
+# Parents of at least this S/N also take children within this fractional
+# frequency of p/q times their own, with no track test (bright binaries, e.g.
+# 3e-4); 0 disables. Each such parent covers ~2% of the frequencies.
+harmonic_doppler_tolerance = 0.0
+harmonic_doppler_min_snr = 20.0
 # Per-run reduction of the final leaves, before grouping: keep the
 # max_per_cell strongest leaves of each frequency cell of each run, then absorb
 # leaves a stronger leaf of the run explains (dominance_kappa; 0 disables).

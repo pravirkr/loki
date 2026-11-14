@@ -161,6 +161,8 @@ private:
     std::uint64_t root(std::uint64_t node);
     std::uint64_t append_transitive(const Candidate& candidate);
     void finish_transitive();
+    /// Sets each cluster's harmonic parent (CandidateOptions::flag_harmonics).
+    void flag_harmonic_families();
     double m_tobs;
     CandidateOptions m_options;
     double m_memory_gb;

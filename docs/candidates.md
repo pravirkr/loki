@@ -323,9 +323,15 @@ phase_radius = 0.05
 retain_detections = true
 flag_harmonics = false
 remove_harmonics = false
-harmonic_denominator_max = 100
+# Harmonic ratios p/q with p, q <= harmonic_denominator_max (1:1 included)
+harmonic_denominator_max = 16
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
+# Parents of at least this S/N also take children within this fractional
+# frequency of p/q times their own, with no track test (bright binaries, e.g.
+# 3e-4); 0 disables. Each such parent covers ~2% of the frequencies.
+harmonic_doppler_tolerance = 0.0
+harmonic_doppler_min_snr = 20.0
 max_per_cell = 0 # EP: 32
 # cell_bins or cell_log_width: exactly one is required with max_per_cell
 # cell_bins = 64.0 # EP default
@@ -419,15 +425,50 @@ Representative parameters and scores are never averaged or added. The default
 uses riptide-style transitive grouping with full Taylor phase tracks rather
 than frequency alone. Harmonic relationships are handled separately.
 
-Harmonic processing is a separate opt-in pass over representatives. It finds
-the closest positive rational frequency ratio with denominator up to the
-configured limit, excluding 1:1. It compares the full scaled phase tracks in
-units of the faster candidate's pulse width and requires S/N agreement with
-`S_parent / sqrt(p*q)`. Stronger already-flagged children do not become parents.
-The stored parent is the stronger representative; it is not a claim about which
-observed peak is the physical fundamental. All candidates in a file have the
-same DM, so no DM-distance rejection is applied. With no DM discrimination,
-inspect harmonic associations before choosing to remove them.
+Harmonic processing is a separate opt-in pass over representatives, in
+decreasing S/N. A representative is a harmonic of a stronger one that is not
+itself a harmonic (its parent) when their frequencies are in a ratio `p/q`
+with `p, q <= harmonic_denominator_max` (1:1 included, for responses the
+grouping kept apart) and either
+
+- their full phase tracks, the parent's scaled by `p/q`, stay within
+  `harmonic_phase_distance` pulse widths of the faster one, which compares
+  every searched derivative (a harmonic shares its parent's acceleration and
+  jerk); or
+- the parent's S/N is at least `harmonic_doppler_min_snr` and the frequency is
+  within `harmonic_doppler_tolerance` (a fraction) of `p/q` times the
+  parent's. This is for a binary whose orbit curves its track beyond the
+  search's order, so its family spreads over the orbital Doppler range
+  instead of following one track; 3e-4 covers 90 km/s. It is off by default
+  (`harmonic_doppler_tolerance = 0`). Enable it only when few parents reach
+  `harmonic_doppler_min_snr`: with orders up to 16 and 3e-4 each such parent
+  covers about 2% of the frequencies of a 5-720 Hz search, so with many
+  bright parents almost everything becomes a harmonic (97% of 10^4 unrelated
+  synthetic candidates of S/N 10-40). It applies only when `p/q` is the one
+  ratio of the allowed orders within the tolerance: with large
+  `harmonic_denominator_max` some ratio is within it of almost any
+  frequency.
+
+A harmonic's S/N may exceed its parent's by at most `harmonic_snr_distance`;
+there is no lower bound, since a subharmonic's S/N depends on the pulse width
+and the boxcar. Of all parents, the simplest ratio (smallest `p*q`) wins, ties
+to the stronger parent. `parent_cluster_id` is always a root, so a family is a
+root and the representatives that name it. The stored parent is the stronger
+representative; it is not a claim about which observed peak is the physical
+fundamental.
+
+On a 2^26-sample frequency-only search with two bright pulsars (an isolated
+one and a binary; 413 representatives) and the Doppler test at 3e-4, every
+representative labelled as a harmonic of either joined its family, and the
+weaker known pulsars stayed roots except one at exactly three times the
+isolated pulsar's frequency, flagged as its harmonic, which no single file
+can rule out. Without the Doppler test the binary's family stays apart:
+its track is curved beyond the search's order. Among unrelated candidates
+the track test relates some by chance, more as candidates crowd: 5% of 10^4
+and 26% of 10^5 synthetic ones spread over 5-720 Hz. All candidates in a
+file have the same DM, so no DM-distance rejection is applied; inspect
+harmonic associations before choosing to remove them. Flagging takes 0.2 s
+for 10^4 representatives and 4 s for 10^5.
 
 Removal affects the folding list, while `/clusters` retains flagged rows.
 The optional count limit is applied last, in decreasing S/N order. Neither

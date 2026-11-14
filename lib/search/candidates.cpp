@@ -288,6 +288,16 @@ void CandidateOptions::validate() const {
         throw std::invalid_argument(
             "harmonic denominator must be in [1, 10000]");
     }
+    if (!utils::is_finite(harmonic_doppler_tolerance) ||
+        harmonic_doppler_tolerance < 0 || harmonic_doppler_tolerance >= 0.1) {
+        throw std::invalid_argument(
+            "harmonic Doppler tolerance must be in [0, 0.1)");
+    }
+    if (!utils::is_finite(harmonic_doppler_min_snr) ||
+        harmonic_doppler_min_snr < 0) {
+        throw std::invalid_argument(
+            "harmonic Doppler minimum S/N must be finite and non-negative");
+    }
     positive(harmonic_phase_distance,
              "harmonic phase distance must be positive");
     positive(harmonic_snr_distance, "harmonic S/N distance must be positive");
@@ -769,77 +779,117 @@ std::uint64_t CandidateClusterer::cluster_id(std::uint64_t provisional) const {
                : provisional;
 }
 
+void CandidateClusterer::flag_harmonic_families() {
+    const auto max_order = m_options.harmonic_denominator_max;
+    // The reduced ratios p/q, simplest (smallest p * q) first.
+    struct Ratio {
+        std::uint32_t p;
+        std::uint32_t q;
+        double value;
+    };
+    std::vector<Ratio> ratios;
+    for (std::uint32_t p = 1; p <= max_order; ++p) {
+        for (std::uint32_t q = 1; q <= max_order; ++q) {
+            if (std::gcd(p, q) == 1) {
+                ratios.push_back({p, q, static_cast<double>(p) / q});
+            }
+        }
+    }
+    std::ranges::sort(ratios, [](const Ratio& a, const Ratio& b) {
+        const auto oa = static_cast<std::uint64_t>(a.p) * a.q;
+        const auto ob = static_cast<std::uint64_t>(b.p) * b.q;
+        return oa != ob ? oa < ob : a.value < b.value;
+    });
+    // The track test needs |f - r f_parent| * T / 2 <= limit * n^2 (Markov's
+    // inequality: a degree-n polynomial with p(0) = 0 spans at least
+    // |p'(0)| / n^2 on [-1, 1]), and limit <= harmonic_phase_distance (duty
+    // cycles are at most 1).
+    constexpr auto kDegree = static_cast<double>(
+        std::tuple_size_v<decltype(Candidate{}.derivatives)>);
+    const double track_window =
+        2 * m_options.harmonic_phase_distance * kDegree * kDegree / m_tobs;
+    const double doppler_tol = m_options.harmonic_doppler_tolerance;
+    // Roots so far by frequency (index into clusters).
+    std::multimap<double, std::size_t> roots;
+    for (std::size_t h = 0; h < clusters.size(); ++h) {
+        loki::check_interrupt();
+        auto& child     = clusters[h];
+        const auto& hc  = child.representative;
+        const double fh = hc.derivatives[0];
+        const double window =
+            std::max(track_window, doppler_tol > 0 ? doppler_tol * fh : 0.0);
+        std::uint64_t best_order = 0;
+        std::size_t best_parent  = 0;
+        const Ratio* best_ratio  = nullptr;
+        for (const auto& r : ratios) {
+            const auto order = static_cast<std::uint64_t>(r.p) * r.q;
+            if (best_ratio != nullptr && order > best_order) {
+                break;
+            }
+            const auto lo = roots.lower_bound((fh - window) / r.value);
+            const auto hi = roots.upper_bound((fh + window) / r.value);
+            for (auto it = lo; it != hi; ++it) {
+                const std::size_t f = it->second;
+                if (best_ratio != nullptr && f >= best_parent) {
+                    continue;
+                }
+                const auto& fc = clusters[f].representative;
+                // A harmonic is not stronger than its parent.
+                if (hc.snr > fc.snr + m_options.harmonic_snr_distance) {
+                    continue;
+                }
+                const double df = std::abs(fh - (r.value * fc.derivatives[0]));
+                bool related    = false;
+                if (doppler_tol > 0 &&
+                    fc.snr >= m_options.harmonic_doppler_min_snr &&
+                    df <= doppler_tol * fh) {
+                    // Only an unambiguous ratio: with large orders some p/q
+                    // lies within the window of almost any frequency.
+                    const double ratio      = fh / fc.derivatives[0];
+                    std::uint32_t in_window = 0;
+                    for (std::uint32_t q = 1; q <= max_order; ++q) {
+                        const double pr = std::round(ratio * q);
+                        if (pr >= 1 && pr <= max_order &&
+                            std::gcd(static_cast<std::uint32_t>(pr), q) == 1 &&
+                            std::abs((pr / q) - ratio) <= doppler_tol * ratio) {
+                            ++in_window;
+                        }
+                    }
+                    related = in_window == 1;
+                }
+                if (!related) {
+                    const double duty = fh >= fc.derivatives[0]
+                                            ? hc.duty_cycle()
+                                            : fc.duty_cycle();
+                    const double limit =
+                        m_options.harmonic_phase_distance * duty;
+                    related =
+                        df * (m_tobs / 2) <= limit * kDegree * kDegree &&
+                        phase_span(fc, hc, m_tobs, r.value, limit) <= limit;
+                }
+                if (related) {
+                    best_order  = order;
+                    best_parent = f;
+                    best_ratio  = &r;
+                }
+            }
+        }
+        if (best_ratio != nullptr) {
+            child.parent_cluster_id    = static_cast<std::int64_t>(best_parent);
+            child.harmonic_numerator   = best_ratio->p;
+            child.harmonic_denominator = best_ratio->q;
+        } else {
+            roots.emplace(fh, h);
+        }
+    }
+}
+
 void CandidateClusterer::finish() {
     if (m_options.cluster && m_options.grouping == "transitive") {
         finish_transitive();
     }
     if (m_options.flag_harmonics) {
-        // Every pair of clusters, times every denominator: quadratic.
-        const double pairs = 0.5 * static_cast<double>(clusters.size()) *
-                             static_cast<double>(clusters.size());
-        const double work =
-            pairs * static_cast<double>(m_options.harmonic_denominator_max);
-        if (work > 1e10) {
-            spdlog::warn("Harmonic flagging compares {} clusters pairwise "
-                         "with denominators up to {} (~{:.1e} steps); this "
-                         "may take hours. Lower harmonic_denominator_max or "
-                         "snr_min, or disable flag_harmonics.",
-                         clusters.size(), m_options.harmonic_denominator_max,
-                         work);
-        }
-        for (std::size_t h = 0; h < clusters.size(); ++h) {
-            loki::check_interrupt();
-            auto& child    = clusters[h];
-            const auto& hc = child.representative;
-            for (std::size_t f = 0; f < h; ++f) {
-                const auto& parent = clusters[f];
-                if (parent.parent_cluster_id >= 0) {
-                    continue;
-                }
-                const auto& fc     = parent.representative;
-                const double ratio = hc.derivatives[0] / fc.derivatives[0];
-                std::uint32_t pn   = 0;
-                std::uint32_t qn   = 1;
-                double best        = std::numeric_limits<double>::max();
-                for (std::uint32_t q = 1;
-                     q <= m_options.harmonic_denominator_max; ++q) {
-                    const double p = std::round(ratio * q);
-                    if (p < 1 ||
-                        p > std::numeric_limits<std::uint32_t>::max()) {
-                        continue;
-                    }
-                    const double error = std::abs(p / q - ratio);
-                    if (error < best) {
-                        best = error;
-                        pn   = static_cast<std::uint32_t>(p);
-                        qn   = q;
-                    }
-                }
-                if (pn == 0 || pn == qn) {
-                    continue;
-                }
-                const auto divisor = std::gcd(pn, qn);
-                pn /= divisor;
-                qn /= divisor;
-                const double expected =
-                    fc.snr / std::sqrt(static_cast<double>(pn) * qn);
-                if (std::abs(hc.snr - expected) >
-                    m_options.harmonic_snr_distance) {
-                    continue;
-                }
-                const double duty = hc.derivatives[0] >= fc.derivatives[0]
-                                        ? hc.duty_cycle()
-                                        : fc.duty_cycle();
-                if (phase_span(fc, hc, m_tobs, static_cast<double>(pn) / qn) /
-                        duty <=
-                    m_options.harmonic_phase_distance) {
-                    child.parent_cluster_id    = static_cast<std::int64_t>(f);
-                    child.harmonic_numerator   = pn;
-                    child.harmonic_denominator = qn;
-                    break;
-                }
-            }
-        }
+        flag_harmonic_families();
     }
     std::uint64_t selected = 0;
     for (auto& cluster : clusters) {

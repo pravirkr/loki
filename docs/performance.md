@@ -157,9 +157,17 @@ assignment, phase extents). The bit-identity to the previous implementation
 was verified by fingerprint when the fix was made; that pattern is platform-
 specific (it differs on a no-FMA clang build), so it is not asserted in CI.
 
-If cluster counts grow into the thousands, the harmonic flagging loop in
-`CandidateClusterer::finish` (clusters² × `harmonic_denominator_max`, with a
-span computation inside) is the next cliff; the same two fixes apply.
+Harmonic flagging (`CandidateClusterer::flag_harmonic_families`) keeps the
+roots in a frequency-ordered index and looks up, for each representative and
+each reduced ratio `p/q` (simplest first), only the roots whose frequency
+can pass: the Doppler window, or the track window from Markov's inequality (a
+degree-n phase polynomial with p(0) = 0 spans at least |p'(0)| / n^2), so
+the phase-track span is computed for few pairs. Measured 2026-11-14 on
+synthetic unrelated representatives over 5-720 Hz (T = 5000 s, orders up to
+16, CPU): the pairwise loop over every root and every q took 10.5 s for 10^4
+(6.2 s with the span's early rejection, 3.9 s with the Markov bound before
+it); the index takes 0.19 s for 10^4 and 4.2 s for 10^5, with the same
+flags.
 
 ### Per-run reduction of EP final leaves
 

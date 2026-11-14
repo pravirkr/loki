@@ -2633,13 +2633,22 @@ int main(int argc, char** argv) {
     grp_candidates->add_option(
         "--harmonic-denominator-max",
         ffa_cfg.candidates.harmonic_denominator_max,
-        "Maximum rational harmonic denominator (default: 100)");
+        "Largest numerator and denominator of a harmonic ratio (default: 16)");
     grp_candidates->add_option("--harmonic-phase-distance",
                                ffa_cfg.candidates.harmonic_phase_distance,
                                "Harmonic track tolerance in pulse widths");
-    grp_candidates->add_option("--harmonic-snr-distance",
-                               ffa_cfg.candidates.harmonic_snr_distance,
-                               "Harmonic S/N agreement tolerance");
+    grp_candidates->add_option(
+        "--harmonic-snr-distance", ffa_cfg.candidates.harmonic_snr_distance,
+        "How far a harmonic's S/N may exceed its parent's");
+    grp_candidates->add_option(
+        "--harmonic-doppler-tolerance",
+        ffa_cfg.candidates.harmonic_doppler_tolerance,
+        "Fractional frequency within which a bright parent takes a harmonic "
+        "without a track test (bright binaries, e.g. 3e-4); 0 disables "
+        "(default: 0)");
+    grp_candidates->add_option("--harmonic-doppler-min-snr",
+                               ffa_cfg.candidates.harmonic_doppler_min_snr,
+                               "Minimum parent S/N for that (default: 20)");
     grp_candidates->add_option(
         "--max-per-cell", ffa_cfg.candidates.max_per_cell,
         "Strongest trials kept per frequency cell of each run or region "
@@ -2862,13 +2871,22 @@ int main(int argc, char** argv) {
     ep_grp_candidates->add_option(
         "--harmonic-denominator-max",
         ep_cfg.candidates.harmonic_denominator_max,
-        "Maximum rational harmonic denominator (default: 100)");
+        "Largest numerator and denominator of a harmonic ratio (default: 16)");
     ep_grp_candidates->add_option("--harmonic-phase-distance",
                                   ep_cfg.candidates.harmonic_phase_distance,
                                   "Harmonic track tolerance in pulse widths");
-    ep_grp_candidates->add_option("--harmonic-snr-distance",
-                                  ep_cfg.candidates.harmonic_snr_distance,
-                                  "Harmonic S/N agreement tolerance");
+    ep_grp_candidates->add_option(
+        "--harmonic-snr-distance", ep_cfg.candidates.harmonic_snr_distance,
+        "How far a harmonic's S/N may exceed its parent's");
+    ep_grp_candidates->add_option(
+        "--harmonic-doppler-tolerance",
+        ep_cfg.candidates.harmonic_doppler_tolerance,
+        "Fractional frequency within which a bright parent takes a harmonic "
+        "without a track test (bright binaries, e.g. 3e-4); 0 disables "
+        "(default: 0)");
+    ep_grp_candidates->add_option("--harmonic-doppler-min-snr",
+                                  ep_cfg.candidates.harmonic_doppler_min_snr,
+                                  "Minimum parent S/N for that (default: 20)");
     ep_grp_candidates->add_option(
         "--max-per-cell", ep_cfg.candidates.max_per_cell,
         "Strongest trials kept per frequency cell of each run or region "

@@ -1108,6 +1108,10 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                    options.harmonic_phase_distance);
             config.createAttribute("harmonic_snr_distance",
                                    options.harmonic_snr_distance);
+            config.createAttribute("harmonic_doppler_tolerance",
+                                   options.harmonic_doppler_tolerance);
+            config.createAttribute("harmonic_doppler_min_snr",
+                                   options.harmonic_doppler_min_snr);
             config.createAttribute("max_per_cell", options.max_per_cell);
             config.createAttribute("cell_bins", options.cell_bins);
             config.createAttribute("cell_log_width", options.cell_log_width);

@@ -24,9 +24,21 @@ struct CandidateOptions {
     bool retain_detections{true};
     bool flag_harmonics{false};
     bool remove_harmonics{false};
-    std::uint32_t harmonic_denominator_max{100};
+    /// Largest numerator and denominator of a harmonic ratio p/q.
+    std::uint32_t harmonic_denominator_max{16};
+    /// Scaled phase tracks of a harmonic and its parent agree within this
+    /// many pulse widths (of the faster one).
     double harmonic_phase_distance{1.0};
+    /// A harmonic's S/N exceeds its parent's by at most this.
     double harmonic_snr_distance{3.0};
+    /// A parent of at least harmonic_doppler_min_snr also takes a child
+    /// whose frequency is within this fraction of p/q times its own, with no
+    /// track test: a binary's harmonics stay in ratio while its orbit curves
+    /// their tracks beyond the search's order. Zero (the default) disables
+    /// it; 3e-4 covers 90 km/s. Enable it only with few bright parents: each
+    /// covers about 2% of the frequencies of a 5-720 Hz search.
+    double harmonic_doppler_tolerance{0.0};
+    double harmonic_doppler_min_snr{20.0};
     /// Keep at most this many of the strongest trials in each frequency
     /// cell of each source (EP run or FFA region), before grouping. Zero
     /// keeps every trial.
