@@ -116,6 +116,12 @@ so a CUDA search does not spend its single host core on it.
      `"zero"` about 0 and `"phase_kept"` about 1 - 1/e = 0.63. The CLI logs every band, and warns when a noise zap
      with at least 64 bins in a band is off by more than
      max(0.1, 3 / sqrt(bins)).
+     On real data the lowest band (0-10 Hz) can read a few percent low with
+     a correct fill. There the unflagged bins also carry red noise and weak
+     lines the zap leaves alone, which raise their mean above the noise
+     level that the fill follows. On one such series the band read 0.92,
+     while the zapped bins sat at 1.01 of their whitened neighbourhood and
+     the unflagged bins averaged 1.05 (1.11 at 1-3 Hz).
 5. **Output.**
    - Samples with `|T - mu| > clip_sigma * sigma` are zeroed.
    - Masked samples are zeroed.
