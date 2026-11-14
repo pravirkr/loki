@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up the simulated H100 and CUDA toolkit
-        uses: pantheongpu/setup-pantheonsim@68edfd58c091361dd6baf060b63de412e544d858 # v0.1.7
+        uses: pantheongpu/setup-pantheonsim@a1b9d4237411f9b2b0e0bb895b4d83377f336a7b # v0.1.9
         with:
           gpu: nvidia/h100
           cuda-toolkit: "13.0"
@@ -84,16 +84,13 @@ jobs:
       # Runs every test labelled cuda (the CUDA kernels, the CPU/CUDA parity
       # checks and the CUDA workspace tests). Excluded: the CUDA window-beam
       # test, which takes about 4 minutes on a real GPU and over 25 minutes on
-      # the simulator, and "Fused EP shift-add + score matches the unfused
-      # chain", which hits a simulator bug (an out-of-bounds shared-memory
-      # read in the sm_90 code; it passes on a real GPU). A CUDA test that
-      # skips (SKIP() in a build without CUDA) fails the step, so a broken
-      # CUDA build cannot pass as green.
+      # the simulator. A CUDA test that skips (SKIP() in a build without CUDA)
+      # fails the step, so a broken CUDA build cannot pass as green.
       - name: Test on the simulated H100
         run: |
           set -o pipefail
           vgpu run --gpu nvidia/h100 ctest --preset ci -L cuda -j2 \
-            -E '^(Window beam resolves issue #15 on CUDA|Fused EP shift-add \+ score matches the unfused chain)' \
+            -E '^Window beam resolves issue #15 on CUDA' \
             | tee ctest.log
           if grep -q 'Skipped' ctest.log; then
             echo "::error::CUDA tests were skipped"
