@@ -49,6 +49,7 @@
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/search/provenance.hpp"
+#include "loki/search/refold.hpp"
 #include "loki/simulation/configs.hpp"
 #include "loki/simulation/modulate.hpp"
 #include "loki/simulation/pulse.hpp"
@@ -1404,10 +1405,11 @@ std::string inspect_json(const loki::io::CandidateFileSummary& s,
                                   json_number(row.params[p]));
         }
         rows += fmt::format(
-            "{}\n    {{\"rank\": {}, \"row\": {}, \"snr\": {}, \"params\": "
-            "{{{}}}, \"width\": {}, \"nbins\": {}, \"source\": {}}}",
-            i == 0 ? "" : ",", i + 1, row.row, json_number(row.snr), params,
-            row.width, row.nbins, json_string(row.source));
+            "{}\n    {{\"rank\": {}, \"row\": {}, \"id\": {}, \"snr\": {}, "
+            "\"params\": {{{}}}, \"width\": {}, \"nbins\": {}, "
+            "\"source\": {}}}",
+            i == 0 ? "" : ",", i + 1, row.row, row.id, json_number(row.snr),
+            params, row.width, row.nbins, json_string(row.source));
     }
     if (s.n_harvested_sources > 0) {
         std::string harvested;
@@ -1685,6 +1687,358 @@ int run_inspect(const std::filesystem::path& path,
     const auto summary = loki::io::read_candidate_file_summary(path, top_n);
     loki::cli::Console::print(json ? inspect_json(summary, with_profile)
                                    : inspect_text(summary, with_profile));
+    return 0;
+}
+
+/// `loki refold` inputs.
+struct RefoldCli {
+    std::filesystem::path series;
+    std::filesystem::path result;
+    std::vector<std::uint64_t> ids;
+    std::size_t top{0};
+    std::filesystem::path config;
+    std::vector<double> freqs;
+    std::optional<double> fd;
+    std::optional<double> acc;
+    std::optional<double> fdd;
+    std::optional<double> jerk;
+    double snap{0.0};
+    double crackle{0.0};
+    bool circular{false};
+    bool no_preprocess{false};
+    bool json{false};
+    bool profile{false};
+    int threads{0};
+    loki::search::RefoldOptions options;
+};
+
+/// One thing to refold and where it came from.
+struct RefoldItem {
+    std::string label;
+    loki::search::RefoldTarget target;
+    std::optional<loki::io::CandidateRow> candidate;
+};
+
+/// Preprocessing of a refold: the search configuration's (a result file's
+/// config_effective, or -c), else the defaults.
+struct RefoldSetup {
+    bool preprocess{true};
+    loki::io::PreprocessOptions options;
+    double propagator_significance{2.0};
+    std::string source{"defaults"};
+};
+
+/// @p algorithm "ep" or "ffa" reads the configuration as that search's;
+/// empty tries EP, then FFA.
+RefoldSetup refold_setup(const std::optional<std::string>& text,
+                         std::string source,
+                         std::string_view algorithm) {
+    RefoldSetup setup;
+    if (!text || text->empty()) {
+        return setup;
+    }
+    std::string error;
+    if (algorithm != "ffa") {
+        try {
+            const auto cfg   = loki::search::EPTomlConfig::from_string(*text);
+            setup.preprocess = cfg.preprocess;
+            setup.options    = cfg.to_preprocess_options();
+            setup.propagator_significance = cfg.propagator_significance;
+            setup.source                  = std::move(source);
+            return setup;
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    }
+    if (algorithm != "ep") {
+        try {
+            const auto cfg   = loki::search::FFATomlConfig::from_string(*text);
+            setup.preprocess = cfg.preprocess;
+            setup.options    = cfg.to_preprocess_options();
+            setup.source     = std::move(source);
+            return setup;
+        } catch (const std::exception& e) {
+            if (error.empty()) {
+                error = e.what();
+            }
+        }
+    }
+    throw std::invalid_argument(fmt::format(
+        "cannot read the search configuration ({}): {}\nPass the search's "
+        "configuration, updated to this version, with -c",
+        source, error));
+}
+
+/// The target of a candidate row: its leaf with the search's model (EP), or
+/// the Taylor polynomial of its native parameters (FFA).
+loki::search::RefoldTarget candidate_target(const loki::io::CandidateRow& row,
+                                            std::size_t nparams,
+                                            double propagator_significance) {
+    if (!row.leaf.empty()) {
+        return {.leaf                    = row.leaf,
+                .n_params                = nparams,
+                .model                   = loki::search::RefoldModel::kLeaf,
+                .propagator_significance = propagator_significance};
+    }
+    // Below five parameters the leaf model is the Taylor polynomial; a
+    // five-parameter leaf may be an orbit, which its values alone do not say.
+    if (nparams >= 5) {
+        throw std::invalid_argument(fmt::format(
+            "the result file does not keep the leaf of candidate {}, needed "
+            "for the five-parameter phase model; refold its parameters with "
+            "--f ... --circular",
+            row.id));
+    }
+    // Native order [..., jerk, accel, freq]; derivatives from accel up.
+    std::vector<double> derivs(row.params.rbegin() + 1, row.params.rend());
+    return loki::search::refold_taylor_target(row.params.back(), derivs);
+}
+
+std::string
+refold_json(const RefoldCli& cli,
+            loki::SizeType nsamps,
+            double tsamp,
+            double t_ref,
+            const RefoldSetup& setup,
+            const std::vector<RefoldItem>& items,
+            const std::vector<loki::search::RefoldResult>& results) {
+    std::string out = "{\n";
+    out += fmt::format("  \"series\": {},\n", json_string(cli.series.string()));
+    out += fmt::format("  \"result_file\": {},\n",
+                       cli.result.empty() ? "null"
+                                          : json_string(cli.result.string()));
+    out +=
+        fmt::format("  \"nsamps\": {},\n  \"tsamp\": {},\n  \"t_ref\": {},\n",
+                    nsamps, json_number(tsamp), json_number(t_ref));
+    out += fmt::format("  \"preprocessing\": {},\n",
+                       json_string(setup.preprocess ? setup.source : "off"));
+    out += "  \"targets\": [\n";
+    const auto list = [](const auto& values) {
+        std::string text = "[";
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            text += fmt::format("{}{}", i == 0 ? "" : ", ",
+                                json_number(static_cast<double>(values[i])));
+        }
+        return text + "]";
+    };
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto& item = items[i];
+        const auto& r    = results[i];
+        const double f   = r.freq + r.df;
+        const double fd  = r.fdot + r.dfd;
+        out += "    {";
+        out += fmt::format("\"label\": {}, ", json_string(item.label));
+        if (item.candidate) {
+            out += fmt::format(
+                "\"id\": {}, \"search_snr\": {}, \"search_nbins\": {}, "
+                "\"search_width\": {}, \"source\": {}, ",
+                item.candidate->id, json_number(item.candidate->snr),
+                item.candidate->nbins, item.candidate->width,
+                json_string(item.candidate->source));
+        }
+        out += fmt::format(
+            "\"model\": {}, \"nbins\": {}, \"freq\": {}, \"fdot\": {}, "
+            "\"snr_in\": {}, \"width_in\": {}, \"snr\": {}, \"width\": {}, "
+            "\"start_bin\": {}, \"f_best\": {}, \"fdot_best\": {}, "
+            "\"accel_best\": {}, \"split_snr\": {}, \"split_start_bin\": {}",
+            json_string(r.model), r.nbins, json_number(r.freq),
+            json_number(r.fdot), json_number(r.snr_in), r.width_in,
+            json_number(r.snr), r.width, r.start_bin, json_number(f),
+            json_number(fd), json_number(-fd / f * 299792458.0),
+            list(r.split_snr), list(r.split_start_bin));
+        if (cli.profile) {
+            out += fmt::format(", \"profile\": {}", list(r.profile));
+        }
+        out += i + 1 == items.size() ? "}\n" : "},\n";
+    }
+    return out + "  ]\n}\n";
+}
+
+std::string
+refold_text(const RefoldCli& cli,
+            loki::SizeType nsamps,
+            loki::SizeType nsamps_file,
+            double tsamp,
+            double t_ref,
+            const RefoldSetup& setup,
+            const std::vector<RefoldItem>& items,
+            const std::vector<loki::search::RefoldResult>& results) {
+    const auto& con = loki::cli::Console::get();
+    std::string out = con.heading(fmt::format("Refold of {}",
+                                              cli.series.filename().string())) +
+                      "\n";
+    out += fmt::format(
+        "  {} of {} samples, tsamp {:.6e} s, T {:.2f} s, t_ref {:.3f} s, "
+        "preprocessing: {}, nsub {}\n",
+        nsamps, nsamps_file, tsamp, static_cast<double>(nsamps) * tsamp, t_ref,
+        setup.preprocess ? setup.source : "off", cli.options.nsub);
+    out += con.muted("  S/N: best boxcar (widths 1..nbins/2) of the refold; a "
+                     "rejection test only (noise also refolds near its "
+                     "search S/N)") +
+           "\n\n";
+    out += con.header(fmt::format(
+               "  {:<24} {:>8} {:>13} {:>7} {:>14} {:>11} {:>9} {:>7} {:>7}  "
+               "{}",
+               "target", "model", "f_in", "S/N_in", "f_best", "fd_best",
+               "acc_best", "S/N", "w/nb", "search S/N w/nb")) +
+           "\n";
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto& item        = items[i];
+        const auto& r           = results[i];
+        const double f          = r.freq + r.df;
+        const double fd         = r.fdot + r.dfd;
+        std::string search_cols = "-";
+        if (item.candidate) {
+            search_cols =
+                fmt::format("{:.2f} {}/{}", item.candidate->snr,
+                            item.candidate->width, item.candidate->nbins);
+        }
+        const auto model = r.model == "taylor"          ? "taylor"
+                           : r.model == "circular_snap" ? "circ_s"
+                                                        : "circ_c";
+        out += fmt::format(
+            "  {:<24} {:>8} {:13.6f} {:7.2f} {:14.7f} {:11.3e} {:9.3f} {} "
+            "{:>7}  {}\n",
+            item.label, model, r.freq, r.snr_in, f, fd, -fd / f * 299792458.0,
+            con.score(fmt::format("{:7.2f}", r.snr)),
+            fmt::format("{}/{}", r.width, r.nbins), search_cols);
+        if (!r.split_snr.empty()) {
+            std::string parts;
+            for (std::size_t j = 0; j < r.split_snr.size(); ++j) {
+                parts += fmt::format(" {:.2f}@{}", r.split_snr[j],
+                                     r.split_start_bin[j]);
+            }
+            out += con.muted(fmt::format(
+                       "    split {} (S/N@start bin; full start bin {}, "
+                       "width {}):{}",
+                       r.split_snr.size(), r.start_bin, r.width, parts)) +
+                   "\n";
+        }
+        if (cli.profile) {
+            std::string prof;
+            for (const float x : r.profile) {
+                prof += fmt::format(" {:5.1f}", x);
+            }
+            out += con.muted("    profile:" + prof) + "\n";
+        }
+    }
+    return out;
+}
+
+int run_refold(RefoldCli cli) {
+    const int nthreads = cli.threads > 0 ? cli.threads : omp_get_max_threads();
+    cli.options.nthreads = nthreads;
+
+    // Targets, and the configuration of the search that found them.
+    std::optional<std::string> config_text;
+    std::string config_source;
+    if (!cli.config.empty()) {
+        std::ifstream in(cli.config);
+        if (!in) {
+            throw std::invalid_argument(
+                fmt::format("cannot read {}", cli.config.string()));
+        }
+        config_text   = std::string(std::istreambuf_iterator<char>(in), {});
+        config_source = cli.config.filename().string();
+    }
+    loki::io::CandidateFileSummary summary;
+    std::vector<loki::io::CandidateRow> rows;
+    if (!cli.result.empty()) {
+        for (const auto id : cli.ids) {
+            rows.push_back(
+                loki::io::read_candidate_by_id(cli.result, id, &summary));
+        }
+        if (cli.top > 0) {
+            summary =
+                loki::io::read_candidate_file_summary(cli.result, cli.top);
+            rows.insert(rows.end(), summary.top.begin(), summary.top.end());
+        }
+        if (cli.ids.empty() && cli.top == 0) {
+            throw std::invalid_argument("--result needs --id or --top");
+        }
+        if (!config_text) {
+            config_text   = summary.config_effective ? summary.config_effective
+                                                     : summary.config_toml;
+            config_source = "the result file's configuration";
+        }
+    } else if (!cli.ids.empty() || cli.top > 0) {
+        throw std::invalid_argument("--id and --top need --result");
+    }
+    auto setup = refold_setup(config_text, config_source,
+                              cli.config.empty() ? summary.algorithm : "");
+    if (cli.no_preprocess) {
+        setup.preprocess = false;
+    }
+
+    std::vector<RefoldItem> items;
+    for (const auto& row : rows) {
+        items.push_back(
+            {.label     = fmt::format("id {}", row.id),
+             .target    = candidate_target(row, summary.param_names.size(),
+                                           setup.propagator_significance),
+             .candidate = row});
+    }
+    for (const double f : cli.freqs) {
+        const double accel =
+            cli.acc ? *cli.acc : -cli.fd.value_or(0.0) * 299792458.0 / f;
+        const double jerk =
+            cli.jerk ? *cli.jerk : -cli.fdd.value_or(0.0) * 299792458.0 / f;
+        const std::array<double, 4> derivs{accel, jerk, cli.snap, cli.crackle};
+        items.push_back(
+            {.label     = fmt::format("f {:.6f}", f),
+             .target    = cli.circular
+                              ? loki::search::refold_circular_target(
+                                    f, derivs, setup.propagator_significance)
+                              : loki::search::refold_taylor_target(f, derivs),
+             .candidate = std::nullopt});
+    }
+    if (items.empty()) {
+        throw std::invalid_argument(
+            "nothing to refold: give --f, or --result with --id or --top");
+    }
+
+    // The series, preprocessed as the search did, over the searched span.
+    loki::io::ReadOptions read_opts;
+    read_opts.preprocess = false;
+    read_opts.nthreads   = nthreads;
+    auto ts              = loki::io::TimeSeries::read(cli.series, read_opts);
+    if (setup.preprocess) {
+        static_cast<void>(
+            ts.preprocess(setup.options, loki::Exec::cpu(nthreads)));
+    }
+    const double tsamp = ts.get_dt();
+    auto nsamps        = ts.get_nsamps();
+    double t_ref       = static_cast<double>(nsamps) * tsamp / 2.0;
+    if (!cli.result.empty()) {
+        if (summary.tsamp > 0.0 &&
+            std::abs(summary.tsamp - tsamp) > 1e-9 * tsamp) {
+            throw std::invalid_argument(fmt::format(
+                "the series has tsamp {} s but the result file {} s", tsamp,
+                summary.tsamp));
+        }
+        if (summary.nsamps > nsamps) {
+            throw std::invalid_argument(fmt::format(
+                "the result file searched {} samples but the series has {}",
+                summary.nsamps, nsamps));
+        }
+        if (summary.nsamps > 0) {
+            nsamps = summary.nsamps;
+        }
+        t_ref = summary.reference_time;
+    }
+
+    std::vector<loki::search::RefoldResult> results;
+    results.reserve(items.size());
+    const auto e = std::span<const float>(ts.get_ts_e()).first(nsamps);
+    const auto v = std::span<const float>(ts.get_ts_v()).first(nsamps);
+    for (const auto& item : items) {
+        results.push_back(
+            loki::search::refold(e, v, tsamp, t_ref, item.target, cli.options));
+    }
+    loki::cli::Console::print(
+        cli.json ? refold_json(cli, nsamps, tsamp, t_ref, setup, items, results)
+                 : refold_text(cli, nsamps, ts.get_nsamps(), tsamp, t_ref,
+                               setup, items, results));
     return 0;
 }
 
@@ -2298,9 +2652,92 @@ int main(int argc, char** argv) {
     inspect->add_flag("--json", inspect_json,
                       "Write the summary as JSON to stdout");
 
+    // =========================================================================
+    // Subcommand: refold
+    // =========================================================================
+    auto* refold = app.add_subcommand(
+        "refold",
+        "Refold a series at a candidate's parameters and scan a local f "
+        "(and fdot) grid: S/N with the search's preprocessing and phase "
+        "model. A rejection test; noise also refolds near its search S/N");
+    RefoldCli refold_cli;
+    refold
+        ->add_option("series", refold_cli.series,
+                     "The searched timeseries (.tim or .dat)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    auto* grp_refold_target = refold->add_option_group("Target");
+    grp_refold_target
+        ->add_option("--result", refold_cli.result,
+                     "Result file of the search: candidates by --id or "
+                     "--top, its configuration's preprocessing, searched "
+                     "span and reference time")
+        ->check(CLI::ExistingFile);
+    grp_refold_target->add_option(
+        "--id", refold_cli.ids,
+        "Candidate id(s) in --result (EP: run << 32 | leaf)");
+    grp_refold_target->add_option("--top", refold_cli.top,
+                                  "The strongest N candidates of --result");
+    grp_refold_target->add_option("--f", refold_cli.freqs,
+                                  "Frequency (Hz) at the series midpoint; "
+                                  "several share the derivatives below");
+    auto* opt_refold_fd = grp_refold_target->add_option(
+        "--fd", refold_cli.fd, "Frequency derivative (Hz/s)");
+    grp_refold_target
+        ->add_option("--acc", refold_cli.acc, "Acceleration (m/s^2)")
+        ->excludes(opt_refold_fd);
+    auto* opt_refold_fdd = grp_refold_target->add_option(
+        "--fdd", refold_cli.fdd, "Second frequency derivative (Hz/s^2)");
+    grp_refold_target->add_option("--jerk", refold_cli.jerk, "Jerk (m/s^3)")
+        ->excludes(opt_refold_fdd);
+    grp_refold_target->add_option("--snap", refold_cli.snap, "Snap (m/s^4)");
+    grp_refold_target->add_option("--crackle", refold_cli.crackle,
+                                  "Crackle (m/s^5)");
+    grp_refold_target->add_flag(
+        "--circular", refold_cli.circular,
+        "Fold --f targets as the five-parameter search does: a circular "
+        "orbit when snap and accel (else crackle and jerk) imply one");
+    auto* grp_refold_grid = refold->add_option_group("Grid and scoring");
+    grp_refold_grid->add_option(
+        "--nbins", refold_cli.options.nbins,
+        "Phase bins (default: min(64, max(8, samples per period)))");
+    grp_refold_grid->add_option("--nsub", refold_cli.options.nsub,
+                                "Subintegrations (default: 128)");
+    grp_refold_grid->add_option(
+        "--df-steps", refold_cli.options.df_steps,
+        "+- frequency steps (default: cover +- --df-span-t / T)");
+    grp_refold_grid->add_option("--df-span-t", refold_cli.options.df_span_t,
+                                "+- frequency span in units of 1/T "
+                                "(default: 3)");
+    grp_refold_grid->add_option(
+        "--df-step-bins", refold_cli.options.df_step_bins,
+        "Frequency step in units of 1/(nbins T) (default: 0.25)");
+    grp_refold_grid->add_option("--fd-steps", refold_cli.options.fd_steps,
+                                "+- fdot steps (default: 0, no fdot scan)");
+    grp_refold_grid->add_option("--fd-span", refold_cli.options.fd_span,
+                                "+- fdot span (Hz/s)");
+    grp_refold_grid->add_option(
+        "--split", refold_cli.options.split,
+        "Also score the best point in N contiguous time parts");
+    auto* grp_refold_io = refold->add_option_group("Input and output");
+    grp_refold_io
+        ->add_option("-c,--config", refold_cli.config,
+                     "Search configuration whose [preprocessing] to apply "
+                     "(default: the result file's, else the defaults)")
+        ->check(CLI::ExistingFile);
+    grp_refold_io->add_flag("--no-preprocess", refold_cli.no_preprocess,
+                            "Fold the series as read");
+    grp_refold_io->add_option("-t,--threads", refold_cli.threads,
+                              "CPU threads (default: all)");
+    grp_refold_io->add_flag("--profile", refold_cli.profile,
+                            "Print the best profile (signal / sqrt(var))");
+    grp_refold_io->add_flag("--json", refold_cli.json,
+                            "Write the results as JSON to stdout");
+
     simulate->fallthrough();
     search->fallthrough();
     inspect->fallthrough();
+    refold->fallthrough();
     ffa->fallthrough();
     ep->fallthrough();
 
@@ -2389,6 +2826,10 @@ int main(int argc, char** argv) {
         if (inspect->parsed()) {
             return run_inspect(inspect_path, inspect_top, inspect_json,
                                inspect_profile);
+        }
+
+        if (refold->parsed()) {
+            return run_refold(std::move(refold_cli));
         }
 
         if (search->parsed() && ffa->parsed()) {

@@ -23,6 +23,7 @@
 #include "loki/search/configs.hpp"           // IWYU pragma: export
 #include "loki/search/orbit.hpp"             // IWYU pragma: export
 #include "loki/search/provenance.hpp"        // IWYU pragma: export
+#include "loki/search/refold.hpp"            // IWYU pragma: export
 #include "loki/simulation/configs.hpp"       // IWYU pragma: export
 #include "loki/simulation/modulate.hpp"      // IWYU pragma: export
 #include "loki/simulation/pulse.hpp"         // IWYU pragma: export

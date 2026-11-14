@@ -23,6 +23,7 @@
 #include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/candidate_file.hpp"
 #include "loki/search/configs.hpp"
 
 #include "temp_dir.hpp"
@@ -460,6 +461,21 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
         region_nbins.insert(nbins);
     }
     CHECK(region_nbins.size() == 1);
+
+    // A leaf of the raw file is found again by its identity (run << 32 |
+    // leaf), with its (value, error) pairs.
+    const auto summary = loki::io::read_candidate_file_summary(result_file, 1);
+    CHECK(summary.reference_time == Catch::Approx(summary.tobs / 2.0));
+    if (!summary.top.empty()) {
+        const auto& best = summary.top.front();
+        REQUIRE(best.leaf.size() == (summary.param_names.size() + 2) * 2);
+        const auto again = loki::io::read_candidate_by_id(result_file, best.id);
+        CHECK(again.leaf == best.leaf);
+        CHECK(again.params == best.params);
+        CHECK(again.snr == best.snr);
+    }
+    CHECK_THROWS_AS(loki::io::read_candidate_by_id(result_file, ~0ULL),
+                    std::invalid_argument);
 
     // Verify temporary per-chunk directory was cleaned up
     const auto tmp_dir = outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix);

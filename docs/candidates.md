@@ -657,6 +657,57 @@ attribute, so the backend shows as "not recorded". C++ tools get the same
 summary from `loki::io::read_candidate_file_summary`
 (`loki/io/candidate_file.hpp`).
 
+## Refolding a candidate
+
+`loki refold` folds the searched series again at a candidate's parameters
+and scans a small grid around them. It is a **rejection test**: a candidate
+whose refold falls far below its search S/N was scored on a favourable
+path through the noise. It never confirms one: a pure-noise candidate also
+refolds near its search S/N, so a refold that agrees says nothing about
+whether it is a pulsar.
+
+```bash
+# Candidates of a search: by id, or the strongest N
+loki refold series.dat --result run_ep_results.h5 --id 12
+loki refold series.dat --result run_ep_results.h5 --top 5 --split 4
+# Parameters at the series midpoint (accel/jerk/snap/crackle, or fd/fdd)
+loki refold series.dat --f 141.0 --acc 5.0 --jerk -0.001 -c search.toml
+loki refold series.dat --f 141.0 --acc 30 --jerk 0.2 --snap -1e-4 --crackle 1e-6 --circular
+```
+
+With `--result`, the series is preprocessed as the search did (the file's
+`config_effective`, or `-c`), cut to the searched samples, and folded at
+the file's reference time. An EP candidate is folded with the phase model
+the search propagated its leaf with (`psr_utils::leaf_phase`, from the
+leaf and its errors that the run keeps): in a five-parameter search, a
+circular orbit where its terms are significant. An FFA candidate, and a
+`--f` target, is folded with the Taylor polynomial of its derivatives;
+`--circular` folds a `--f` target as a five-parameter search would. A
+candidate's id is the `id` column of the candidate table (`loki inspect
+--json` lists it); in a raw EP file
+(`--no-candidates`) it is `run << 32 | leaf`, with the runs numbered by
+chunk and run name, the same numbers the candidate products use.
+
+The fold follows the reference implementation of the analysis pipeline:
+the series is split into `--nsub` (128) subintegrations, each folded
+exactly at the target phase (sample i at time i * tsamp, its start, as the
+search's brute fold), and frequency offsets (`--df-span-t`, +-3 / T, in
+steps of `--df-step-bins` / (nbins T), 0.25) and optionally fdot offsets
+(`--fd-steps`, `--fd-span`) shift the subintegrations before they are
+summed. S/N is the best boxcar, widths 1 to nbins/2, of sum(signal) /
+sqrt(sum(variance)), with nbins min(64, max(8, samples per period)) unless
+`--nbins` is given. This is not the search's scoring (its widths and
+nbins), so the output shows the search S/N, width and nbins next to the
+refold. `--split N` also scores the best point in N contiguous parts of
+the observation (a pulsar is present in each; a short burst is not).
+`--json` writes the results for pipelines.
+
+The refold runs on the CPU. A search on a GPU preprocesses on the device,
+so a refold of its data can differ from the search's input at float level.
+In Python, `libloki.fold.refold(ts_e, ts_v, tsamp, t_ref, leaf, ...)` runs
+the same fold on a preprocessed series; C++ tools use `loki::search::refold`
+(`loki/search/refold.hpp`) and `loki::io::read_candidate_by_id`.
+
 ## PulsarX conversion
 
 ```bash

@@ -743,4 +743,20 @@ TEST_CASE("EP candidates publish an RFI-controlled sweep",
     REQUIRE_FALSE(summary.harvested.empty());
     CHECK(std::abs(summary.harvested.front().params.back() - kHarvested) <
           0.05);
+    // The top candidate is found again by its identity, with the leaf of its
+    // run: the values its native parameters were taken from.
+    REQUIRE_FALSE(summary.top.empty());
+    const auto& best = summary.top.front();
+    REQUIRE(best.leaf.size() == (summary.param_names.size() + 2) * 2);
+    for (std::size_t k = 0; k < best.params.size(); ++k) {
+        CHECK(best.leaf[2 * k] == best.params[k]);
+    }
+    loki::io::CandidateFileSummary meta;
+    const auto again = loki::io::read_candidate_by_id(product, best.id, &meta);
+    CHECK(again.id == best.id);
+    CHECK(again.leaf == best.leaf);
+    CHECK(again.snr == best.snr);
+    CHECK(meta.reference_time > 0.0);
+    CHECK_THROWS_AS(loki::io::read_candidate_by_id(product, ~0ULL),
+                    std::invalid_argument);
 }
