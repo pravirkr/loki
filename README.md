@@ -108,6 +108,17 @@ uv pip install git+https://github.com/pravirkr/loki.git -C cmake.define.LOKI_ENA
 An image or binary that runs on other machines needs it off; the
 [container](#containers) sets an explicit CPU baseline instead.
 
+#### Installing without build isolation
+
+`--no-build-isolation` (for example on a cluster without internet access, or
+to build against the environment's own packages) skips the step that installs
+the build requirements, so install them into the environment first:
+
+```bash
+uv pip install "scikit-build-core>=0.10" "pybind11>=3.0"
+uv pip install --no-build-isolation git+https://github.com/pravirkr/loki.git
+```
+
 ---
 
 ### Mode B — C++ library (`cmake` + `find_package`)
