@@ -207,7 +207,8 @@ Differences from the CPU policy:
   (`tests/cpp/internal/circ_branch_bound_t.cpp` drives the kernels against
   it). With `use_conservative_tile` the widths are replayed with that tile.
   A cached plan whose `branch_max` is below the chunk's forecast is
-  replanned. If a minimum-width CUDA chunk cannot fit, planning retries with
+  replanned. If a minimum-width CUDA chunk cannot fit (after the group
+  `branch_max` replan in [Width search](#width-search)), planning retries with
   successively halved batches, down to one parent. It never reduces forecast capacity
   to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the
@@ -532,6 +533,18 @@ late can enlarge them after earlier groups were already fitted:
    largest `s` whose pass succeeds. A smaller size leaves earlier groups more
    room and makes the chunks that set the size narrower. If no scale works,
    the planner throws the original "Cannot fit minimum viable chunk" error.
+
+A group's workers are sized for its largest `branch_max` (the world tree and
+the branching scratch scale with it). A minimum-width chunk can fail only
+because it would raise that `branch_max` for the chunks already in its group:
+it fits alone, and it fits in the group at the group's `branch_max`. The
+planner then plans the pass again with every group of that nbins starting at
+the larger `branch_max` (kept for the later passes), so the earlier chunks are
+fitted next to it and come out narrower. Without this, the CUDA batch retry
+below halved the batch of every chunk for one minimum chunk: on one 720 Hz
+circular search, 20 chunks with 14 at half the batch became 16 chunks at the
+full batch, and on one 500 Hz CPU search at 2.2 and 2.4 GB the plan that
+failed now fits.
 
 After a replan the planner checks that the final peak is within the limit.
 `ChunkPlan::replanned` and `shared_cap_scale` record which path ran. Chunk

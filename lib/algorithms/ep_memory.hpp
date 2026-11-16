@@ -97,7 +97,9 @@ constexpr SizeType ep_cuda_batch_for_nbins(SizeType nbins,
 ///     the CUDA batch of a chunk is kEPCudaBatchWork / nbins.
 /// 16: seed slices: the tree holds the largest slice; a CPU worker also
 ///     holds the final leaves of a run's finished slices.
-constexpr std::uint32_t kEPMemoryModelVersion = 16U;
+/// 17: a chunk group starts at the branch_max of a minimum chunk that only
+///     fails by raising it (see plan_chunks).
+constexpr std::uint32_t kEPMemoryModelVersion = 17U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.

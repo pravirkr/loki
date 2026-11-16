@@ -556,6 +556,39 @@ Whole searches, plan only (2^26 samples, CUDA, 32 runs):
 | circular, 4 GB | 42 chunks, batch 16; 222 s | 24 chunks, up to 5 slices, batch 65536; 57 s |
 | jerk, 10-720 Hz, 30 GB | 7 chunks | the same plan |
 
+Chunk width against slices: capping the nominal chunk width (a probe build)
+on the same 495 Hz search at 2 GB gave 1, 2, 4, 8 and 16 chunks with up to 6,
+4, 3, 2 and 2 slices, searched in 14.5, 19.3, 28.5, 46.9 and 84.9 s. On a
+700 Hz band (2 runs, 8 GB) 2 chunks of up to 48 slices took 75.6 s and 4 of
+up to 41 slices 137.2 s: a narrow chunk still seeds its whole Doppler
+padding, so it saves few slices and prunes the padding again. The widest
+chunk that fits was the fastest in every case, and the planner's search-time
+forecast ranked all seven plans in the measured order (the measured times are
+1.7 to 1.9 times the forecast, the same factor for every plan of a search).
+
+The CUDA batch costs more at high frequency: the 700 Hz plan above (2 chunks,
+up to 48 slices) took 87.7 s at batch 32768 against 75.3 s at 65536, with the
+same final leaves (65536 to 32768 cost nothing at 495 Hz).
+
+Group `branch_max` replan (docs/memory.md, Width search): the 10-720 Hz
+circular search at 30 GB planned 16 chunks at the full batch in 38 s, where
+one minimum chunk had halved the batch of 14 of 20 chunks (179 s). The
+10-500 Hz circular search at 4 GB went from 24 to 15 chunks (planning 57 s
+to 13 s); the 32-run search took 310 s against 320 s. The same search on the
+CPU now plans at 2.2 and 2.4 GB, where a minimum chunk failed by 0.01 GB.
+
+Chunk bounds and a weak signal: on that 10-500 Hz search a weak real signal
+at 280.14 Hz (score 8 or more in about a third of the 32 runs) was recovered
+in 11 runs by the old 4 GB plan and in 5 by the new one. Searching single
+chunks around it, without overloads: the old chunk's exact bounds gave 11,
+the same chunk sliced or not gave identical final leaves, and the same chunk
+with its bounds rounded by 4e-5 Hz gave 6. Other bounds gave 1, 5 and 11, and
+the widest chunk of all (249-504 Hz, from a 30 GB plan) 19. A chunk's FFA
+grid is laid out from its limits, so any change of the bounds moves every
+grid point; a signal near the thresholds is caught or not by where the
+points fall. Recovery has no trend with width or f_max, so the chunk width
+is not a sensitivity lever.
+
 Reserve of a slice (docs/memory.md): on the 495 Hz chunk above, which holds a
 bright pulsar, the busiest slice held 65-100 cells' worth of leaves beyond
 its noise forecast at 32 and 64 slices (the room for one CUDA batch covered

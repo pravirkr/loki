@@ -184,6 +184,9 @@ struct PassFailure {
     /// The fixed shared size was too small for the chunk's own FFA buffers
     /// (a larger cap may help); otherwise the memory limit bound.
     bool outside_cap{false};
+    /// The chunk fits next to its group except that it raises the group's
+    /// branch_max: (nbins, branch_max) to start such groups with.
+    std::optional<std::pair<SizeType, SizeType>> branch_max_floor;
 };
 
 /// State of one planning pass.
@@ -476,6 +479,8 @@ private:
     std::map<MemoKey, ChunkGeometry> m_geometry;
     std::map<MemoKey, ChunkDesign> m_designs;
     std::map<MemoKey, CellForecast> m_cells;
+    /// Starting branch_max of the groups of an nbins (see run_pass).
+    std::map<SizeType, SizeType> m_branch_max_floor;
 
     ChunkPlan finish_replan(PassState state, double cap_scale) const {
         finalize(state);
@@ -497,16 +502,41 @@ private:
         return std::move(state.plan);
     }
 
+    /// One planning pass. A pass that fails only because a chunk raises its
+    /// group's branch_max is redone with that branch_max for every group of
+    /// its nbins from the start: the earlier chunks of the group then leave
+    /// room for the larger branch workspace instead of filling the limit with
+    /// tree. Floors persist across passes (they only make plans safer).
     PassState run_pass(std::span<const RegionDesign> designs,
                        const std::optional<SharedFFA>& shared_cap) {
-        PassState state;
-        state.shared_cap = shared_cap;
-        for (SizeType i = 0; i < designs.size() && !state.failure; ++i) {
-            if (designs[i].f_end > designs[i].f_start) {
-                subdivide_region(i, designs[i], state);
+        while (true) {
+            PassState state;
+            state.shared_cap = shared_cap;
+            for (SizeType i = 0; i < designs.size() && !state.failure; ++i) {
+                if (designs[i].f_end > designs[i].f_start) {
+                    subdivide_region(i, designs[i], state);
+                }
             }
+            if (!state.failure || !state.failure->branch_max_floor) {
+                return state;
+            }
+            const auto [nbins, branch_max] = *state.failure->branch_max_floor;
+            spdlog::info("EPRegionPlanner: a minimum chunk raises the "
+                         "branch_max of its nbins={} group to {}; replanning "
+                         "with groups that start there",
+                         nbins, branch_max);
+            m_branch_max_floor[nbins] = branch_max;
         }
-        return state;
+    }
+
+    /// A new group of @p nbins, with the branch_max it starts with.
+    [[nodiscard]] GroupMaxima fresh_group(SizeType nbins) const {
+        GroupMaxima group;
+        if (const auto it = m_branch_max_floor.find(nbins);
+            it != m_branch_max_floor.end()) {
+            group.branch_max = it->second;
+        }
+        return group;
     }
 
     void finalize(PassState& state) const {
@@ -869,7 +899,7 @@ private:
                 (state.group.active && state.group.nbins == nbins &&
                  state.group.batch_size == c.batch_size)
                     ? state.group
-                    : GroupMaxima{};
+                    : fresh_group(nbins);
             group.absorb(c);
             SharedFFA shared =
                 state.shared_cap ? *state.shared_cap : state.shared;
@@ -1002,8 +1032,22 @@ private:
                             ? "  Suggestion: Increase max_process_memory_gb."
                             : "  Forecast exceeds the tree index range; "
                               "the memory estimate is a lower bound."),
-                    .outside_cap = min_fit.outside_cap,
+                    .outside_cap      = min_fit.outside_cap,
+                    .branch_max_floor = std::nullopt,
                 };
+                // Would it fit without raising its group's branch_max?
+                const bool joins =
+                    state.group.active && state.group.nbins == nbins &&
+                    state.group.batch_size == min_eval.batch_size;
+                if (!min_fit.outside_cap && joins &&
+                    min_eval.branch_max > state.group.branch_max) {
+                    auto at_group       = min_eval;
+                    at_group.branch_max = state.group.branch_max;
+                    if (fits(at_group).ok) {
+                        state.failure->branch_max_floor =
+                            std::pair{nbins, min_eval.branch_max};
+                    }
+                }
                 return std::nullopt;
             }
             return bisect_chunk(evaluate, current_f_end, min_width,
@@ -1117,7 +1161,7 @@ private:
             // A new run starts when nbins changes (same rule as the sweep).
             if (!state.group.active || state.group.nbins != nbins ||
                 state.group.batch_size != eval.batch_size) {
-                state.group        = GroupMaxima{};
+                state.group        = fresh_group(nbins);
                 state.group.active = true;
                 state.group.nbins  = nbins;
             }

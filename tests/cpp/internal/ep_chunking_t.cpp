@@ -28,6 +28,8 @@
 #include "lib/detail/utils.hpp"
 #include "lib/search/prune_mask.hpp"
 
+#include "ep_seed_slices.hpp"
+
 using loki::ParamLimit;
 using loki::SizeType;
 using loki::algorithms::generate_ffa_regions;
@@ -884,4 +886,58 @@ TEST_CASE("CUDA EP halves the batch only when that forecasts a faster search",
     CHECK(ample_log.find("saves seed slices") == std::string::npos);
     CHECK(ample.chunk_cfgs.front().batch_size == ctx.batch_size);
     CHECK(chosen);
+}
+
+TEST_CASE("EP chunking starts a group at the branch_max a later chunk needs",
+          "[ep_chunking]") {
+    // Two regions of one nbins: the first (branch_max 3 near 100 Hz) fills
+    // the limit with its tree; a chunk of the second (branch_max 9 near
+    // 400 Hz) fits alone but not next to that tree with its larger branch
+    // workspace. The planner replans the group from that branch_max instead
+    // of lowering the CUDA batch for every chunk.
+    const auto cfg = loki::test::seed_slice_config(/*nparams=*/5,
+                                                   /*fourier=*/false,
+                                                   /*nthreads=*/1);
+    const std::vector<RegionDesign> designs{
+        make_peaked_design(cfg, 98.0, 100.0, 2.0e2),
+        make_peaked_design(cfg, 400.0, 402.0, 2.0e2)};
+    for (const bool cuda : {false, true}) {
+        CAPTURE(cuda);
+        auto ctx = cuda ? make_cuda_ctx(cfg) : make_ctx(cfg);
+        if (cuda) {
+            ctx.batch_size = 1U << 10U;
+        }
+        const auto ample =
+            plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, ctx);
+        REQUIRE(ample.chunk_cfgs.size() == 2);
+        REQUIRE(ample.chunk_cfgs.front().branch_max <
+                ample.chunk_cfgs.back().branch_max);
+        std::ostringstream log;
+        const auto logger = spdlog::default_logger();
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log);
+        logger->sinks().push_back(sink);
+        bool floored = false;
+        for (double limit = ample.peak_memory_gb; limit > 0.0 && !floored;
+             limit *= 0.97) {
+            CAPTURE(limit);
+            log.str("");
+            loki::algorithms::detail::ChunkPlan plan;
+            try {
+                plan =
+                    plan_chunks<float>(cfg, "taylor", designs, 0.0, limit, ctx);
+            } catch (const std::runtime_error&) {
+                break;
+            }
+            if (log.str().find("raises the branch_max") == std::string::npos) {
+                continue;
+            }
+            floored = true;
+            check_plan_fits(plan, ctx, limit);
+            for (const auto& c : plan.chunk_cfgs) {
+                CHECK(c.batch_size == ample.chunk_cfgs.front().batch_size);
+            }
+        }
+        std::erase(logger->sinks(), sink);
+        CHECK(floored);
+    }
 }
