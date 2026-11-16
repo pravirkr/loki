@@ -83,9 +83,11 @@ limit on their own, because they are freed before the EP search. The designs
 run once per plan and are kept in the plan cache.
 
 A chunk is sized from its own design's final noise evaluation (2^15 trials
-natively, the refit's noise sample otherwise): see [Planning](#planning). It
-first narrows chunks; only when the minimum chunk cannot fit does it reduce
-the parent batch (CUDA). If even that cannot fit, planning fails with a
+natively, the refit's noise sample otherwise): see [Planning](#planning). A
+chunk that does not fit first prunes its seeds in slices, then narrows; on
+CUDA the planner also lowers the parent batch where that forecasts a faster
+search, or when the minimum chunk cannot fit at all (see
+[Seed slices](#seed-slices)). If even that cannot fit, planning fails with a
 required-memory diagnostic.
 
 ## What the model counts
@@ -591,6 +593,43 @@ caches plans in `<outdir>/<prefix>_ep_plan.h5` by default. Set
 `output.use_plan_cache = false` or pass `--no-plan-cache` to disable automatic
 caching. Explicit cache paths retain strict validation; obsolete implicit
 caches are regenerated.
+
+## Choosing the limit and the search
+
+These are recommendations: the search is the configuration's, and the planner
+fits it into the limit as efficiently as it can. It never trades sensitivity
+for memory on its own.
+
+**Memory limit.** Give EP searches at least 10 GB (`max_process_memory_gb`,
+`--memory-gb`; device memory on CUDA). Any limit the fixed buffers fit in is
+honoured, or planning fails with the memory it needs, but a small limit costs
+search time: chunks prune their seeds in more slices, sweep FFA buffers are
+smaller, and on CUDA the batch shrinks. The planner warns once per plan when
+it uses slices or a smaller batch, with how many chunks it affects. Loki is
+not tuned for limits below about 4 GB. Measured cases are in
+docs/performance.md ("Seed slices of a run").
+
+**What sets the cost.** The tree of a chunk is about its seeds times the
+forecast leaves per seed, and the leaves per seed grow with frequency (more
+branching per level), with a finer grid (smaller `eta`) and with thresholds
+that keep more noise (smaller `target_snr`):
+
+- `eta` is the grid step in bins: the phase tolerance is `eta / nbins` turns.
+  A smaller `eta` keeps narrower pulses but branches more at every level.
+- `target_snr` is the S/N of the signal the threshold design keeps with
+  probability `min_pd` (by default 8.5 to 10.0 with the parameter count). A
+  lower target keeps weaker pulsars and more noise leaves; a higher one
+  prunes harder.
+
+**Fast pulsars in a separate search.** The highest frequencies dominate a
+circular or jerk search's memory and time. Searching them with their own
+configuration (for example 10-415 Hz at `eta = 1` and 415-720 Hz at
+`eta = 2`) keeps the fine grid below 415 Hz and uses a cheaper one where the
+branching is largest. A circular search of 2^26
+samples at 30 GB on CUDA planned 415-720 Hz as 6 chunks of up to 53 seed
+slices at `eta = 1`, and as 2 chunks of up to 8 slices at `eta = 2` (phase
+tolerance 0.0625 against 0.125 turns). Whether that tolerance is acceptable
+is a science choice: it loses pulses narrower than the grid.
 
 ## Candidate postprocessing
 
