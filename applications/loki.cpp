@@ -628,11 +628,12 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         outdir_path / fmt::format("{}_ffa_results.h5", toml_cfg.prefix);
     record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt());
     record_run_stats(result_file,
-                     {.timing_s = {{"load", loaded.load_s},
-                                   {"preprocess", loaded.preprocess_s},
-                                   {"plan", plan_s},
-                                   {"search_and_postprocess", search_s},
-                                   {"total", seconds_since(run_start)}}});
+                     {.timing_s    = {{"load", loaded.load_s},
+                                      {"preprocess", loaded.preprocess_s},
+                                      {"plan", plan_s},
+                                      {"search_and_postprocess", search_s},
+                                      {"total", seconds_since(run_start)}},
+                      .peak_rss_gb = std::nullopt});
     SPDLOG_INFO("FFA search complete. Inspecting results in {}",
                 result_file.string());
 

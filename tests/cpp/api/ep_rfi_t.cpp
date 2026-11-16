@@ -704,9 +704,11 @@ TEST_CASE("EP candidates publish an RFI-controlled sweep",
     constexpr double kMasked    = 143.5;
     constexpr double kKept      = 142.3;
     const auto cfg              = make_sweep_cfg(140.0, 145.0);
-    const auto [ts_e, ts_v] =
+    const auto series =
         make_series(cfg.get_nsamps(), cfg.get_tsamp(),
                     {{kHarvested, 1.0F}, {kMasked, 1.0F}, {kKept, 0.35F}});
+    const auto& ts_e  = series.first;
+    const auto& ts_v  = series.second;
     auto options      = CandidateOptions::ep_defaults();
     options.memory_gb = 0.25;
 
