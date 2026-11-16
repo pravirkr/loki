@@ -178,7 +178,7 @@ def test_ep_run_tables_are_compressed(product, tmp_path):
     )
     for file in (path, output):
         with h5py.File(file) as f:
-            assert f.libver[0] == "v110"
+            assert f.id.get_create_plist().get_version()[0] == 3
             runs = f["search/sources/run_path"].asstr()[:]
             assert len(runs) > 0
             for run_path in runs:

@@ -122,7 +122,11 @@ jobs:
       - name: Configure, build, and test (CMake preset asan)
         run: |
           ccache --zero-stats || true
-          cmake --preset asan -D CMAKE_CXX_COMPILER=g++-14
+          # Pin the target as the ci preset does: ubuntu-26.04's g++ defaults
+          # to AVX2, whose rsqrtps scorer differs from the exact reference
+          # without -ffast-math, and by CPU vendor.
+          cmake --preset asan -D CMAKE_CXX_COMPILER=g++-14 \
+            -D "CMAKE_CXX_FLAGS_DEBUG=-g -march=x86-64-v2"
           cmake --build --preset asan --parallel "$(nproc)"
           # The asan test preset skips the [slow] tests; Release runs them.
           ctest --preset asan --parallel "$(nproc)"
