@@ -77,11 +77,9 @@ def compare_values(a, b, rtol: float) -> bool:
     if a.dtype.kind in "fc":
         return a.tobytes() == b.tobytes()
     if a.dtype.names:
-        return (
-            a.tobytes() == b.tobytes()
-            if rtol == 0
-            else all(compare_values(a[n], b[n], rtol) for n in a.dtype.names)
-        )
+        # Field by field: a compound's padding bytes are not data (the
+        # writers copy them from uninitialised memory).
+        return all(compare_values(a[n], b[n], rtol) for n in a.dtype.names)
     return bool(np.array_equal(a, b))
 
 
