@@ -577,6 +577,12 @@ one minimum chunk had halved the batch of 14 of 20 chunks (179 s). The
 to 13 s); the 32-run search took 310 s against 320 s. The same search on the
 CPU now plans at 2.2 and 2.4 GB, where a minimum chunk failed by 0.01 GB.
 
+The 400-720 Hz part of that 720 Hz search (2^26 samples, 30 GB, CUDA) runs:
+6 chunks at batch 65536 with 16 to 54 seed slices, planned in 11 s; 2 runs
+searched in 994 s (about 8 minutes per run, so about 4.4 hours for 32 runs),
+no overloads, device peak 29.9 GB (nvidia-smi, CUDA context included) and
+1.1 GB of host memory.
+
 Chunk bounds and a weak signal: on that 10-500 Hz search a weak real signal
 at 280.14 Hz (score 8 or more in about a third of the 32 runs) was recovered
 in 11 runs by the old 4 GB plan and in 5 by the new one. Searching single
