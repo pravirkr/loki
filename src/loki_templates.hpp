@@ -290,7 +290,7 @@ inline void bind_prune_rfi(py::module& m) {
     m.def("make_harvest_window", &make_harvest_window, py::arg("f"),
           py::arg("a"), py::arg("df"), py::arg("da"), py::arg("t_ref"),
           py::arg("tobs"), py::arg("ntiles"),
-          py::arg("a_max") = std::numeric_limits<double>::infinity(),
+          py::arg("a_max") = std::numeric_limits<double>::max(),
           "Exclusion window around a harvested candidate.");
 
     m.def(

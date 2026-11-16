@@ -226,12 +226,14 @@ TEST_CASE("Fused frequency merges match the unfused levels bit for bit",
         max_elems = std::max(max_elems, nsegments[l] * ncoords[l] * stride);
     }
 
-    for (const int k : {3, 4, 5}) {
+    constexpr std::array<int, 3> kFuseFactors{3, 4, 5};
+    constexpr std::array<SizeType, 2> kFirstLevels{SizeType{1}, SizeType{2}};
+    for (const int k : kFuseFactors) {
         if (!loki::core::ffa_freq_fuse_fits_smem(k, nbins)) {
             continue;
         }
         // Start at level 1 and at level 2 (both parities of the input).
-        for (const SizeType first : {SizeType{1}, SizeType{2}}) {
+        for (const SizeType first : kFirstLevels) {
             CAPTURE(k, first);
             const auto input = random_floats(
                 nsegments[first - 1] * ncoords[first - 1] * stride,

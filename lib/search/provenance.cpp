@@ -16,6 +16,7 @@
 #include <highfive/highfive.hpp>
 
 #include "lib/generated/git_commit.hpp"
+#include "lib/io/h5_layout.hpp"
 
 namespace loki::search {
 
@@ -231,7 +232,8 @@ void write_run_provenance(const std::filesystem::path& results_file,
             fmt::format("write_run_provenance: results file not found: '{}'",
                         results_file.string()));
     }
-    HighFive::File file(results_file.string(), HighFive::File::ReadWrite);
+    HighFive::File file = io::detail::open_result_file(
+        results_file.string(), HighFive::File::ReadWrite);
     const auto write = [&](std::string_view name, const std::string& value) {
         if (value.empty()) {
             return;
@@ -245,6 +247,18 @@ void write_run_provenance(const std::filesystem::path& results_file,
     write("config_effective", provenance.config_effective);
     write("command_line", provenance.command_line);
     write("loki_version", provenance.loki_version);
+    write("publish_command_line", provenance.publish_command_line);
+    if (!provenance.config_toml.empty()) {
+        if (!file.hasAttribute("config_toml")) {
+            file.createAttribute("config_toml", provenance.config_toml);
+        }
+        if (file.exist("search")) {
+            auto search = file.getGroup("search");
+            if (!search.hasAttribute("config_toml")) {
+                search.createAttribute("config_toml", provenance.config_toml);
+            }
+        }
+    }
     file.flush();
 }
 
@@ -255,7 +269,8 @@ void write_run_stats(const std::filesystem::path& results_file,
             fmt::format("write_run_stats: results file not found: '{}'",
                         results_file.string()));
     }
-    HighFive::File file(results_file.string(), HighFive::File::ReadWrite);
+    HighFive::File file = io::detail::open_result_file(
+        results_file.string(), HighFive::File::ReadWrite);
     if (file.exist("run_stats")) {
         file.unlink("run_stats");
     }

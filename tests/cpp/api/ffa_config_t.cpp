@@ -1,3 +1,5 @@
+#include <bit>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
@@ -494,5 +496,21 @@ TEST_CASE("FFASearchConfig default bseg_brute tracks cycles at f_max",
                                                 16, 1.0, limits, 0.2, 1.5, true,
                                                 1, 64.0);
         REQUIRE(cfg.get_bseg_brute() == 32);
+    }
+}
+
+TEST_CASE("FFASearchConfig rejects non-finite or <= 1.0 region_growth_factor",
+          "[config][ffa]") {
+    const std::vector<loki::ParamLimit> limits = {{1.0, 10.0}};
+    const double nan =
+        std::bit_cast<double>(std::uint64_t{0x7FF8000000000000ULL});
+    for (const double growth : {1.0, 0.5, nan}) {
+        REQUIRE_THROWS_AS(
+            loki::search::FFASearchConfig(
+                /*nsamps=*/1048576, /*tsamp=*/0.0001, /*nbins=*/64,
+                /*eta=*/1.0, limits, /*ducy_max=*/0.2, /*wtsp=*/1.5,
+                /*use_fourier=*/true, /*nthreads=*/1,
+                /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/growth),
+            std::runtime_error);
     }
 }

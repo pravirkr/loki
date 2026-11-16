@@ -54,23 +54,27 @@ Boxcar boxcar_snr(std::span<const double> e,
         cv[i + 1] = cv[i] + v[i % n];
     }
     Boxcar best;
+    bool any_valid = false;
     for (SizeType w = 1; w <= wmax; ++w) {
         Boxcar row;
+        bool row_valid = false;
         for (SizeType k = 0; k < n; ++k) {
             const double sv = cv[w + k] - cv[k];
             if (!(sv > 0.0)) {
                 continue;
             }
             const double s = (ce[w + k] - ce[k]) / std::sqrt(sv);
-            if (s > row.snr) {
-                row = {.snr = s, .width = w, .start = k};
+            if (!row_valid || s > row.snr) {
+                row       = {.snr = s, .width = w, .start = k};
+                row_valid = true;
             }
         }
-        if (row.snr > best.snr) {
-            best = row;
+        if (row_valid && (!any_valid || row.snr > best.snr)) {
+            best      = row;
+            any_valid = true;
         }
     }
-    return best;
+    return any_valid ? best : Boxcar{.snr = 0.0, .width = 0, .start = 0};
 }
 
 /// numpy.linspace(lo, hi, n).
@@ -140,7 +144,12 @@ std::string target_phase(const RefoldTarget& target,
 RefoldTarget refold_taylor_target(double freq, std::span<const double> derivs) {
     error_check::check(derivs.size() <= kMaxParams - 1,
                        "refold: at most four derivatives (accel to crackle)");
-    error_check::check(freq > 0.0, "refold: the frequency must be positive");
+    error_check::check(utils::is_finite(freq) && freq > 0.0,
+                       "refold: the frequency must be positive");
+    for (const double d : derivs) {
+        error_check::check(utils::is_finite(d),
+                           "refold: derivatives must be finite");
+    }
     SizeType nderiv = derivs.size();
     while (nderiv > 0 && derivs[nderiv - 1] == 0.0) {
         --nderiv;
@@ -161,7 +170,14 @@ RefoldTarget refold_taylor_target(double freq, std::span<const double> derivs) {
 RefoldTarget refold_circular_target(double freq,
                                     std::span<const double, 4> derivs,
                                     double propagator_significance) {
-    error_check::check(freq > 0.0, "refold: the frequency must be positive");
+    error_check::check(utils::is_finite(freq) && freq > 0.0,
+                       "refold: the frequency must be positive");
+    for (const double d : derivs) {
+        error_check::check(utils::is_finite(d),
+                           "refold: derivatives must be finite");
+    }
+    error_check::check(utils::is_finite(propagator_significance),
+                       "refold: propagator_significance must be finite");
     RefoldTarget target;
     target.n_params                = kMaxParams;
     target.model                   = RefoldModel::kLeaf;
@@ -189,7 +205,20 @@ RefoldResult refold(std::span<const float> ts_e,
                              (target.n_params + 2) * kParamStride,
                              "refold: the leaf must hold (n_params + 2) rows "
                              "of (value, error)");
-    error_check::check(tsamp > 0.0, "refold: tsamp must be positive");
+    error_check::check(utils::is_finite(tsamp) && tsamp > 0.0,
+                       "refold: tsamp must be positive");
+    error_check::check(utils::is_finite(t_ref), "refold: t_ref must be finite");
+    error_check::check(utils::is_finite(target.propagator_significance),
+                       "refold: propagator_significance must be finite");
+    error_check::check(utils::is_finite(options.df_span_t) &&
+                           options.df_span_t >= 0.0,
+                       "refold: df_span_t must be finite and non-negative");
+    error_check::check(utils::is_finite(options.df_step_bins) &&
+                           options.df_step_bins > 0.0,
+                       "refold: df_step_bins must be positive");
+    error_check::check(utils::is_finite(options.fd_span) &&
+                           options.fd_span >= 0.0,
+                       "refold: fd_span must be finite and non-negative");
     error_check::check(options.nsub >= 1, "refold: nsub must be positive");
     const SizeType n    = ts_e.size();
     const SizeType nsub = options.nsub;
@@ -197,8 +226,13 @@ RefoldResult refold(std::span<const float> ts_e,
                        "refold: the series is shorter than nsub samples");
     error_check::check(options.split <= nsub,
                        "refold: split must not exceed nsub");
+    for (const double val : target.leaf) {
+        error_check::check(utils::is_finite(val),
+                           "refold: target leaf values must be finite");
+    }
     const double freq = target.leaf[(target.n_params - 1) * kParamStride];
-    error_check::check(freq > 0.0, "refold: the frequency must be positive");
+    error_check::check(utils::is_finite(freq) && freq > 0.0,
+                       "refold: the frequency must be positive");
     const double accel = target.n_params >= 2
                              ? target.leaf[(target.n_params - 2) * kParamStride]
                              : 0.0;
@@ -228,7 +262,9 @@ RefoldResult refold(std::span<const float> ts_e,
     std::vector<float> folds_e(nsub * nbins);
     std::vector<float> folds_v(nsub * nbins);
     std::vector<std::string> models(nsub);
-#pragma omp parallel for num_threads(nthreads) schedule(dynamic)
+#pragma omp parallel for default(none) num_threads(nthreads) schedule(dynamic) \
+    firstprivate(nsub, tsamp, t_ref, nbins, ts_e, ts_v)                        \
+    shared(edges, tsub, models, target, folds_e, folds_v)
     for (SizeType s = 0; s < nsub; ++s) {
         const SizeType begin = edges[s];
         const SizeType end   = edges[s + 1];
@@ -293,7 +329,8 @@ RefoldResult refold(std::span<const float> ts_e,
         const SizeType np = points.size();
         std::vector<ComplexType> rows(2 * np * nk);
         std::vector<float> profiles(2 * np * nbins);
-#pragma omp parallel for num_threads(nthreads) schedule(static)
+#pragma omp parallel for default(none) num_threads(nthreads) schedule(static)  \
+    firstprivate(np, nk) shared(points, shifted_sum, rows)
         for (SizeType i = 0; i < np; ++i) {
             const auto& p = points[i];
             shifted_sum(p.df, p.dfd, p.s0, p.s1,
@@ -302,15 +339,29 @@ RefoldResult refold(std::span<const float> ts_e,
         }
         math::irfft_batch(rows, profiles, 2 * np, nbins, nthreads);
         std::vector<Scored> out(np);
-#pragma omp parallel for num_threads(nthreads) schedule(static)
+        const double var_floor = kVarianceFloor;
+#pragma omp parallel for default(none) num_threads(nthreads) schedule(static)  \
+    firstprivate(np, nbins, wmax, keep_folds, var_floor) shared(profiles, out)
         for (SizeType i = 0; i < np; ++i) {
             std::vector<double> e(nbins);
             std::vector<double> v(nbins);
+            double sum_pos_v = 0.0;
             for (SizeType b = 0; b < nbins; ++b) {
-                e[b] = profiles[(2 * i * nbins) + b];
-                v[b] = std::max(
-                    static_cast<double>(profiles[(((2 * i) + 1) * nbins) + b]),
-                    kVarianceFloor);
+                const double raw_v = profiles[(((2 * i) + 1) * nbins) + b];
+                sum_pos_v += std::max(0.0, raw_v);
+            }
+            const double mean_v   = sum_pos_v / static_cast<double>(nbins);
+            const double v_cutoff = std::max(var_floor, 1.0e-3 * mean_v);
+            for (SizeType b = 0; b < nbins; ++b) {
+                const double raw_e = profiles[(2 * i * nbins) + b];
+                const double raw_v = profiles[(((2 * i) + 1) * nbins) + b];
+                if (raw_v > v_cutoff) {
+                    e[b] = raw_e;
+                    v[b] = raw_v;
+                } else {
+                    e[b] = 0.0;
+                    v[b] = 0.0;
+                }
             }
             std::vector<double> ce;
             std::vector<double> cv;
@@ -369,7 +420,10 @@ RefoldResult refold(std::span<const float> ts_e,
     result.profile.resize(nbins);
     for (SizeType b = 0; b < nbins; ++b) {
         result.profile[b] =
-            static_cast<float>(best_scored.e[b] / std::sqrt(best_scored.v[b]));
+            best_scored.v[b] > 0.0
+                ? static_cast<float>(best_scored.e[b] /
+                                     std::sqrt(best_scored.v[b]))
+                : 0.0F;
     }
 
     if (options.split > 1) {

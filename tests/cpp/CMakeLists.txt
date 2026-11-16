@@ -84,7 +84,9 @@ if(CMAKE_CUDA_COMPILER)
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/world_tree_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/branch_capacity_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/circ_branch_bound_cuda_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/internal/circular_mask_cuda_t.cpp PROPERTIES LANGUAGE CUDA
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/circular_mask_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/prune_transform_cuda_t.cpp
+    PROPERTIES LANGUAGE CUDA
   )
   if(TARGET ${PROJECT_NAME}_cuda_options)
     target_link_libraries(${LOKI_INTERNAL_TEST_TARGET} PRIVATE ${PROJECT_NAME}_cuda_options)

@@ -1,4 +1,6 @@
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -133,7 +135,8 @@ TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",
     const auto pattern = plan.get_branching_pattern_approx("taylor", 0U);
     REQUIRE(pattern.size() == plan.get_nsegments_active() - 1U);
     for (const double val : pattern) {
-        REQUIRE(std::isfinite(val));
+        const volatile std::uint64_t bits = std::bit_cast<std::uint64_t>(val);
+        CHECK((bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL);
         REQUIRE(val >= 1.0);
     }
     const auto forecast = plan.forecast_branching("taylor", 0U);

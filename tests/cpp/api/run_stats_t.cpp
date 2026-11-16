@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <hdf5.h>
 #include <highfive/highfive.hpp>
 
 #include "loki/common/types.hpp"
@@ -86,13 +87,20 @@ TEST_CASE("write_run_stats records timings and EP run counts",
     const auto product = outdir / "product_ep_results.h5";
     EPFreqSweep::publish_candidates(diag, product, options,
                                     loki::io::ObservationMetadata{}, 0.0);
-    {
-        // The CLI records the effective configuration before /run_stats.
-        HighFive::File h5(product.string(), HighFive::File::ReadWrite);
-        h5.createAttribute("config_effective", std::string("abc"));
-    }
+    loki::search::write_run_provenance(
+        product, {.config_effective     = "abc",
+                  .command_line         = {},
+                  .loki_version         = {},
+                  .config_toml          = "x = 1\n",
+                  .publish_command_line = "loki publish"});
     loki::search::write_run_stats(product, {});
     const HighFive::File h5(product.string(), HighFive::File::ReadOnly);
+    H5F_info2_t file_info{};
+    REQUIRE(H5Fget_info2(h5.getId(), &file_info) >= 0);
+    CHECK(file_info.super.version >= 2U);
+    CHECK(h5.getAttribute("config_toml").read<std::string>() == "x = 1\n");
+    CHECK(h5.getAttribute("publish_command_line").read<std::string>() ==
+          "loki publish");
     const auto g = h5.getGroup("run_stats");
     CHECK_FALSE(g.hasAttribute("peak_rss_gb"));
     CHECK(g.getAttribute("n_runs").read<std::uint64_t>() == 2);

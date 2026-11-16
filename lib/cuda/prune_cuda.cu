@@ -70,15 +70,12 @@ struct ExecutionStream {
         }
     }
 
-    ~ExecutionStream() {
+    ~ExecutionStream() noexcept {
         if (owns && stream != nullptr) {
-            cuda_utils::check_cuda_call(
-                cudaStreamSynchronize(stream),
-                "EPMultiPassCudaCore: cudaStreamSynchronize before destroy "
-                "failed");
-            cuda_utils::check_cuda_call(
-                cudaStreamDestroy(stream),
-                "EPMultiPassCudaCore: cudaStreamDestroy failed");
+            // Destructors may run while unwinding an exception; never throw.
+            (void)cudaStreamSynchronize(stream);
+            (void)cudaStreamDestroy(stream);
+            (void)cudaGetLastError();
         }
     }
 
@@ -1204,27 +1201,86 @@ private:
                 return;
             }
             SizeType n_valid = 0;
-            const auto n_passing =
+            auto n_passing =
                 m_prune_funcs->collect_shift_add_score(batch_minmax, &n_valid);
             stats.n_leaves_phy += n_valid;
             accumulate_min_max(batch_minmax);
             if (harvest_active && n_passing > 0 &&
                 batch_minmax.max >= harvest_threshold) {
-                // The survivors are in the tree's uncommitted region, not yet
-                // transformed. Harvested leaves stay for this level; their
-                // children fall in the masked cells at the next.
-                const auto dw = world_tree.get_direct_write();
-                stats.n_harvested += harvest_entries(
-                    HarvestSource{.leaves   = dw.leaves,
-                                  .scores   = dw.scores,
-                                  .folds    = dw.folds,
-                                  .start    = direct_write_head,
-                                  .capacity = world_tree.get_capacity(),
-                                  .n        = n_passing},
+                // The survivors sit in the tree's uncommitted region, not yet
+                // transformed. Note collect_direct() runs after branch() for
+                // the next batch, so keep branched_leaves_d, branched_indices_d
+                // and validation_mask_d untouched here; use filtered_mask_d and
+                // resolved scratch instead.
+                const auto dw       = world_tree.get_direct_write();
+                const auto capacity = world_tree.get_capacity();
+                auto* const keep_d =
+                    thrust::raw_pointer_cast(prune_ws.filtered_mask_d.data());
+                cuda_utils::check_cuda_call(
+                    cudaMemsetAsync(keep_d, 1, n_passing * sizeof(uint8_t),
+                                    stream),
+                    "EP harvest direct keep reset failed");
+                SizeType n_listed = 0;
+                const auto n_h    = harvest_entries(
+                    HarvestSource{.leaves      = dw.leaves,
+                                  .scores      = dw.scores,
+                                  .folds       = dw.folds,
+                                  .clear_valid = keep_d,
+                                  .start       = direct_write_head,
+                                  .capacity    = capacity,
+                                  .n           = n_passing},
                     harvest_threshold, coord_cur, seg_idx_cur,
-                    [](SizeType, FoldTypeCUDA*) {});
+                    [](SizeType, FoldTypeCUDA*) {}, &n_listed);
+                stats.n_harvested += n_h;
+                if (n_listed > 0) {
+                    if (n_h > 0) {
+                        // Also drop any surviving leaf in this batch whose
+                        // resolved cell fell into the newly widened mask.
+                        const auto leaves_stride =
+                            world_tree.get_leaves_stride();
+                        const auto n1 =
+                            std::min(n_passing, capacity - direct_write_head);
+                        const auto n2 = n_passing - n1;
+                        const cuda::std::span<uint8_t> keep_span(keep_d,
+                                                                 n_passing);
+                        auto param_idx_span =
+                            cuda_utils::as_span(prune_ws.branched_param_idx_d);
+                        auto phase_shift_span = cuda_utils::as_span(
+                            prune_ws.branched_phase_shift_d);
+                        m_prune_funcs->resolve(
+                            cuda::std::span<const double>(
+                                dw.leaves + (direct_write_head * leaves_stride),
+                                n1 * leaves_stride),
+                            keep_span.first(n1), param_idx_span.first(n1),
+                            phase_shift_span.first(n1), coord_add, coord_cur,
+                            coord_init, n1, stream);
+                        if (n2 > 0) {
+                            m_prune_funcs->resolve(
+                                cuda::std::span<const double>(
+                                    dw.leaves, n2 * leaves_stride),
+                                keep_span.subspan(n1, n2),
+                                param_idx_span.subspan(n1, n2),
+                                phase_shift_span.subspan(n1, n2), coord_add,
+                                coord_cur, coord_init, n2, stream);
+                        }
+                        kernel_mask_resolved<<<rfi_grid(n_passing), kRfiBlock,
+                                               0, stream>>>(
+                            param_idx_span.data(), keep_d,
+                            thrust::raw_pointer_cast(m_mask_d.data()),
+                            m_mask.get_n_cells(), n_passing, nullptr);
+                        cuda_utils::check_last_cuda_error(
+                            "EP RFI mask kernel failed");
+                    }
+                    n_passing = world_tree.commit_direct_write_filtered(
+                        n_passing,
+                        cuda::std::span<const uint8_t>(keep_d, n_passing),
+                        stream);
+                } else {
+                    world_tree.commit_direct_write(n_passing);
+                }
+            } else {
+                world_tree.commit_direct_write(n_passing);
             }
-            world_tree.commit_direct_write(n_passing);
             if (n_passing > 0) {
                 const auto capacity      = world_tree.get_capacity();
                 const auto leaves_stride = world_tree.get_leaves_stride();

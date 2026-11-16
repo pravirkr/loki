@@ -19,6 +19,8 @@
 
 #include "loki/common/types.hpp"
 
+#include "lib/detail/utils.hpp"
+
 namespace loki::io {
 namespace {
 
@@ -43,7 +45,6 @@ std::vector<T> column(const HighFive::Group& table, const char* name) {
 /// A candidate of one file with its file index, before grouping.
 struct Record {
     SiftMember member;
-    double dm{std::nan("")};
 };
 
 /// Reads @p path's observation and its candidates at or above
@@ -75,6 +76,18 @@ std::pair<SiftFile, std::string> read_file(const std::filesystem::path& path,
         out.start_mjd     = optional_attribute<double>(obs, "start_mjd");
         out.reference_mjd = optional_attribute<double>(obs, "reference_mjd");
         out.tobs = optional_attribute<double>(obs, "tobs").value_or(0.0);
+        if (out.dm && !utils::is_finite(*out.dm)) {
+            out.dm.reset();
+        }
+        if (out.start_mjd && !utils::is_finite(*out.start_mjd)) {
+            out.start_mjd.reset();
+        }
+        if (out.reference_mjd && !utils::is_finite(*out.reference_mjd)) {
+            out.reference_mjd.reset();
+        }
+        if (!utils::is_finite(out.tobs) || out.tobs < 0.0) {
+            out.tobs = 0.0;
+        }
         if (out.start_mjd) {
             // Within a microsecond: the same first sample.
             key = fmt::format("mjd:{:.11f}", *out.start_mjd);
@@ -86,7 +99,11 @@ std::pair<SiftFile, std::string> read_file(const std::filesystem::path& path,
         key = "file:" + path.string();
     }
     if (out.tobs <= 0 && file.hasAttribute("tobs")) {
-        file.getAttribute("tobs").read(out.tobs);
+        double root_tobs = 0.0;
+        file.getAttribute("tobs").read(root_tobs);
+        if (utils::is_finite(root_tobs) && root_tobs > 0.0) {
+            out.tobs = root_tobs;
+        }
     }
     const auto table = file.getGroup("candidates");
     const auto f0    = column<double>(table, "f0");
@@ -105,8 +122,10 @@ std::pair<SiftFile, std::string> read_file(const std::filesystem::path& path,
             "'{}': candidate columns differ in length", path.string()));
     }
     for (std::size_t i = 0; i < f0.size(); ++i) {
-        if (snr[i] < snr_min || (!selected.empty() && selected[i] == 0) ||
-            !(f0[i] > 0)) {
+        if (!utils::is_finite(f0[i]) || !(f0[i] > 0.0) ||
+            !utils::is_finite(f1[i]) || !utils::is_finite(snr[i]) ||
+            !utils::is_finite(duty[i]) || snr[i] < snr_min ||
+            (!selected.empty() && selected[i] == 0)) {
             continue;
         }
         records.push_back({.member = {.file       = index,
@@ -114,8 +133,7 @@ std::pair<SiftFile, std::string> read_file(const std::filesystem::path& path,
                                       .freq       = f0[i],
                                       .fdot       = f1[i],
                                       .snr        = snr[i],
-                                      .duty_cycle = duty[i]},
-                           .dm     = out.dm.value_or(std::nan(""))});
+                                      .duty_cycle = duty[i]}});
     }
     return {out, key};
 }
@@ -147,11 +165,16 @@ unique_ratio(double ratio, double tolerance, std::uint32_t order_max) {
 
 SiftResult sift(std::span<const std::filesystem::path> files,
                 const SiftOptions& options) {
-    if (!(options.tolerance > 0) || options.tolerance >= 0.1) {
+    if (!utils::is_finite(options.tolerance) || !(options.tolerance > 0.0) ||
+        options.tolerance >= 0.1) {
         throw std::invalid_argument("sift tolerance must be in (0, 0.1)");
     }
-    if (!std::isfinite(options.snr_min)) {
+    if (!utils::is_finite(options.snr_min)) {
         throw std::invalid_argument("sift snr_min must be finite");
+    }
+    if (!utils::is_finite(options.harmonic_bins) ||
+        options.harmonic_bins < 0.0) {
+        throw std::invalid_argument("sift harmonic_bins must be >= 0");
     }
     SiftResult result;
     std::vector<Record> records;
@@ -210,8 +233,9 @@ SiftResult sift(std::span<const std::filesystem::path> files,
         for (std::size_t i = begin; i < end; ++i) {
             const auto& r = records[i];
             group.members.push_back(r.member);
-            if (!std::isnan(r.dm)) {
-                auto& best = curve[r.dm];
+            if (const auto dm = result.files[r.member.file].dm;
+                dm.has_value()) {
+                auto& best = curve[*dm];
                 best       = std::max(best, r.member.snr);
             }
         }

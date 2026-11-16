@@ -197,7 +197,7 @@ make_harvest_window(double f,
                     double t_ref,
                     double tobs,
                     double ntiles,
-                    double a_max = std::numeric_limits<double>::infinity());
+                    double a_max = std::numeric_limits<double>::max());
 
 /**
  * @brief Build a conservative harvest threshold scheme derived from the

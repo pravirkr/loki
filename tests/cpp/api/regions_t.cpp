@@ -1,6 +1,8 @@
 #include "loki/algorithms/regions.hpp"
 
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -36,6 +38,15 @@ TEST_CASE("generate_ffa_regions rejects region_growth_factor <= 1.0",
                       std::runtime_error);
     REQUIRE_THROWS_AS(generate_ffa_regions(0.002, 1.0, 1e-5, 32, 1.0,
                                            /*region_growth_factor=*/0.9),
+                      std::runtime_error);
+    REQUIRE_THROWS_AS(
+        generate_ffa_regions(0.002, 1.0, 1e-5, 32, 1.0,
+                             /*region_growth_factor=*/1.0 + 1e-15),
+        std::runtime_error);
+    const double nan =
+        std::bit_cast<double>(std::uint64_t{0x7FF8000000000000ULL});
+    REQUIRE_THROWS_AS(generate_ffa_regions(0.002, 1.0, 1e-5, 32, 1.0,
+                                           /*region_growth_factor=*/nan),
                       std::runtime_error);
 }
 

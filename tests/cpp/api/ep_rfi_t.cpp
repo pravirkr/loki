@@ -624,6 +624,43 @@ TEST_CASE("EPFreqSweep masks and harvests on CUDA as on the CPU",
     CHECK(gpu.harvested_f.size() == cpu.harvested_f.size());
 }
 
+TEST_CASE("EPFreqSweep removes harvested leaves at the final pruning level",
+          "[ep_freq_sweep][rfi]") {
+    constexpr double kHarvested = 141.0;
+    const auto cfg              = make_sweep_cfg(140.0, 145.0);
+    const auto [ts_e, ts_v] =
+        make_series(cfg.get_nsamps(), cfg.get_tsamp(), {{kHarvested, 1.0F}});
+    PruneRFIConfig rfi;
+    rfi.harvest_defaults = HarvestDefaults{
+        .min_level = cfg.get_nsegments() - 1,
+        .offset    = 6.0F,
+        .min_snr   = 25.0F,
+    };
+
+    const TempDir cpu_dir("loki-ep-rfi-final-cpu");
+    const auto cpu =
+        run_rfi_sweep(cfg, ts_e, ts_v, rfi, loki::Exec{}, cpu_dir.path());
+    REQUIRE_FALSE(cpu.harvested_f.empty());
+    CHECK(std::ranges::all_of(cpu.harvested_f, [&](double f) {
+        return std::abs(f - kHarvested) < 0.05;
+    }));
+    CHECK(best_near(cpu.leaves, kHarvested, 0.05) < 10.0F);
+    CHECK(cpu.n_harvested == cpu.harvested_f.size());
+
+    if (loki::is_available(loki::Backend::kCUDA)) {
+        const TempDir gpu_dir("loki-ep-rfi-final-cuda");
+        const auto gpu = run_rfi_sweep(cfg, ts_e, ts_v, rfi,
+                                       loki::Exec::cuda(0), gpu_dir.path());
+        REQUIRE_FALSE(gpu.harvested_f.empty());
+        CHECK(std::ranges::all_of(gpu.harvested_f, [&](double f) {
+            return std::abs(f - kHarvested) < 0.05;
+        }));
+        CHECK(best_near(gpu.leaves, kHarvested, 0.05) < 10.0F);
+        CHECK(gpu.n_harvested == gpu.harvested_f.size());
+        CHECK(gpu.harvested_f.size() == cpu.harvested_f.size());
+    }
+}
+
 TEST_CASE("EPFreqSweep rejects the impulsive veto on CUDA",
           "[ep_freq_sweep][rfi][cuda]") {
     if (!loki::is_available(loki::Backend::kCUDA)) {

@@ -780,7 +780,25 @@ std::uint64_t CandidateClusterer::cluster_id(std::uint64_t provisional) const {
 }
 
 void CandidateClusterer::flag_harmonic_families() {
-    const auto max_order = m_options.harmonic_denominator_max;
+    if (clusters.size() <= 1) {
+        return;
+    }
+    const auto max_order     = m_options.harmonic_denominator_max;
+    const double doppler_tol = m_options.harmonic_doppler_tolerance;
+    const double n_grid =
+        static_cast<double>(max_order) * static_cast<double>(max_order);
+    const double est_pairs =
+        std::min(n_grid, (0.65 * n_grid) + static_cast<double>(max_order));
+    const std::size_t bytes_per_entry =
+        sizeof(std::uint32_t) * 2 + sizeof(double) +
+        (doppler_tol > 0.0 ? sizeof(double) : std::size_t{0});
+    if (est_pairs * static_cast<double>(bytes_per_entry) >
+        m_memory_gb * utils::kBytesPerGB / 2.0) {
+        throw std::runtime_error(
+            "harmonic ratio table exceeds host memory budget; lower "
+            "harmonic_denominator_max or increase candidate memory_gb");
+    }
+
     // The reduced ratios p/q, simplest (smallest p * q) first.
     struct Ratio {
         std::uint32_t p;
@@ -788,7 +806,11 @@ void CandidateClusterer::flag_harmonic_families() {
         double value;
     };
     std::vector<Ratio> ratios;
+    ratios.reserve(static_cast<std::size_t>(est_pairs));
     for (std::uint32_t p = 1; p <= max_order; ++p) {
+        if (p % 64U == 0U) {
+            loki::check_interrupt();
+        }
         for (std::uint32_t q = 1; q <= max_order; ++q) {
             if (std::gcd(p, q) == 1) {
                 ratios.push_back({p, q, static_cast<double>(p) / q});
@@ -800,6 +822,14 @@ void CandidateClusterer::flag_harmonic_families() {
         const auto ob = static_cast<std::uint64_t>(b.p) * b.q;
         return oa != ob ? oa < ob : a.value < b.value;
     });
+    std::vector<double> values;
+    if (doppler_tol > 0.0) {
+        values.reserve(ratios.size());
+        for (const auto& r : ratios) {
+            values.push_back(r.value);
+        }
+        std::ranges::sort(values);
+    }
     // The track test needs |f - r f_parent| * T / 2 <= limit * n^2 (Markov's
     // inequality: a degree-n polynomial with p(0) = 0 spans at least
     // |p'(0)| / n^2 on [-1, 1]), and limit <= harmonic_phase_distance (duty
@@ -808,16 +838,13 @@ void CandidateClusterer::flag_harmonic_families() {
         std::tuple_size_v<decltype(Candidate{}.derivatives)>);
     const double track_window =
         2 * m_options.harmonic_phase_distance * kDegree * kDegree / m_tobs;
-    const double doppler_tol = m_options.harmonic_doppler_tolerance;
     // Roots so far by frequency (index into clusters).
     std::multimap<double, std::size_t> roots;
     for (std::size_t h = 0; h < clusters.size(); ++h) {
         loki::check_interrupt();
-        auto& child     = clusters[h];
-        const auto& hc  = child.representative;
-        const double fh = hc.derivatives[0];
-        const double window =
-            std::max(track_window, doppler_tol > 0 ? doppler_tol * fh : 0.0);
+        auto& child              = clusters[h];
+        const auto& hc           = child.representative;
+        const double fh          = hc.derivatives[0];
         std::uint64_t best_order = 0;
         std::size_t best_parent  = 0;
         const Ratio* best_ratio  = nullptr;
@@ -826,8 +853,17 @@ void CandidateClusterer::flag_harmonic_families() {
             if (best_ratio != nullptr && order > best_order) {
                 break;
             }
-            const auto lo = roots.lower_bound((fh - window) / r.value);
-            const auto hi = roots.upper_bound((fh + window) / r.value);
+            double lo_freq = (fh - track_window) / r.value;
+            double hi_freq = (fh + track_window) / r.value;
+            if (doppler_tol > 0.0) {
+                const double target_c = fh / r.value;
+                lo_freq = std::min(lo_freq, (target_c / (1.0 + doppler_tol)) *
+                                                (1.0 - 1.0e-12));
+                hi_freq = std::max(hi_freq, (target_c / (1.0 - doppler_tol)) *
+                                                (1.0 + 1.0e-12));
+            }
+            const auto lo = roots.lower_bound(lo_freq);
+            const auto hi = roots.upper_bound(hi_freq);
             for (auto it = lo; it != hi; ++it) {
                 const std::size_t f = it->second;
                 if (best_ratio != nullptr && f >= best_parent) {
@@ -838,24 +874,33 @@ void CandidateClusterer::flag_harmonic_families() {
                 if (hc.snr > fc.snr + m_options.harmonic_snr_distance) {
                     continue;
                 }
-                const double df = std::abs(fh - (r.value * fc.derivatives[0]));
-                bool related    = false;
-                if (doppler_tol > 0 &&
+                const double fc_freq  = fc.derivatives[0];
+                const double target_f = r.value * fc_freq;
+                const double df       = std::abs(fh - target_f);
+                bool related          = false;
+                if (doppler_tol > 0.0 &&
                     fc.snr >= m_options.harmonic_doppler_min_snr &&
-                    df <= doppler_tol * fh) {
+                    df <= doppler_tol * target_f * (1.0 + 1.0e-12)) {
                     // Only an unambiguous ratio: with large orders some p/q
                     // lies within the window of almost any frequency.
-                    const double ratio      = fh / fc.derivatives[0];
+                    const double ratio = fh / fc_freq;
+                    const double v_lo =
+                        (ratio / (1.0 + doppler_tol)) * (1.0 - 1.0e-12);
+                    const double v_hi =
+                        (ratio / (1.0 - doppler_tol)) * (1.0 + 1.0e-12);
                     std::uint32_t in_window = 0;
-                    for (std::uint32_t q = 1; q <= max_order; ++q) {
-                        const double pr = std::round(ratio * q);
-                        if (pr >= 1 && pr <= max_order &&
-                            std::gcd(static_cast<std::uint32_t>(pr), q) == 1 &&
-                            std::abs((pr / q) - ratio) <= doppler_tol * ratio) {
+                    for (auto vit = std::ranges::lower_bound(values, v_lo);
+                         vit != values.end() && *vit <= v_hi; ++vit) {
+                        const double vf = (*vit) * fc_freq;
+                        if (std::abs(fh - vf) <=
+                            doppler_tol * vf * (1.0 + 1.0e-12)) {
                             ++in_window;
+                            if (in_window > 1) {
+                                break;
+                            }
                         }
                     }
-                    related = in_window == 1;
+                    related = (in_window == 1);
                 }
                 if (!related) {
                     const double duty = fh >= fc.derivatives[0]

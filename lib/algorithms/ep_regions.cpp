@@ -733,7 +733,10 @@ public:
             chunk_grp.getAttribute("predicted_peak").read(predicted_peak);
             chunk_grp.getAttribute("predicted_live").read(predicted_live);
             if (!same_backend) {
-                batch_size = m_memory.batch_size;
+                batch_size = m_memory.kind == detail::EPMemoryKind::kCuda
+                                 ? detail::ep_cuda_batch_for_nbins(
+                                       nbins, m_memory.batch_size)
+                                 : m_memory.batch_size;
             }
             if (batch_size == 0 || batch_size > m_memory.batch_size ||
                 !std::has_single_bit(batch_size)) {

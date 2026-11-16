@@ -418,11 +418,13 @@ void read_legacy_ffa(const HighFive::File& file,
     out.nsamps         = attribute_or<std::uint64_t>(file, "nsamps", 0);
     out.tsamp          = attribute_or<double>(file, "tsamp", 0.0);
     out.tobs           = attribute_or<double>(file, "tobs", 0.0);
-    out.snr_min        = attribute<double>(file, "snr_min");
-    out.config_toml    = text_attribute(file, "config_toml");
-    out.backend        = text_attribute(file, "backend");
-    const auto root    = file.getGroup("/");
-    out.ranges         = region_ranges(root, out.param_names);
+    out.reference_time =
+        attribute_or<double>(file, "reference_time_seconds", out.tobs / 2.0);
+    out.snr_min     = attribute<double>(file, "snr_min");
+    out.config_toml = text_attribute(file, "config_toml");
+    out.backend     = text_attribute(file, "backend");
+    const auto root = file.getGroup("/");
+    out.ranges      = region_ranges(root, out.param_names);
     if (out.ranges.empty()) {
         out.ranges = frequency_range(file);
     }
@@ -463,17 +465,18 @@ void read_ep_runs(const HighFive::File& file,
                   CandidateFileSummary& out,
                   std::size_t top_n) {
     out.layout         = "ep_runs";
-    out.reference_time = attribute_or<double>(file, "tobs", 0.0) / 2.0;
     out.algorithm      = "ep";
     out.writer_version = text_attribute(file, "ep_sweep_version").value_or("");
     out.nsamps         = attribute_or<std::uint64_t>(file, "nsamps", 0);
     out.tsamp          = attribute_or<double>(file, "tsamp", 0.0);
     out.tobs           = attribute_or<double>(file, "tobs", 0.0);
-    out.snr_min        = attribute<double>(file, "snr_min");
-    out.config_toml    = text_attribute(file, "config_toml");
-    out.backend        = text_attribute(file, "backend");
-    out.ranges         = frequency_range(file);
-    out.table          = "chunks";
+    out.reference_time =
+        attribute_or<double>(file, "reference_time_seconds", out.tobs / 2.0);
+    out.snr_min     = attribute<double>(file, "snr_min");
+    out.config_toml = text_attribute(file, "config_toml");
+    out.backend     = text_attribute(file, "backend");
+    out.ranges      = frequency_range(file);
+    out.table       = "chunks";
 
     struct Run {
         std::string chunk;
@@ -706,9 +709,56 @@ CandidateRow read_candidate_by_id(const std::filesystem::path& path,
                     found = std::move(cand);
                 }
             }
+        } else if (meta.layout == "legacy_ffa") {
+            if (file.exist("snr")) {
+                const auto root  = file.getGroup("/");
+                const auto nrows = file.getDataSet("snr").getDimensions().at(0);
+                std::optional<std::uint64_t> matched_row;
+                if (file.exist("detection_id")) {
+                    const auto ids = file.getDataSet("detection_id");
+                    std::vector<std::uint64_t> batch;
+                    for (std::size_t start = 0; start < nrows && !matched_row;
+                         start += kBatchRows) {
+                        const auto count =
+                            std::min<std::size_t>(kBatchRows, nrows - start);
+                        ids.select({start}, {count}).read(batch);
+                        for (std::size_t i = 0; i < count; ++i) {
+                            if (batch[i] == id) {
+                                matched_row = start + i;
+                                break;
+                            }
+                        }
+                    }
+                } else if (id < nrows) {
+                    matched_row = id;
+                }
+                if (matched_row) {
+                    CandidateRow cand{
+                        .row    = *matched_row,
+                        .id     = id,
+                        .params = read_param_row(file.getDataSet("param_sets"),
+                                                 *matched_row, nparams),
+                        .snr    = read_cell<float>(root, "snr", *matched_row),
+                        .width  = root.exist("width")
+                                      ? read_cell<std::uint32_t>(root, "width",
+                                                                 *matched_row)
+                                      : 0U,
+                        .nbins  = root.exist("nbins")
+                                      ? read_cell<std::uint32_t>(root, "nbins",
+                                                                 *matched_row)
+                                      : 0U,
+                        .source = file.exist("detection_id")
+                                      ? fmt::format("region {}", id >> 32U)
+                                      : std::string{},
+                        .leaf   = {},
+                    };
+                    found = std::move(cand);
+                }
+            }
         } else {
             throw std::invalid_argument(
-                "candidate identities need a common or raw EP result file");
+                "candidate identities need a common, legacy FFA or raw EP "
+                "result file");
         }
     } catch (const HighFive::Exception& e) {
         throw std::runtime_error(

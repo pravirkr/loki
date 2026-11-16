@@ -201,8 +201,10 @@ TEST_CASE("CUDA EP memory model matches the prune irfft scratch",
     };
     // Boxcar and Kadane (both fused), Fourier and float folds; and Fourier
     // the maximum supported fold width.
-    for (const bool kadane : {false, true}) {
-        for (const SizeType nbins : {kNbins, SizeType{1024}}) {
+    constexpr std::array<bool, 2> kKadanes{false, true};
+    const std::array<SizeType, 2> kBinCounts{kNbins, SizeType{1024}};
+    for (const bool kadane : kKadanes) {
+        for (const SizeType nbins : kBinCounts) {
             CAPTURE(kadane, nbins);
             const auto fourier = create_prune_dp_functs_cuda<ComplexTypeCUDA>(
                 "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
@@ -317,7 +319,9 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
                                          ? "loki-ep-group-fourier"
                                          : "loki-ep-group-time");
     const std::vector<float> thresholds(nsegments - 1, 100.0F);
-    for (const auto* cfg : {&larger, &smaller, &larger}) {
+    const std::array<const loki::search::FFASearchConfig*, 3> cfgs{
+        &larger, &smaller, &larger};
+    for (const auto* cfg : cfgs) {
         loki::algorithms::EPMultiPassCudaCore<TestType> core(
             pipeline, *cfg, thresholds, 1, std::nullopt, {}, capacity, kBatch);
         core.execute_device(outdir.path(), "chunk");

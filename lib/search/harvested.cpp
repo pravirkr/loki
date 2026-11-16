@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <set>
@@ -12,6 +13,8 @@
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/prune_rfi.hpp"
+
+#include "lib/detail/utils.hpp"
 
 namespace loki::search {
 
@@ -40,18 +43,18 @@ double observation_length(const HighFive::File& file) {
         file.getAttribute("tsamp").read(tsamp);
         tobs = static_cast<double>(nsamps) * tsamp;
     }
-    return std::isfinite(tobs) && tobs > 0.0 ? tobs : 0.0;
+    return utils::is_finite(tobs) && tobs > 0.0 ? tobs : 0.0;
 }
 
 /// Largest |acceleration| of a chunk (its param_limits row n_params - 2).
 double chunk_accel_limit(const HighFive::Group& chunk, SizeType n_params) {
     if (!chunk.exist("param_limits") || n_params < 2) {
-        return std::numeric_limits<double>::infinity();
+        return std::numeric_limits<double>::max();
     }
     const auto ds   = chunk.getDataSet("param_limits");
     const auto dims = ds.getDimensions();
     if (dims.size() != 2 || dims[0] != n_params || dims[1] != 2) {
-        return std::numeric_limits<double>::infinity();
+        return std::numeric_limits<double>::max();
     }
     std::vector<double> limits(n_params * 2);
     ds.read_raw(limits.data());
@@ -119,10 +122,11 @@ void read_run(const HighFive::Group& harvest,
         const double df = r.errors[n_params - 1];
         const double a  = n_params >= 2 ? r.values[n_params - 2] : 0.0;
         const double da = n_params >= 2 ? r.errors[n_params - 2] : 0.0;
-        if (!std::isfinite(f) || f <= 0.0) {
+        if (!utils::is_finite(f) || f <= 0.0 || !utils::is_finite(df) ||
+            !utils::is_finite(a) || !utils::is_finite(da)) {
             continue;
         }
-        const double tr   = std::isfinite(t_ref[i]) ? t_ref[i] : 0.0;
+        const double tr   = utils::is_finite(t_ref[i]) ? t_ref[i] : 0.0;
         const auto window = algorithms::make_harvest_window(
             f, a, df, da, tr, tobs, ntiles, a_max);
         r.snr     = scores[i];
@@ -194,8 +198,11 @@ SizeType write_harvested(HighFive::File& file) {
     for (const auto i : order) {
         const auto& r = records[i];
         if (sources.empty() || r.f_lo > sources.back().f_hi) {
-            sources.push_back(
-                Source{.best = i, .f_lo = r.f_lo, .f_hi = r.f_hi});
+            sources.push_back(Source{.best      = i,
+                                     .f_lo      = r.f_lo,
+                                     .f_hi      = r.f_hi,
+                                     .n_records = 0,
+                                     .runs      = {}});
         }
         auto& s = sources.back();
         s.f_hi  = std::max(s.f_hi, r.f_hi);

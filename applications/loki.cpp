@@ -143,30 +143,10 @@ void configure_output(const OutputOptions& opts,
     spdlog::debug("{}: {}", version_text(), command);
 }
 
-/// Stores the search configuration as written, @p config_toml, in
-/// @p result_file (root and `search` group) where it is not stored yet.
-void record_config_toml(const std::filesystem::path& result_file,
-                        std::string_view config_toml) {
-    if (config_toml.empty()) {
-        return;
-    }
-    HighFive::File file(result_file.string(), HighFive::File::ReadWrite);
-    const std::string text(config_toml);
-    if (!file.hasAttribute("config_toml")) {
-        file.createAttribute("config_toml", text);
-    }
-    if (file.exist("search")) {
-        auto search = file.getGroup("search");
-        if (!search.hasAttribute("config_toml")) {
-            search.createAttribute("config_toml", text);
-        }
-    }
-    file.flush();
-}
-
 /// Records how @p result_file was produced: the effective config (after
 /// defaults and command-line overrides, with the sample count and interval
-/// the search read from its input), the command line and the version.
+/// the search read from its input), the command line, the version, and the
+/// raw TOML text where not yet stored.
 template <typename TomlConfig>
 void record_provenance(const std::filesystem::path& result_file,
                        TomlConfig cfg,
@@ -179,12 +159,11 @@ void record_provenance(const std::filesystem::path& result_file,
     cfg.nsamps = nsamps;
     cfg.tsamp  = tsamp;
     loki::search::write_run_provenance(
-        result_file, {
-                         .config_effective = cfg.to_toml_string(),
-                         .command_line     = run_command_line(),
-                         .loki_version     = LOKI_VERSION,
-                     });
-    record_config_toml(result_file, config_toml);
+        result_file, {.config_effective     = cfg.to_toml_string(),
+                      .command_line         = run_command_line(),
+                      .loki_version         = LOKI_VERSION,
+                      .config_toml          = std::string(config_toml),
+                      .publish_command_line = {}});
 }
 
 /// Runs @p execute, a search that keeps `<spool>` when its post-processing
@@ -356,8 +335,13 @@ std::optional<double> peak_rss_gb() {
 #ifdef LOKI_CLI_HAS_RUSAGE
     rusage usage{};
     if (getrusage(RUSAGE_SELF, &usage) == 0) {
-        // ru_maxrss is in KiB on Linux.
+#ifdef __APPLE__
+        // ru_maxrss is in bytes on macOS / BSD, KiB on Linux.
+        return static_cast<double>(usage.ru_maxrss) /
+               (1024.0 * 1024.0 * 1024.0);
+#else
         return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+#endif
     }
 #endif
     return std::nullopt;
@@ -1186,7 +1170,8 @@ loki::search::RunStats ep_run_stats(const std::filesystem::path& result_file,
                 search_s = runtime;
             }
         }
-    } catch (const std::exception&) { // NOLINT(bugprone-empty-catch)
+        // NOLINTNEXTLINE(bugprone-empty-catch): /run_stats is optional; fall back to combined timing
+    } catch (const std::exception&) {
     }
     if (search_s >= 0.0 && search_s <= execute_s) {
         stats.timing_s.emplace_back("search", search_s);
@@ -1888,6 +1873,7 @@ refold_json(const RefoldCli& cli,
                 item.candidate->nbins, item.candidate->width,
                 json_string(item.candidate->source));
         }
+        const double accel = f != 0.0 ? -fd / f * 299792458.0 : 0.0;
         out += fmt::format(
             "\"model\": {}, \"nbins\": {}, \"freq\": {}, \"fdot\": {}, "
             "\"snr_in\": {}, \"width_in\": {}, \"snr\": {}, \"width\": {}, "
@@ -1896,8 +1882,8 @@ refold_json(const RefoldCli& cli,
             json_string(r.model), r.nbins, json_number(r.freq),
             json_number(r.fdot), json_number(r.snr_in), r.width_in,
             json_number(r.snr), r.width, r.start_bin, json_number(f),
-            json_number(fd), json_number(-fd / f * 299792458.0),
-            list(r.split_snr), list(r.split_start_bin));
+            json_number(fd), json_number(accel), list(r.split_snr),
+            list(r.split_start_bin));
         if (cli.profile) {
             out += fmt::format(", \"profile\": {}", list(r.profile));
         }
@@ -1945,13 +1931,14 @@ refold_text(const RefoldCli& cli,
                 fmt::format("{:.2f} {}/{}", item.candidate->snr,
                             item.candidate->width, item.candidate->nbins);
         }
-        const auto model = r.model == "taylor"          ? "taylor"
-                           : r.model == "circular_snap" ? "circ_s"
-                                                        : "circ_c";
+        const auto model   = r.model == "taylor"          ? "taylor"
+                             : r.model == "circular_snap" ? "circ_s"
+                                                          : "circ_c";
+        const double accel = f != 0.0 ? -fd / f * 299792458.0 : 0.0;
         out += fmt::format(
             "  {:<24} {:>8} {:13.6f} {:7.2f} {:14.7f} {:11.3e} {:9.3f} {} "
             "{:>7}  {}\n",
-            item.label, model, r.freq, r.snr_in, f, fd, -fd / f * 299792458.0,
+            item.label, model, r.freq, r.snr_in, f, fd, accel,
             con.score(fmt::format("{:7.2f}", r.snr)),
             fmt::format("{}/{}", r.width, r.nbins), search_cols);
         if (!r.split_snr.empty()) {
@@ -2382,18 +2369,11 @@ int publish_as(const PublishCli& cli, const PublishSource& src) {
         effective  = cfg.to_toml_string();
     }
     loki::search::write_run_provenance(
-        output, {.config_effective = effective,
-                 .command_line     = src.command_line.value_or(""),
-                 .loki_version     = LOKI_VERSION});
-    record_config_toml(output, src.config_toml.value_or(""));
-    {
-        HighFive::File file(output.string(), HighFive::File::ReadWrite);
-        if (file.hasAttribute("publish_command_line")) {
-            file.deleteAttribute("publish_command_line");
-        }
-        file.createAttribute("publish_command_line", run_command_line());
-        file.flush();
-    }
+        output, {.config_effective     = effective,
+                 .command_line         = src.command_line.value_or(""),
+                 .loki_version         = LOKI_VERSION,
+                 .config_toml          = src.config_toml.value_or(""),
+                 .publish_command_line = run_command_line()});
 
     // Read the product back before the spool goes.
     const auto summary = loki::io::read_candidate_file_summary(output, 0);

@@ -137,6 +137,22 @@ TEST_CASE("sift groups candidates over DM trials and segments", "[sift]") {
         options.tolerance = 0.0;
         CHECK_THROWS_AS(loki::io::sift(files, options), std::invalid_argument);
     }
+    SECTION("files without /observation/dm skip DM curves cleanly") {
+        const std::vector<std::filesystem::path> nodm{
+            write_result(dir, "nodm_0.h5", std::nullopt, 60000.0,
+                         {{100.0, 12.0F}, {200.0, 8.0F}}),
+            write_result(dir, "nodm_1.h5", std::nullopt, 60000.1,
+                         {{100.0 + 1e-6, 11.0F}}),
+        };
+        const auto res = loki::io::sift(nodm);
+        REQUIRE(res.groups.size() == 2);
+        CHECK(res.groups[0].dm_curve.empty());
+        CHECK_FALSE(res.groups[0].edge_ratio.has_value());
+        CHECK(res.groups[0].segments == std::vector<loki::SizeType>{0, 1});
+        CHECK(res.groups[1].harmonic_of == 0);
+        CHECK(res.groups[1].harmonic_numerator == 2);
+        CHECK(res.groups[1].harmonic_denominator == 1);
+    }
     SECTION("a raw file is refused") {
         const auto raw = dir / "raw.h5";
         {

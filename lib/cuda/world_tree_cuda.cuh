@@ -179,6 +179,12 @@ public:
     /// @brief Account for @p n survivors written through get_direct_write()
     /// (n <= get_space_left()); same state as add_batch_scattered's fast path.
     void commit_direct_write(SizeType n);
+    /// @brief Compact survivors where @p keep_flags[r] != 0 into [0, kept)
+    /// relative to write_head and commit only those @c kept slots.
+    [[nodiscard]] SizeType
+    commit_direct_write_filtered(SizeType n,
+                                 cuda::std::span<const uint8_t> keep_flags,
+                                 cudaStream_t stream);
 
     // Add an initial set of candidate leaves to the Tree (reset buffer first)
     void add_initial(cuda::std::span<const double> leaves_batch,

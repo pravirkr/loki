@@ -329,10 +329,17 @@ TEST_CASE("preprocess: periodic zap and birdies", "[io][preprocess]") {
 
     opt.zap_periodic = false;
     opt.birdies      = {{.freq = f_bird, .width = 0.01}};
+    opt.zap_mode     = loki::io::ZapMode::kZero;
     const auto bird  = run(raw, opt);
     REQUIRE(bird.rep.n_zapped >= 1);
     REQUIRE(tone_amplitude(bird.e, f_bird) < 0.4 * weak);
     REQUIRE(tone_amplitude(bird.e, f_zap) > 0.2);
+
+    PreprocessOptions noise_bird;
+    noise_bird.birdies = {{.freq = f_bird, .width = 0.01}};
+    const auto nb      = run(raw, noise_bird);
+    REQUIRE(nb.rep.n_zapped >= 1);
+    REQUIRE(tone_amplitude(nb.e, f_zap) > 0.2);
 }
 
 TEST_CASE("preprocess: results do not depend on the thread count",
@@ -634,4 +641,29 @@ TEST_CASE("timeseries preprocess runs in place", "[io][preprocess]") {
     REQUIRE(rep.n_masked == ref.rep.n_masked);
     REQUIRE(std::ranges::equal(ts.get_ts_e(), ref.e));
     REQUIRE(std::ranges::equal(ts.get_ts_v(), ref.v));
+}
+
+TEST_CASE("preprocess: small zap_whiten_bins whitens and zaps periodic RFI",
+          "[io][preprocess]") {
+    const SizeType n   = 1U << 18U;
+    auto raw           = white(n, 41);
+    const double f_zap = 13107.0 / (static_cast<double>(n) * kTsamp);
+    for (SizeType i = 0; i < n; ++i) {
+        const double t = static_cast<double>(i) * kTsamp;
+        raw[i] += static_cast<float>(
+            0.5 * std::sin(2.0 * std::numbers::pi * f_zap * t));
+    }
+    REQUIRE(tone_amplitude(run(raw).e, f_zap) > 0.2);
+    PreprocessOptions opt;
+    opt.zap_periodic    = true;
+    opt.zap_whiten_bins = 8;
+    for (const auto mode : {loki::io::ZapMode::kZero, loki::io::ZapMode::kNoise,
+                            loki::io::ZapMode::kPhaseKept}) {
+        opt.zap_mode = mode;
+        const auto o = run(raw, opt, 2);
+        require_contract(o);
+        REQUIRE(o.rep.n_zapped >= 1);
+        REQUIRE(tone_amplitude(o.e, f_zap) < 0.02);
+        REQUIRE_FALSE(o.rep.zap_bands.empty());
+    }
 }

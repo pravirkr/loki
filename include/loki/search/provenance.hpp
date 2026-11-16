@@ -19,17 +19,23 @@ namespace loki::search {
 struct RunProvenance {
     /// The configuration the run used, after defaults and command-line
     /// overrides, as TOML (FFATomlConfig / EPTomlConfig::to_toml_string()).
-    std::string config_effective;
+    std::string config_effective{};
     /// The command that started the run.
-    std::string command_line;
+    std::string command_line{};
     /// The loki version that wrote the file.
-    std::string loki_version;
+    std::string loki_version{};
+    /// The raw TOML configuration text, recorded where missing (never replaces
+    /// an existing attribute on root or `/search`).
+    std::string config_toml{};
+    /// The `loki publish` command line that published a spool into a product.
+    std::string publish_command_line{};
 };
 
 /// @brief Writes @p provenance as root attributes of the HDF5 file
-/// @p results_file: `config_effective`, `command_line` and `loki_version`.
-/// Empty fields are skipped; an attribute already present is replaced. The
-/// raw `config_toml` attribute of an FFA results file is left as it is.
+/// @p results_file: `config_effective`, `command_line`, `loki_version` and
+/// `publish_command_line` (empty fields are skipped; an attribute already
+/// present is replaced), plus `config_toml` where not yet stored on root or
+/// `/search`.
 /// @throws std::runtime_error if the file cannot be opened for writing.
 void write_run_provenance(const std::filesystem::path& results_file,
                           const RunProvenance& provenance);

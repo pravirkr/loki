@@ -479,6 +479,11 @@ void check_ffa_fields(const FFATomlConfig& cfg) {
         throw std::invalid_argument(
             "candidates.harmonic_denominator_max must be at most 10000");
     }
+    if (!utils::is_finite(cfg.region_growth_factor) ||
+        cfg.region_growth_factor <= 1.0) {
+        throw std::invalid_argument(
+            "performance.region_growth_factor must be finite and > 1.0");
+    }
     cfg.candidates.validate();
     cfg.observation.validate();
 }
@@ -1259,6 +1264,9 @@ private:
         error_check::check_greater(m_wtsp, 1.0, "wtsp must be > 1.0");
         error_check::check_greater(m_max_process_memory_gb, 0,
                                    "max_process_memory_gb must be positive");
+        error_check::check(utils::is_finite(m_region_growth_factor) &&
+                               m_region_growth_factor > 1.0,
+                           "region_growth_factor must be finite and > 1.0");
         error_check::check_greater_equal(
             m_nbins_max, m_nbins,
             "nbins_max must be greater than or equal to nbins");
