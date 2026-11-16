@@ -245,4 +245,43 @@ SizeType GridMask::select_seeds(std::span<SizeType> keep_indices,
     return n_keep;
 }
 
+SizeType clamp_seed_slices(SizeType n_slices, SizeType n_freq) noexcept {
+    return std::clamp<SizeType>(n_slices, 1, std::max<SizeType>(n_freq, 1));
+}
+
+SeedSlice seed_slice(SizeType slice, SizeType n_slices, SizeType n_freq) {
+    error_check::check(n_slices > 0 && slice < n_slices,
+                       "seed_slice: slice index out of range");
+    return {.f_begin = (slice * n_freq) / n_slices,
+            .f_end   = ((slice + 1) * n_freq) / n_slices};
+}
+
+SizeType select_slice_seeds(std::span<SizeType> keep_indices,
+                            SizeType n_accel,
+                            SizeType n_freq,
+                            SeedSlice slice,
+                            const GridMask& mask) {
+    error_check::check(slice.f_begin <= slice.f_end && slice.f_end <= n_freq,
+                       "select_slice_seeds: slice outside the grid");
+    error_check::check_greater_equal(
+        keep_indices.size(), n_accel * (slice.f_end - slice.f_begin),
+        "select_slice_seeds: keep_indices too small");
+    const bool masked = !mask.empty();
+    if (masked) {
+        error_check::check(mask.get_n_accel() == n_accel &&
+                               mask.get_n_freq() == n_freq,
+                           "select_slice_seeds: mask grid does not match");
+    }
+    SizeType n_keep = 0;
+    for (SizeType ia = 0; ia < n_accel; ++ia) {
+        for (SizeType i = (ia * n_freq) + slice.f_begin;
+             i < (ia * n_freq) + slice.f_end; ++i) {
+            if (!masked || !mask.is_masked(i)) {
+                keep_indices[n_keep++] = i;
+            }
+        }
+    }
+    return n_keep;
+}
+
 } // namespace loki::search

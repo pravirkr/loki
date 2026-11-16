@@ -169,6 +169,21 @@ public:
 
     void update_stats(const PruneStats& stats, const PruneTimerStats& timers);
     void update_stats(const PruneStats& stats);
+    /**
+     * @brief Add the stats of another seed slice of the same run.
+     *
+     * @details Rows are matched by level (a slice whose tree emptied early
+     * has fewer). Counts and timers add up. The score range is the range of
+     * the rows that scored leaves (`n_leaves_phy > 0`), so a slice level
+     * that scored nothing does not contribute its zeros. The level-0 row
+     * keeps `n_leaves_resolved` (seeding resolves nothing), and so does
+     * every row unless @p sum_resolved (the CUDA engine does not count
+     * resolved leaves: the field keeps its default). Merging the slices of a
+     * run, in any order, gives the stats a single prune of all its seeds
+     * would have, as long as the slices are exact (see SeedSlice).
+     */
+    void merge_slice(const PruneStatsCollection& other,
+                     bool sum_resolved = true);
     // Direct access to accumulated timers
     [[nodiscard]] const PruneTimerStats& get_timers() const {
         return m_accumulated_timers;

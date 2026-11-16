@@ -89,6 +89,16 @@ public:
         }
     }
 
+    /**
+     * @brief Prune each run's seeds in @p n_slices sequential frequency
+     * slices over the same FFA output (see search::SeedSlice), writing one
+     * merged result per run. The tree then holds one slice at a time. More
+     * slices than frequency cells are clamped; 1 (the default) prunes every
+     * seed at once.
+     * @throws std::invalid_argument if @p n_slices is 0.
+     */
+    virtual void set_seed_slices(SizeType n_slices) = 0;
+
     EPMultiPassEngine(const EPMultiPassEngine&)            = delete;
     EPMultiPassEngine& operator=(const EPMultiPassEngine&) = delete;
     EPMultiPassEngine(EPMultiPassEngine&&)                 = delete;
