@@ -5,6 +5,7 @@
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 
+#include "lib/core/branching.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::core {
@@ -87,6 +88,7 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
                            SizeType nsegments,
                            SizeType nbins,
                            double eta,
-                           SizeType ref_seg);
+                           SizeType ref_seg,
+                           const BranchingStageFn& on_stage = {});
 
 } // namespace loki::core

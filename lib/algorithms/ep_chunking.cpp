@@ -19,6 +19,7 @@
 
 #include "lib/algorithms/ep_memory.hpp"
 #include "lib/algorithms/prune_engine.hpp"
+#include "lib/common/plans_detail.hpp"
 #include "lib/detail/utils.hpp"
 
 namespace loki::algorithms::detail {
@@ -32,6 +33,37 @@ constexpr double kSliverFactor         = 4.0;
 constexpr SizeType kMaxBisectionSteps  = 50;
 /// Planning passes spent searching a smaller fixed shared FFA size.
 constexpr SizeType kMaxCapSearchSteps = 8;
+/// Most seed slices of a chunk wider than the minimum width. Past it the
+/// reserve below dominates each slice's tree, so more slices save little
+/// memory and cost a pass over every pruning level each: the width search
+/// narrows the chunk instead. A minimum-width chunk takes as many slices as
+/// it needs (up to one per frequency cell), so the limit is honoured.
+constexpr SizeType kMaxSeedSlices = 64;
+/// Largest share of the memory limit that the FFA buffers of a chunk with
+/// seed slices may take, unless the chunk has the minimum width. The width
+/// search would otherwise widen a sliced chunk until its FFA buffers fill
+/// the room the slices free; those buffers are shared by the whole sweep,
+/// so every other chunk would need more slices or fail to fit.
+constexpr double kSlicedFFAShare = 0.25;
+/// Reserve of every seed slice's tree: the live forecast of this many of the
+/// chunk's busiest cells, at most kSeedSliceReserveFraction of the whole
+/// chunk's. The forecast is a noise population spread over the cells by
+/// their branching; a pulsar or RFI puts its subtrees into a few cells, so
+/// one slice can hold far more than its share. One slice for the whole
+/// chunk keeps the forecast itself as that headroom. Measured: a bright
+/// source added 65-100 cells' worth above its slice's share, where the room
+/// for a CUDA batch covered the rest; at high frequency the busiest slice
+/// stayed below half its noise forecast (docs/performance.md).
+constexpr double kSeedSliceReserveCells = 32.0;
+/// Search-time model of a CUDA plan, per run: one batch iteration of one
+/// level (kernel launches and synchronisation) and one forecast leaf. A
+/// chunk costs kCudaIterationSeconds * (parents / batch + slices * levels)
+/// + kCudaLeafSeconds * leaves. Fitted on one chunk timed at batches 8192 to
+/// 65536 and 1 to 3062 slices (docs/performance.md); the forecasts run
+/// about 1.65 times the measured populations, which these constants absorb.
+constexpr double kCudaIterationSeconds     = 50.0e-6;
+constexpr double kCudaLeafSeconds          = 1.0e-9;
+constexpr double kSeedSliceReserveFraction = 1.0 / 16.0;
 
 struct EvaluatedChunk {
     search::PulsarSearchConfig cfg;
@@ -51,6 +83,17 @@ struct EvaluatedChunk {
     std::vector<float> branching_pattern;
     bool indexable{true};
     double memory_gb{0.0}; ///< The chunk alone, with its own FFA buffers.
+    /// Unclamped ring live forecast of every seed at once.
+    double live_forecast{0.0};
+    /// Forecast parents and survivors summed over the stages.
+    double total_parents{0.0};
+    double total_population{0.0};
+    /// Forecast final leaves of a run (with margin).
+    SizeType final_leaves{0};
+    /// Seed slice edges (empty: one slice) and the final leaves a CPU worker
+    /// holds between them.
+    std::vector<SizeType> seed_slice_edges{};
+    SizeType held_leaves{0};
     /// The region schedule the chunk runs.
     std::vector<float> threshold_scheme{};
     double pd{0.0};
@@ -115,13 +158,15 @@ struct GroupMaxima {
     SizeType batch_size{0};
     SizeType ncoords{0};
     SizeType nsegments{0};
+    SizeType held_leaves{0};
 
     void absorb(const EvaluatedChunk& c) noexcept {
-        max_sugg   = std::max(max_sugg, c.max_sugg);
-        branch_max = std::max(branch_max, c.branch_max);
-        ncoords    = std::max(ncoords, c.ncoords);
-        nsegments  = std::max(nsegments, c.nsegments);
-        batch_size = c.batch_size;
+        max_sugg    = std::max(max_sugg, c.max_sugg);
+        branch_max  = std::max(branch_max, c.branch_max);
+        ncoords     = std::max(ncoords, c.ncoords);
+        nsegments   = std::max(nsegments, c.nsegments);
+        held_leaves = std::max(held_leaves, c.held_leaves);
+        batch_size  = c.batch_size;
     }
 };
 
@@ -150,6 +195,95 @@ struct PassState {
     std::optional<PassFailure> failure;
 };
 
+/**
+ * @brief Live forecast of a chunk per frequency cell of its seeds.
+ *
+ * Cell i holds n_accel seeds; its population after stage s is n_accel times
+ * its leaves per seed w_s[i] (the branching simulation) times the stage's
+ * pass-rate product and margin. The cells' populations sum to the chunk's
+ * ring forecast, so a slice of cells is forecast by summing them. A cell's
+ * live is the largest sum of two consecutive populations (the ring's
+ * occupancy); a slice's live is at most the sum of its cells'.
+ */
+struct CellForecast {
+    /// Prefix sums over the cells of the live and of the largest stage
+    /// population: `live[b] - live[a]` covers cells [a, b).
+    std::vector<double> live;
+    std::vector<double> peak;
+    /// Largest live of one cell.
+    double max_cell_live{0.0};
+
+    [[nodiscard]] SizeType n_cells() const noexcept {
+        return live.empty() ? 0 : live.size() - 1;
+    }
+};
+
+/// Seed slices of a chunk: edges of the frequency cells and the largest
+/// slice's forecast.
+struct SlicePartition {
+    std::vector<SizeType> edges;
+    double max_live{0.0};
+    double max_peak{0.0};
+};
+
+/// Slices in greedy order whose live is at most @p cap each, with one cell
+/// per slice at least; n_cells + 1 if a single cell exceeds @p cap.
+SizeType greedy_slices(const CellForecast& cells,
+                       double cap,
+                       std::vector<SizeType>* edges) {
+    const auto n  = cells.n_cells();
+    const auto& p = cells.live;
+    if (edges != nullptr) {
+        edges->assign(1, 0);
+    }
+    SizeType count = 0;
+    SizeType a     = 0;
+    while (a < n) {
+        const auto it = std::upper_bound(
+            p.begin() + static_cast<IndexType>(a + 1), p.end(), p[a] + cap);
+        const auto b = static_cast<SizeType>(it - p.begin()) - 1;
+        if (b <= a) {
+            return n + 1;
+        }
+        a = b;
+        ++count;
+        if (edges != nullptr) {
+            edges->push_back(b);
+        }
+    }
+    return count;
+}
+
+/**
+ * @brief At most @p k slices whose largest live is (nearly) the smallest
+ * possible: the smallest cap the greedy partition meets in @p k slices.
+ */
+SlicePartition balanced_slices(const CellForecast& cells, SizeType k) {
+    double lo = cells.max_cell_live;
+    double hi = cells.live.back();
+    if (greedy_slices(cells, lo, nullptr) > k) {
+        for (SizeType step = 0; step < 64 && hi - lo > 0.5; ++step) {
+            const double mid = std::midpoint(lo, hi);
+            if (greedy_slices(cells, mid, nullptr) <= k) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+    } else {
+        hi = lo;
+    }
+    SlicePartition out;
+    greedy_slices(cells, hi, &out.edges);
+    for (SizeType s = 0; s + 1 < out.edges.size(); ++s) {
+        const auto a = out.edges[s];
+        const auto b = out.edges[s + 1];
+        out.max_live = std::max(out.max_live, cells.live[b] - cells.live[a]);
+        out.max_peak = std::max(out.max_peak, cells.peak[b] - cells.peak[a]);
+    }
+    return out;
+}
+
 template <SupportedFoldType FoldType> class Chunker {
 public:
     Chunker(search::PulsarSearchConfig base_cfg,
@@ -166,6 +300,7 @@ public:
     ChunkPlan run(std::span<const RegionDesign> designs) {
         const SizeType default_batch = m_memory.batch_size;
         auto plan                    = plan_sweep(designs);
+        log_seed_slices(plan);
         if (m_memory.batch_size < default_batch) {
             log_slow_batches(plan, default_batch);
         }
@@ -173,6 +308,27 @@ public:
     }
 
 private:
+    /// Says once per plan how many chunks prune their seeds in slices.
+    static void log_seed_slices(const ChunkPlan& plan) {
+        SizeType n_sliced = 0;
+        SizeType worst    = 1;
+        for (const auto& c : plan.chunk_stats) {
+            if (c.n_seed_slices > 1) {
+                ++n_sliced;
+                worst = std::max(worst, c.n_seed_slices);
+            }
+        }
+        if (n_sliced == 0) {
+            return;
+        }
+        spdlog::warn(
+            "EPRegionPlanner: to fit the memory limit {} of {} chunks prune "
+            "each run's seeds in up to {} sequential slices; every slice "
+            "repeats all pruning levels, so they search slower (see \"Seed "
+            "slices of a run\" in docs/performance.md)",
+            n_sliced, plan.chunk_stats.size(), worst);
+    }
+
     /// After the batch ladder: says once per plan how many chunks run with a
     /// smaller batch than the default would give them, and by how much.
     void log_slow_batches(const ChunkPlan& plan, SizeType default_batch) const {
@@ -190,10 +346,11 @@ private:
             return;
         }
         spdlog::warn(
-            "EPRegionPlanner: to fit the memory limit the CUDA batch is at "
-            "most {} (default {}): {} of {} chunks run with up to {}x fewer "
-            "parents per batch and search slower (see \"CUDA batch and "
-            "branch_max\" in docs/performance.md)",
+            "EPRegionPlanner: to fit the memory limit (or with fewer seed "
+            "slices, where that searches faster) the CUDA batch is at most "
+            "{} (default {}): {} of {} chunks run with up to {}x fewer "
+            "parents per batch (see \"CUDA batch and branch_max\" in "
+            "docs/performance.md)",
             m_memory.batch_size, default_batch, n_lowered,
             plan.chunk_stats.size(), worst_factor);
     }
@@ -212,6 +369,51 @@ private:
         if (state.failure) {
             throw std::runtime_error(state.failure->message);
         }
+        auto plan = plan_from_pass(designs, std::move(state));
+        if (m_memory.kind != EPMemoryKind::kCuda) {
+            return plan;
+        }
+        // Seed slices before a smaller batch, unless the smaller batch is
+        // cheaper: halving it can remove slices, each of which repeats every
+        // level. Keep halving while the forecast search time drops.
+        SizeType best_batch = m_memory.batch_size;
+        while (uses_seed_slices(plan) && m_memory.batch_size > 1) {
+            m_memory.batch_size /= 2;
+            std::optional<ChunkPlan> trial;
+            auto pass = run_pass(designs, std::nullopt);
+            if (!pass.failure) {
+                try {
+                    trial = plan_from_pass(designs, std::move(pass));
+                } catch (const std::runtime_error&) {
+                    trial.reset();
+                }
+            }
+            if (!trial ||
+                trial->estimated_search_s >= plan.estimated_search_s) {
+                break;
+            }
+            spdlog::info("EPRegionPlanner: CUDA batch {} instead of {} saves "
+                         "seed slices (forecast search {:.3g} s against "
+                         "{:.3g} s per run)",
+                         m_memory.batch_size, best_batch,
+                         trial->estimated_search_s, plan.estimated_search_s);
+            best_batch = m_memory.batch_size;
+            plan       = std::move(*trial);
+        }
+        m_memory.batch_size = best_batch;
+        return plan;
+    }
+
+    [[nodiscard]] static bool uses_seed_slices(const ChunkPlan& plan) {
+        return std::ranges::any_of(plan.chunk_stats, [](const auto& c) {
+            return c.n_seed_slices > 1;
+        });
+    }
+
+    /// The plan of a first pass that placed every chunk: as it is if its
+    /// peak fits, else replanned with the shared FFA size fixed.
+    ChunkPlan plan_from_pass(std::span<const RegionDesign> designs,
+                             PassState state) {
         finalize(state);
         if (state.plan.peak_memory_gb <= m_limit_gb) {
             return std::move(state.plan);
@@ -273,6 +475,7 @@ private:
     // batch retries.
     std::map<MemoKey, ChunkGeometry> m_geometry;
     std::map<MemoKey, ChunkDesign> m_designs;
+    std::map<MemoKey, CellForecast> m_cells;
 
     ChunkPlan finish_replan(PassState state, double cap_scale) const {
         finalize(state);
@@ -323,9 +526,18 @@ private:
             m_memory.n_workers,
             ep_thread_bytes<FoldType>(chunk_memory(c.batch_size, c.buffer_size),
                                       nbins, c.nsegments, c.ncoords, c.max_sugg,
-                                      c.branch_max),
+                                      c.branch_max, c.held_leaves),
             ep_fixed_bytes<FoldType>(m_memory, c.buffer_size, c.coord_size,
                                      c.ffa_transient_bytes));
+    }
+
+    /// The FFA buffers of chunk @p c alone, in GB: the shared bytes it
+    /// needs, without the input series.
+    [[nodiscard]] double ffa_gb(const EvaluatedChunk& c) const {
+        const auto fixed = ep_fixed_bytes<FoldType>(
+            m_memory, c.buffer_size, c.coord_size, c.ffa_transient_bytes);
+        return static_cast<double>(fixed - ep_input_bytes(m_memory.nsamps)) /
+               utils::kBytesPerGB;
     }
 
     EPMemoryContext chunk_memory(SizeType batch,
@@ -422,8 +634,14 @@ private:
             .ffa_transient_bytes = g.ffa_transient_bytes,
             .branching_pattern   = g.branching_pattern,
         };
-        const auto ring   = ep_ring_forecast(c.ncoords, complexity, margin);
-        c.peak_complexity = ring.peak_complexity;
+        const auto ring    = ep_ring_forecast(c.ncoords, complexity, margin);
+        c.peak_complexity  = ring.peak_complexity;
+        c.live_forecast    = ring.live;
+        c.total_parents    = ring.total_parents;
+        c.total_population = ring.total_population;
+        c.final_leaves     = static_cast<SizeType>(
+            std::min(ring.final_population,
+                     static_cast<double>(ep_tree_index_limit(m_memory.kind))));
         // An oversized probe must fail fitting, rather than aborting the
         // width search before it can try a narrower chunk.
         const auto bound =
@@ -487,6 +705,154 @@ private:
         return c;
     }
 
+    /// The per-cell live forecast of a chunk (CellForecast), from the same
+    /// region design and branching simulation as scaled().
+    const CellForecast& cell_forecast(SizeType design_idx,
+                                      const RegionDesign& design,
+                                      double nominal_start,
+                                      double nominal_end) {
+        const MemoKey key{design_idx, nominal_start, nominal_end};
+        if (const auto it = m_cells.find(key); it != m_cells.end()) {
+            return it->second;
+        }
+        const auto& g =
+            geometry(design_idx, design, nominal_start, nominal_end);
+        const auto& region =
+            geometry(design_idx, design, design.f_start, design.f_end);
+        const auto& d     = chunk_design(design_idx, design, design.f_start,
+                                         design.f_end, region);
+        const auto margin = ep_ring_margin(d.forecast);
+        const auto& complexity = d.forecast.complexity;
+        // Per-seed population of stage s is w_s[i] * q[s]: the region's
+        // complexity divided by its branching so far leaves the pass rates.
+        std::vector<double> q(complexity.size());
+        double bp_prod = 1.0;
+        for (SizeType s = 0; s < q.size(); ++s) {
+            const double m = s < margin.size() ? margin[s] : 1.0;
+            if (design.design) {
+                bp_prod *= static_cast<double>(region.branching_pattern[s]);
+            }
+            q[s] = complexity[s] * m / bp_prod;
+        }
+
+        const plans::FFAPlan<FoldType> plan(g.cfg);
+        const SizeType n_freq = plan.get_param_counts().back().back();
+        if (n_freq == 0 || g.ncoords % n_freq != 0) {
+            throw std::logic_error("EPRegionPlanner: seeds are not a grid of "
+                                   "frequency cells");
+        }
+        std::vector<double> live(n_freq, 1.0);
+        std::vector<double> peak(n_freq, 1.0);
+        std::vector<double> prev(n_freq, 1.0);
+        const auto add_stage = [&](SizeType s, auto&& leaves_per_seed) {
+            if (s >= q.size()) {
+                return;
+            }
+            for (SizeType i = 0; i < n_freq; ++i) {
+                const double cur = leaves_per_seed(i) * q[s];
+                live[i]          = std::max(live[i], prev[i] + cur);
+                peak[i]          = std::max(peak[i], cur);
+                prev[i]          = cur;
+            }
+        };
+        if (design.design) {
+            const auto forecast = plans::detail::simulate_branching_stages(
+                plan, m_poly_basis, [&](SizeType s, std::span<const double> w) {
+                    add_stage(s, [w](SizeType i) { return w[i]; });
+                });
+            if (forecast.mean.size() != g.branching_pattern.size()) {
+                throw std::logic_error("EPRegionPlanner: a chunk's stages "
+                                       "differ from its branching pattern");
+            }
+        } else {
+            // Synthetic: the same complexity for every cell.
+            for (SizeType s = 0; s < q.size(); ++s) {
+                add_stage(s, [](SizeType) { return 1.0; });
+            }
+        }
+
+        const auto n_accel = static_cast<double>(g.ncoords / n_freq);
+        CellForecast cells;
+        cells.live.assign(n_freq + 1, 0.0);
+        cells.peak.assign(n_freq + 1, 0.0);
+        for (SizeType i = 0; i < n_freq; ++i) {
+            cells.live[i + 1] = cells.live[i] + (n_accel * live[i]);
+            cells.peak[i + 1] = cells.peak[i] + (n_accel * peak[i]);
+            cells.max_cell_live =
+                std::max(cells.max_cell_live, n_accel * live[i]);
+        }
+        return m_cells.emplace(key, std::move(cells)).first->second;
+    }
+
+    /// @p base pruned in at most @p k balanced seed slices: the tree holds
+    /// the largest slice's forecast plus a reserve (kSeedSliceReserveCells),
+    /// and a CPU worker the run's final leaves. @p base itself if one slice
+    /// results.
+    EvaluatedChunk sliced(const EvaluatedChunk& base,
+                          const CellForecast& cells,
+                          SizeType k,
+                          SizeType nbins) const {
+        auto part = balanced_slices(cells, k);
+        if (part.edges.size() <= 2) {
+            return base;
+        }
+        EvaluatedChunk c = base;
+        const double reserve =
+            std::min(kSeedSliceReserveCells * cells.max_cell_live,
+                     kSeedSliceReserveFraction * base.live_forecast);
+        const double live = std::ceil(part.max_live) + 2.0 + std::ceil(reserve);
+        const double peak = std::min(std::ceil(part.max_peak) + 1.0, live);
+        const auto bound =
+            static_cast<double>(ep_tree_index_limit(m_memory.kind));
+        c.indexable      = live < bound;
+        c.predicted_live = static_cast<SizeType>(std::min(live, bound));
+        c.predicted_peak = static_cast<SizeType>(std::min(peak, bound));
+        try {
+            c.max_sugg = ep_tree_capacity(c.predicted_live, c.batch_size,
+                                          c.branch_max, m_memory.kind);
+        } catch (const std::overflow_error&) {
+            c.indexable = false;
+            c.max_sugg  = 0;
+        }
+        c.seed_slice_edges = std::move(part.edges);
+        c.held_leaves      = c.final_leaves;
+        c.memory_gb        = chunk_alone_gb(nbins, c);
+        return c;
+    }
+
+    /// @p base (which does not fit) with the fewest seed slices that fit by
+    /// @p ok, at most @p k_limit; the most slices if none fits.
+    EvaluatedChunk
+    fit_slices(EvaluatedChunk base,
+               const CellForecast& cells,
+               SizeType nbins,
+               SizeType k_limit,
+               const std::function<bool(const EvaluatedChunk&)>& ok) const {
+        const SizeType k_max = std::min(cells.n_cells(), k_limit);
+        if (k_max < 2) {
+            return base;
+        }
+        auto most = sliced(base, cells, k_max, nbins);
+        if (!ok(most)) {
+            return most.memory_gb < base.memory_gb ? std::move(most)
+                                                   : std::move(base);
+        }
+        // The largest slice shrinks as k grows: bisect the fewest that fit.
+        SizeType lo = 1;
+        SizeType hi = k_max;
+        while (hi - lo > 1) {
+            const SizeType mid = std::midpoint(lo, hi);
+            auto probe         = sliced(base, cells, mid, nbins);
+            if (ok(probe)) {
+                hi   = mid;
+                most = std::move(probe);
+            } else {
+                lo = mid;
+            }
+        }
+        return most;
+    }
+
     void subdivide_region(SizeType design_idx,
                           const RegionDesign& design,
                           PassState& state) {
@@ -513,7 +879,7 @@ private:
                 ep_thread_bytes<FoldType>(
                     chunk_memory(group.batch_size, shared.buffer_size), nbins,
                     group.nsegments, group.ncoords, group.max_sugg,
-                    group.branch_max),
+                    group.branch_max, group.held_leaves),
                 ep_fixed_bytes<FoldType>(m_memory, shared.buffer_size,
                                          shared.coord_size,
                                          shared.ffa_transient_bytes));
@@ -644,8 +1010,29 @@ private:
                                 std::move(min_eval), max_width, tolerance);
         };
 
+        // A chunk that does not fit with every seed at once tries the fewest
+        // seed slices that fit, before the width search narrows it. A sliced
+        // chunk widens only while its FFA buffers stay within
+        // kSlicedFFAShare of the limit, and with at most kMaxSeedSlices
+        // slices; a minimum-width chunk takes as many as it needs. Whether a
+        // smaller CUDA batch beats the slices is decided per plan
+        // (plan_sweep).
         const EvalFn size_fn = [&](double start, double end) {
-            return scaled(design_idx, design, start, end);
+            auto c         = scaled(design_idx, design, start, end);
+            const auto fit = fits(c);
+            if (fit.ok || fit.outside_cap) {
+                return c;
+            }
+            const bool min_width =
+                end - start <= kMinChunkWidthHz * (1.0 + kRelativeTolerance);
+            if (!min_width && ffa_gb(c) > kSlicedFFAShare * m_limit_gb) {
+                return c;
+            }
+            const auto& cells = cell_forecast(design_idx, design, start, end);
+            return fit_slices(
+                std::move(c), cells, nbins,
+                min_width ? cells.n_cells() : kMaxSeedSlices,
+                [&](const EvaluatedChunk& e) { return fits(e).ok; });
         };
 
         // Sliver absorption: merge a tiny leftover into the last chunk.
@@ -698,6 +1085,8 @@ private:
                 .coord_size          = eval.coord_size,
                 .fold_size           = eval.fold_size,
                 .ffa_transient_bytes = eval.ffa_transient_bytes,
+                .seed_slice_edges    = eval.seed_slice_edges,
+                .held_final_leaves   = eval.held_leaves,
             });
             plan.chunk_stats.push_back(EPChunkStats{
                 .chunk_id         = chunk_id,
@@ -720,6 +1109,9 @@ private:
                 .pd_se            = eval.pd_se,
                 .memory_gb        = eval.memory_gb,
                 .overlap_fraction = overlap_fraction,
+                .n_seed_slices    = eval.seed_slice_edges.empty()
+                                        ? SizeType{1}
+                                        : eval.seed_slice_edges.size() - 1,
             });
 
             // A new run starts when nbins changes (same rule as the sweep).
@@ -731,6 +1123,16 @@ private:
             }
             state.group.absorb(eval);
             state.shared.absorb(eval);
+            const double n_slices =
+                eval.seed_slice_edges.empty()
+                    ? 1.0
+                    : static_cast<double>(eval.seed_slice_edges.size() - 1);
+            plan.estimated_search_s +=
+                (kCudaIterationSeconds *
+                 ((eval.total_parents / static_cast<double>(std::max<SizeType>(
+                                            eval.batch_size, 1))) +
+                  (n_slices * static_cast<double>(design.nsegments - 1)))) +
+                (kCudaLeafSeconds * eval.total_population);
             plan.max_sugg    = std::max(plan.max_sugg, eval.max_sugg);
             plan.max_ncoords = std::max(plan.max_ncoords, eval.ncoords);
         };

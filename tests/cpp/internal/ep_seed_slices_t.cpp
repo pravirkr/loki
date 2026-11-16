@@ -59,14 +59,15 @@ run_cpu_edges(const loki::search::PulsarSearchConfig& cfg,
               const std::vector<float>& ts_v,
               const std::vector<SizeType>& edges,
               const PruneRFIConfig& rfi                         = {},
-              const std::optional<LeafReductionSpec>& reduction = {}) {
+              const std::optional<LeafReductionSpec>& reduction = {},
+              SizeType max_sugg                                 = 1U << 16U) {
     const TempDir outdir(fmt::format("loki-seed-slices-{}", edges.size()));
     const auto thresholds = loki::test::seed_slice_thresholds(cfg);
     const auto run        = [&]<typename FoldType>() {
         auto engine = loki::algorithms::detail::make_ep_cpu<FoldType>(
             cfg, thresholds, /*n_runs=*/2, /*ref_segs=*/std::nullopt,
-            /*ascend_levels=*/{}, /*max_sugg=*/1U << 16U, /*batch_size=*/64,
-            "taylor", /*show_progress=*/false, rfi);
+            /*ascend_levels=*/{}, max_sugg, /*batch_size=*/64, "taylor",
+            /*show_progress=*/false, rfi);
         engine->set_seed_slices(edges);
         engine->set_leaf_reduction(reduction);
         engine->execute(ts_e, ts_v, outdir.path(), "slices");
@@ -278,6 +279,30 @@ TEST_CASE("CPU EP: seed slices give the leaves and stats of one prune",
                     std::invalid_argument);
     CHECK_THROWS_AS(engine->set_seed_slices({0, 4, 4, n_freq}),
                     std::invalid_argument);
+}
+
+TEST_CASE("CPU EP: seed slices fit a tree smaller than the seeds",
+          "[ep][seed_slices]") {
+    // A planner that slices sizes the tree for the largest slice, below the
+    // seed count: the slices must still give the leaves of one prune with a
+    // tree that holds every seed.
+    const auto cfg          = loki::test::seed_slice_config(/*nparams=*/2,
+                                                            /*fourier=*/false,
+                                                            /*nthreads=*/1);
+    const auto [ts_e, ts_v] = loki::test::seed_slice_series(cfg);
+    const loki::plans::FFAPlan<float> plan(cfg);
+    const auto ncoords  = plan.get_ncoords().back();
+    const auto n_freq   = n_freq_cells(cfg);
+    const auto max_sugg = ncoords / 2;
+    REQUIRE(max_sugg > 0);
+    const auto whole  = run_cpu(cfg, ts_e, ts_v, 1);
+    const auto sliced = run_cpu_edges(
+        cfg, ts_e, ts_v, loki::search::even_seed_slice_edges(n_freq, n_freq),
+        {}, {}, max_sugg);
+    loki::test::check_same_runs(whole, sliced);
+    for (const auto& run : sliced) {
+        CHECK(run.total_overloads() == 0);
+    }
 }
 
 TEST_CASE("CPU EP: seed slices keep the per-run leaf reduction",

@@ -37,6 +37,10 @@ def test_ep_region_planner_accepts_workers_and_rfi_config() -> None:
     for chunk in planner.chunk_cfgs:
         assert chunk.chunk_memory_gb <= planner.stats.max_memory_gb
         assert chunk.ffa_transient_bytes == 0
+        # An ample limit prunes every seed of a run at once.
+        assert list(chunk.seed_slice_edges) == []
+        assert chunk.held_final_leaves == 0
+    assert all(c.n_seed_slices == 1 for c in planner.stats.chunk_stats)
 
 
 @pytest.mark.skipif(

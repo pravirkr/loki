@@ -54,11 +54,13 @@ constexpr SizeType kMaxSugg = 1U << 16U;
 std::vector<RunResults> run_engine(const loki::search::PulsarSearchConfig& cfg,
                                    const std::vector<float>& ts_e,
                                    const std::vector<float>& ts_v,
-                                   SizeType n_slices) {
+                                   SizeType n_slices,
+                                   SizeType max_sugg = kMaxSugg,
+                                   SizeType batch    = kBatch) {
     const TempDir outdir(fmt::format("loki-seed-slices-cuda-{}", n_slices));
     auto engine = loki::algorithms::detail::make_ep_gpu<ComplexType>(
         cfg, loki::test::seed_slice_thresholds(cfg), /*n_runs=*/2,
-        /*ref_segs=*/std::nullopt, /*ascend_levels=*/{}, kMaxSugg, kBatch,
+        /*ref_segs=*/std::nullopt, /*ascend_levels=*/{}, max_sugg, batch,
         "taylor", /*device_id=*/0);
     engine->set_seed_slices(loki::search::even_seed_slice_edges(
         n_slices, loki::plans::FFAPlan<ComplexType>(cfg)
@@ -185,6 +187,37 @@ TEST_CASE("CUDA EP: seed slices give the leaves and stats of one prune",
             CAPTURE(k);
             loki::test::check_same_runs(whole, run_engine(cfg, ts_e, ts_v, k));
         }
+    }
+}
+
+TEST_CASE("CUDA EP: seed slices fit a tree smaller than the seeds",
+          "[ep][seed_slices][cuda]") {
+    // A planner that slices sizes the tree for the largest slice: with a
+    // batch small enough that the tree's floor (one branched batch) is below
+    // the seed count, the slices still give the leaves of one prune.
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("CUDA backend not built");
+    }
+    const loki::cuda_utils::CudaSetDeviceGuard guard(0);
+    const auto cfg          = loki::test::seed_slice_config(/*nparams=*/2,
+                                                            /*fourier=*/true,
+                                                            /*nthreads=*/1);
+    const auto [ts_e, ts_v] = loki::test::seed_slice_series(cfg);
+    const loki::plans::FFAPlan<ComplexType> plan(cfg);
+    const auto ncoords = plan.get_ncoords().back();
+    const auto n_freq  = plan.get_param_counts().back().back();
+    const auto branch_max =
+        std::max<SizeType>(plan.forecast_branching().max_children, SizeType{1});
+    constexpr SizeType kSmallBatch = 1;
+    const auto max_sugg            = ncoords / 2;
+    REQUIRE(loki::algorithms::detail::ep_cuda_effective_max_sugg(
+                kSmallBatch, branch_max, max_sugg) < ncoords);
+    const auto whole = run_engine(cfg, ts_e, ts_v, 1);
+    const auto sliced =
+        run_engine(cfg, ts_e, ts_v, n_freq, max_sugg, kSmallBatch);
+    loki::test::check_same_runs(whole, sliced);
+    for (const auto& run : sliced) {
+        CHECK(run.total_overloads() == 0);
     }
 }
 

@@ -232,6 +232,7 @@ public:
                         static_cast<std::uint32_t>(chunk.cfg.get_nbins());
                     chunk_ep->set_leaf_reduction(spec);
                 }
+                chunk_ep->set_seed_slices(chunk.seed_slice_edges);
 
                 chunk_ep->execute(ts_e, ts_v, tmp_dir, chunk_prefix);
             }

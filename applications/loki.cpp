@@ -780,10 +780,18 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
             chunk.nominal_f_end, chunk.actual_f_start, chunk.actual_f_end,
             chunk.ncoords, format_pow2(chunk.max_sugg), chunk.branch_max,
             chunk.nsegments, chunk.chunk_memory_gb, chunk.pd);
+        const auto n_slices = chunk.seed_slice_edges.empty()
+                                  ? SizeType{1}
+                                  : chunk.seed_slice_edges.size() - 1;
         std::cout << con.muted(fmt::format(
-                         "       predicted peak {}, live ring {}, batch {}",
+                         "       predicted peak {}, live ring {}, batch {}{}",
                          format_pow2(chunk.predicted_peak),
-                         format_pow2(chunk.predicted_live), chunk.batch_size))
+                         format_pow2(chunk.predicted_live), chunk.batch_size,
+                         n_slices > 1
+                             ? fmt::format(", {} seed slices (forecast per "
+                                           "slice)",
+                                           n_slices)
+                             : std::string{}))
                   << "\n";
     }
 

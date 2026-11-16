@@ -357,6 +357,36 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         }
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
     }
+
+    // 9. Seed slices: a run's frequency cells in slices round-trip, and edges
+    // that do not split the chunk's cells are rejected.
+    {
+        CHECK(orig_chunks[0].seed_slice_edges.empty());
+        CHECK(planner.get_stats().get_chunk_stats()[0].n_seed_slices == 1);
+        const loki::plans::FFAPlan<float> plan(orig_chunks[0].cfg);
+        const SizeType n_freq = plan.get_param_counts().back().back();
+        REQUIRE(n_freq >= 3);
+        const auto with_edges = [&](const std::string& filename,
+                                    const std::vector<SizeType>& edges) {
+            const auto path = outdir / filename;
+            std::filesystem::copy_file(
+                cache_file, path,
+                std::filesystem::copy_options::overwrite_existing);
+            const HighFive::File f(path.string(), HighFive::File::ReadWrite);
+            auto chunk = f.getGroup("chunks").getGroup("chunk_0000");
+            chunk.unlink("seed_slice_edges");
+            chunk.createDataSet("seed_slice_edges", edges);
+            return path;
+        };
+        const std::vector<SizeType> edges{0, n_freq / 3, n_freq};
+        reloaded.load_cache(with_edges("cache_slices.h5", edges));
+        CHECK(reloaded.get_chunk_cfgs()[0].seed_slice_edges == edges);
+        CHECK(reloaded.get_stats().get_chunk_stats()[0].n_seed_slices == 2);
+        CHECK_THROWS_AS(
+            reloaded.load_cache(
+                with_edges("cache_bad_slices.h5", {0, n_freq / 3, n_freq + 1})),
+            std::invalid_argument);
+    }
 }
 
 TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",

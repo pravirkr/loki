@@ -4,12 +4,14 @@
 #include <bit>
 #include <cmath>
 #include <memory>
+#include <numeric>
 #include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <spdlog/sinks/ostream_sink.h>
@@ -22,6 +24,9 @@
 #include "loki/search/configs.hpp"
 
 #include "lib/algorithms/ep_memory.hpp"
+#include "lib/common/plans_detail.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/search/prune_mask.hpp"
 
 using loki::ParamLimit;
 using loki::SizeType;
@@ -533,7 +538,7 @@ TEST_CASE("CUDA batch keeps the work per batch at 2^22 parent-bins",
     CHECK(ep_cuda_batch_for_nbins(1024, 1024) == 1024);
 }
 
-TEST_CASE("CUDA EP lowers the batch only when a minimum chunk cannot fit",
+TEST_CASE("CUDA EP lowers the batch when a minimum chunk cannot fit",
           "[ep_chunking]") {
     const auto cfg     = make_cfg(140.0, 145.0, 1);
     const auto designs = make_designs(cfg, 1000.0);
@@ -636,4 +641,247 @@ TEST_CASE("EP chunking carries the region's pass rates to each chunk",
         const double peak = std::ranges::max(own);
         CHECK(std::abs(c.peak_complexity - peak) <= 1.0e-6 * peak);
     }
+}
+
+namespace {
+
+/// Frequency cells of a chunk's seeds.
+SizeType n_freq_cells(const loki::algorithms::EPChunkConfig& c) {
+    const loki::plans::FFAPlan<float> plan(c.cfg);
+    return plan.get_param_counts().back().back();
+}
+
+/// A designed region whose population grows as its branching with pass
+/// rate @p pass per stage, times @p scale, and whose last stage keeps few
+/// leaves, as real schedules do.
+RegionDesign make_peaked_design(const PulsarSearchConfig& cfg,
+                                double f_start,
+                                double f_end,
+                                double scale) {
+    auto design   = make_design(cfg, f_start, f_end, 32, 1.0F);
+    design.design = [=](std::span<const float> bp, double, double) {
+        auto complexity   = scaled_complexity(bp, scale);
+        complexity.back() = 1.0e-2;
+        return loki::algorithms::detail::ChunkDesign{
+            .thresholds = std::vector<float>(bp.size(), 1.0F),
+            .pd         = 0.5,
+            .pd_se      = 0.01,
+            .forecast   = {.complexity = std::move(complexity),
+                           .pass_rate  = std::vector<double>(bp.size(), 0.5),
+                           .ntrials    = 1U << 15U},
+        };
+    };
+    return design;
+}
+
+} // namespace
+
+TEST_CASE("EP chunking prunes seeds in slices before narrowing a chunk",
+          "[ep_chunking]") {
+    const auto cfg    = make_cfg(140.0, 145.0, /*nthreads=*/1);
+    const auto design = make_peaked_design(cfg, 140.0, 145.0, 2.0e2);
+    const auto ctx    = make_ctx(cfg);
+    const auto ample =
+        plan_chunks<float>(cfg, "taylor", std::span(&design, 1), 0.0, 8.0, ctx);
+    REQUIRE(ample.chunk_cfgs.size() == 1);
+    const auto& whole = ample.chunk_cfgs.front();
+    CHECK(whole.seed_slice_edges.empty());
+    CHECK(whole.held_final_leaves == 0);
+    CHECK(ample.chunk_stats.front().n_seed_slices == 1);
+
+    const double limit = 0.5 * ample.peak_memory_gb;
+    const auto tight = plan_chunks<float>(cfg, "taylor", std::span(&design, 1),
+                                          0.0, limit, ctx);
+    check_plan_fits(tight, ctx, limit);
+    // The chunk keeps its width: its seeds are pruned in slices instead.
+    REQUIRE(tight.chunk_cfgs.size() == 1);
+    const auto& c     = tight.chunk_cfgs.front();
+    const auto& edges = c.seed_slice_edges;
+    REQUIRE(edges.size() >= 3);
+    const auto k = edges.size() - 1;
+    CHECK_NOTHROW(loki::search::check_seed_slice_edges(edges, n_freq_cells(c)));
+    CHECK(tight.chunk_stats.front().n_seed_slices == k);
+    CHECK(c.batch_size == whole.batch_size);
+    CHECK(c.held_final_leaves > 0);
+    CHECK(c.ncoords == whole.ncoords);
+    // The largest slice holds at least its share of the whole live ring,
+    // and less than all of it.
+    CHECK(c.predicted_live < whole.predicted_live);
+    CHECK(static_cast<double>(c.predicted_live) >=
+          static_cast<double>(whole.predicted_live) / static_cast<double>(k));
+    CHECK(c.max_sugg < whole.max_sugg);
+    CHECK(k <= 64);
+}
+
+TEST_CASE("CUDA EP slices seeds where a smaller batch would cost more",
+          "[ep_chunking]") {
+    // A small batch: the tree, not the room for one branched batch, binds.
+    const auto cfg    = make_cfg(140.0, 145.0, 1);
+    const auto design = make_peaked_design(cfg, 140.0, 145.0, 2.0e2);
+    auto ctx          = make_cuda_ctx(cfg);
+    ctx.batch_size    = 1U << 6U;
+    const auto ample =
+        plan_chunks<float>(cfg, "taylor", std::span(&design, 1), 0.0, 8.0, ctx);
+    REQUIRE(ample.chunk_cfgs.size() == 1);
+    REQUIRE(ample.chunk_cfgs.front().seed_slice_edges.empty());
+    const double limit = 0.6 * ample.peak_memory_gb;
+    const auto tight = plan_chunks<float>(cfg, "taylor", std::span(&design, 1),
+                                          0.0, limit, ctx);
+    check_plan_fits(tight, ctx, limit);
+    REQUIRE(tight.chunk_cfgs.size() == 1);
+    const auto& c = tight.chunk_cfgs.front();
+    CHECK(c.seed_slice_edges.size() >= 3);
+    CHECK(c.batch_size == ample.chunk_cfgs.front().batch_size);
+}
+
+TEST_CASE("Branching stages per frequency cell give the branching mean",
+          "[ep_chunking]") {
+    // The planner forecasts a slice of seeds by summing its cells' leaves
+    // per seed; their ratio over the whole grid must be the mean the
+    // thresholds are designed for.
+    const auto cfg =
+        make_cfg(140.0, 145.0, 1).get_updated_ep_config(32, 1.0, 140.0, 145.0);
+    const loki::plans::FFAPlan<float> plan(cfg);
+    const auto mean = plan.forecast_branching("taylor").mean;
+    std::vector<double> sums;
+    const auto forecast = loki::plans::detail::simulate_branching_stages(
+        plan, "taylor", [&](SizeType s, std::span<const double> w) {
+            CHECK(s == sums.size());
+            CHECK(w.size() == plan.get_param_counts().back().back());
+            sums.push_back(std::accumulate(w.begin(), w.end(), 0.0));
+        });
+    CHECK(forecast.mean == mean);
+    REQUIRE(sums.size() == mean.size());
+    double prev = static_cast<double>(plan.get_param_counts().back().back());
+    for (SizeType s = 0; s < sums.size(); ++s) {
+        CHECK(sums[s] / prev == Catch::Approx(mean[s]).epsilon(1e-12));
+        prev = sums[s];
+    }
+}
+
+namespace {
+
+/// FFA buffers of chunk @p c alone, in GB (the planner's ffa_gb).
+double chunk_ffa_gb(const loki::algorithms::EPChunkConfig& c,
+                    const EPMemoryContext& ctx) {
+    using loki::algorithms::detail::ep_fixed_bytes;
+    using loki::algorithms::detail::ep_input_bytes;
+    const auto fixed = ep_fixed_bytes<float>(ctx, c.buffer_size, c.coord_size,
+                                             c.ffa_transient_bytes);
+    return static_cast<double>(fixed - ep_input_bytes(ctx.nsamps)) /
+           loki::utils::kBytesPerGB;
+}
+
+SizeType n_slices(const loki::algorithms::EPChunkConfig& c) {
+    return c.seed_slice_edges.empty() ? 1 : c.seed_slice_edges.size() - 1;
+}
+
+} // namespace
+
+TEST_CASE("EP chunking widens a sliced chunk only within the FFA share",
+          "[ep_chunking]") {
+    // A wide region whose trees need slices: no chunk wider than the
+    // minimum may hold slices with FFA buffers above a quarter of the limit.
+    const auto cfg    = make_cfg(100.0, 145.0, /*nthreads=*/1);
+    const auto design = make_peaked_design(cfg, 100.0, 145.0, 2.0e2);
+    const auto ctx    = make_ctx(cfg);
+    const auto ample =
+        plan_chunks<float>(cfg, "taylor", std::span(&design, 1), 0.0, 8.0, ctx);
+    bool sliced = false;
+    for (const double share : {0.6, 0.4, 0.3, 0.2}) {
+        const double limit = share * ample.peak_memory_gb;
+        CAPTURE(limit);
+        const auto plan = plan_chunks<float>(
+            cfg, "taylor", std::span(&design, 1), 0.0, limit, ctx);
+        check_plan_fits(plan, ctx, limit);
+        for (const auto& c : plan.chunk_cfgs) {
+            if (n_slices(c) == 1 ||
+                c.nominal_f_end - c.nominal_f_start <= 2.0e-2) {
+                continue;
+            }
+            sliced = true;
+            CHECK(chunk_ffa_gb(c, ctx) <= 0.25 * limit);
+            CHECK(n_slices(c) <= 64);
+        }
+    }
+    CHECK(sliced);
+}
+
+TEST_CASE("EP chunking slices a minimum-width chunk as much as it needs",
+          "[ep_chunking]") {
+    // Doppler padding gives a minimum-width chunk many frequency cells; a
+    // limit that only fits the tree of a few of them needs more than the 64
+    // slices a widening chunk may take.
+    const auto cfg          = make_cfg(140.0, 145.0, /*nthreads=*/1);
+    const auto design       = make_peaked_design(cfg, 140.0, 145.0, 2.0e2);
+    const auto ctx          = make_ctx(cfg);
+    constexpr double kDrift = 0.05;
+    const auto ample = plan_chunks<float>(cfg, "taylor", std::span(&design, 1),
+                                          kDrift, 8.0, ctx);
+    REQUIRE(!ample.chunk_cfgs.empty());
+    REQUIRE(n_freq_cells(ample.chunk_cfgs.front()) > 64);
+    SizeType most = 0;
+    for (double limit = ample.peak_memory_gb; limit > 0.0; limit *= 0.97) {
+        CAPTURE(limit);
+        loki::algorithms::detail::ChunkPlan plan;
+        try {
+            plan = plan_chunks<float>(cfg, "taylor", std::span(&design, 1),
+                                      kDrift, limit, ctx);
+        } catch (const std::runtime_error&) {
+            break;
+        }
+        check_plan_fits(plan, ctx, limit);
+        for (const auto& c : plan.chunk_cfgs) {
+            CHECK_NOTHROW(loki::search::check_seed_slice_edges(
+                c.seed_slice_edges, n_freq_cells(c)));
+            most = std::max(most, n_slices(c));
+        }
+        if (most > 64) {
+            break;
+        }
+    }
+    CHECK(most > 64);
+}
+
+TEST_CASE("CUDA EP halves the batch only when that forecasts a faster search",
+          "[ep_chunking]") {
+    const auto cfg    = make_cfg(140.0, 145.0, 1);
+    const auto design = make_peaked_design(cfg, 140.0, 145.0, 2.0e2);
+    auto ctx          = make_cuda_ctx(cfg);
+    ctx.batch_size    = 1U << 12U;
+    std::ostringstream log;
+    const auto logger = spdlog::default_logger();
+    auto sink         = std::make_shared<spdlog::sinks::ostream_sink_mt>(log);
+    logger->sinks().push_back(sink);
+    const auto ample =
+        plan_chunks<float>(cfg, "taylor", std::span(&design, 1), 0.0, 8.0, ctx);
+    const auto ample_log = log.str();
+    bool chosen          = false;
+    for (const double share : {0.8, 0.6, 0.5, 0.4, 0.3}) {
+        log.str("");
+        const double limit = share * ample.peak_memory_gb;
+        CAPTURE(limit);
+        const auto plan = plan_chunks<float>(
+            cfg, "taylor", std::span(&design, 1), 0.0, limit, ctx);
+        check_plan_fits(plan, ctx, limit);
+        const auto text = log.str();
+        const auto at   = text.find("saves seed slices (forecast search ");
+        if (at == std::string::npos) {
+            continue;
+        }
+        // "... search <new> s against <old> s per run": the new is faster.
+        double faster = 0.0;
+        double slower = 0.0;
+        std::istringstream in(text.substr(at + 35));
+        std::string word;
+        in >> faster >> word >> word >> slower;
+        CHECK(faster < slower);
+        CHECK(plan.chunk_cfgs.front().batch_size < ctx.batch_size);
+        chosen = true;
+    }
+    std::erase(logger->sinks(), sink);
+    // Without slices the batch stays.
+    CHECK(ample_log.find("saves seed slices") == std::string::npos);
+    CHECK(ample.chunk_cfgs.front().batch_size == ctx.batch_size);
+    CHECK(chosen);
 }

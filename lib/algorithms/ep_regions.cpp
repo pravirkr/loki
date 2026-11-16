@@ -40,6 +40,7 @@
 #include "lib/detection/scheme.hpp"
 #include "lib/detection/thresholds_engine.hpp"
 #include "lib/search/ep_support.hpp"
+#include "lib/search/prune_mask.hpp"
 
 namespace loki::algorithms {
 
@@ -55,7 +56,7 @@ namespace {
     return f;
 }
 
-constexpr std::string_view kCacheVersion = "1.21.0";
+constexpr std::string_view kCacheVersion = "1.22.0";
 
 /// Threshold-scheme simulation of the planner. The seeds are fixed: the
 /// scheme sets the chunking, so plans of one configuration must not change
@@ -443,6 +444,10 @@ public:
             chunk_grp.createAttribute("buffer_size", chunk.buffer_size);
             chunk_grp.createAttribute("coord_size", chunk.coord_size);
             chunk_grp.createAttribute("fold_size", chunk.fold_size);
+            chunk_grp.createAttribute("held_final_leaves",
+                                      chunk.held_final_leaves);
+            // Empty for one slice.
+            chunk_grp.createDataSet("seed_slice_edges", chunk.seed_slice_edges);
 
             chunk_grp.createDataSet("threshold_scheme", chunk.threshold_scheme);
             chunk_grp.createDataSet("branching_pattern",
@@ -757,6 +762,10 @@ public:
             chunk_grp.getAttribute("pd_se").read(pd_se);
             chunk_grp.getAttribute("chunk_memory_gb").read(chunk_memory_gb);
             chunk_grp.getAttribute("nsegments").read(nsegments);
+            SizeType held_final_leaves{};
+            chunk_grp.getAttribute("held_final_leaves").read(held_final_leaves);
+            std::vector<SizeType> seed_slice_edges;
+            chunk_grp.getDataSet("seed_slice_edges").read(seed_slice_edges);
 
             std::vector<float> threshold_scheme;
             std::vector<float> branching_pattern;
@@ -781,6 +790,10 @@ public:
             if (chunk_grp.hasAttribute("ncoords")) {
                 chunk_grp.getAttribute("ncoords").read(ncoords);
             }
+            search::check_seed_slice_edges(
+                seed_slice_edges, plan.get_param_counts().back().back());
+            const SizeType n_seed_slices =
+                seed_slice_edges.empty() ? 1 : seed_slice_edges.size() - 1;
             const SizeType buffer_size = plan.get_buffer_size();
             const SizeType coord_size  = plan.get_coord_size();
             const SizeType fold_size   = plan.get_fold_size();
@@ -810,6 +823,8 @@ public:
                 .coord_size          = coord_size,
                 .fold_size           = fold_size,
                 .ffa_transient_bytes = transient,
+                .seed_slice_edges    = std::move(seed_slice_edges),
+                .held_final_leaves   = held_final_leaves,
             });
 
             const double nominal_width = nominal_f_end - nominal_f_start;
@@ -838,6 +853,7 @@ public:
                 .pd_se            = pd_se,
                 .memory_gb        = chunk_memory_gb,
                 .overlap_fraction = overlap_fraction,
+                .n_seed_slices    = n_seed_slices,
             });
 
             max_sugg_all        = std::max(max_sugg_all, max_sugg);

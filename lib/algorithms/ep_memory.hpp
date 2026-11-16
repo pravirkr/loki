@@ -95,7 +95,9 @@ constexpr SizeType ep_cuda_batch_for_nbins(SizeType nbins,
 /// 14: CUDA RFI control without harvesting does not count harvest staging.
 /// 15: branch_max is the forecast's worst leaf, without a floor of 32;
 ///     the CUDA batch of a chunk is kEPCudaBatchWork / nbins.
-constexpr std::uint32_t kEPMemoryModelVersion = 15U;
+/// 16: seed slices: the tree holds the largest slice; a CPU worker also
+///     holds the final leaves of a run's finished slices.
+constexpr std::uint32_t kEPMemoryModelVersion = 16U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -312,6 +314,12 @@ struct EPRingForecast {
     double live{0.0};
     /// Largest per-seed complexity (without margin), for reports.
     double peak_complexity{1.0};
+    /// Population of the last stage (with its margin): the final leaves.
+    double final_population{0.0};
+    /// Sums over the stages of the parents (L_{s-1}) and of the survivors
+    /// (L_s): the leaves a run branches and scores.
+    double total_parents{0.0};
+    double total_population{0.0};
 };
 
 /**
@@ -338,7 +346,10 @@ inline EPRingForecast ep_ring_forecast(SizeType ncoords,
         out.peak                = std::max(out.peak, population);
         out.live                = std::max(out.live, previous + population);
         out.peak_complexity     = std::max(out.peak_complexity, c);
-        previous                = population;
+        out.final_population    = population;
+        out.total_parents += previous;
+        out.total_population += population;
+        previous = population;
     }
     return out;
 }
@@ -562,14 +573,35 @@ SizeType ep_ffa_transient_bytes(const EPMemoryContext& ctx,
            (tables.phase_map_entries * sizeof(std::uint32_t));
 }
 
-/// Bytes each worker needs for one chunk group.
+/**
+ * @brief Host bytes per final leaf of a finished seed slice that a CPU worker
+ * holds until its run's merged result is written: the leaf, its two scores
+ * and its width (PruneImpl::SliceResults), doubled for the growth of the
+ * vectors that collect them.
+ */
+constexpr SizeType ep_held_leaf_bytes(SizeType nparams) noexcept {
+    constexpr SizeType kParamStride = 2U;
+    constexpr SizeType kGrowth      = 2U;
+    const SizeType leaves_stride    = (nparams + 2) * kParamStride;
+    return kGrowth * ((leaves_stride * sizeof(double)) + (2 * sizeof(float)) +
+                      sizeof(std::uint32_t));
+}
+
+/**
+ * @brief Bytes each worker needs for one chunk group.
+ *
+ * @p held_leaves is the forecast of final leaves a run with seed slices holds
+ * (EPChunkConfig::held_final_leaves). The CPU policy counts them on the host;
+ * the CUDA policy models only device memory, and its host copies are small.
+ */
 template <SupportedFoldType FoldType>
 SizeType ep_thread_bytes(const EPMemoryContext& ctx,
                          SizeType nbins,
                          SizeType nsegments,
                          SizeType ncoords_ffa,
                          SizeType max_sugg,
-                         SizeType branch_max) {
+                         SizeType branch_max,
+                         SizeType held_leaves = 0) {
     if (ctx.kind == EPMemoryKind::kCuda) {
         return ep_cuda_workspace_bytes<FoldType>(
             ctx, nbins, nsegments, ncoords_ffa, max_sugg, branch_max);
@@ -578,7 +610,8 @@ SizeType ep_thread_bytes(const EPMemoryContext& ctx,
                                         ncoords_ffa, max_sugg, branch_max,
                                         ctx.batch_size) +
            ep_harvest_bytes<FoldType>(ctx.nparams, nbins, ctx.harvest) +
-           max_sugg * sizeof(std::uint32_t);
+           max_sugg * sizeof(std::uint32_t) +
+           held_leaves * ep_held_leaf_bytes(ctx.nparams);
 }
 
 /// Bytes shared by all chunks: the FFA workspace (internal fold buffer and
@@ -634,6 +667,7 @@ struct EPChunkGroup {
     SizeType branch_max{0};
     SizeType ncoords{0};
     SizeType nsegments{0};
+    SizeType held_leaves{0};
 };
 
 /// Groups @p chunks into contiguous runs of equal nbins, as EPFreqSweep does.
@@ -651,6 +685,8 @@ ep_chunk_groups(std::span<const EPChunkConfig> chunks) {
             g.branch_max = std::max(g.branch_max, chunks[i].branch_max);
             g.ncoords    = std::max(g.ncoords, chunks[i].ncoords);
             g.nsegments  = std::max(g.nsegments, chunks[i].nsegments);
+            g.held_leaves =
+                std::max(g.held_leaves, chunks[i].held_final_leaves);
         }
         g.end = i;
         groups.push_back(g);
@@ -667,7 +703,7 @@ SizeType ep_group_thread_bytes(const EPMemoryContext& ctx,
         memory.batch_size = g.batch_size;
     }
     return ep_thread_bytes<FoldType>(memory, g.nbins, g.nsegments, g.ncoords,
-                                     g.max_sugg, g.branch_max);
+                                     g.max_sugg, g.branch_max, g.held_leaves);
 }
 
 /**

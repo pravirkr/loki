@@ -101,7 +101,7 @@ peak = n_workers * thread_bytes(group) + shared_bytes + input_bytes
 
 | Term | Contents | Lifetime |
 | --- | --- | --- |
-| `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_harvest_bytes`. The pruning functors score in tiles of 16 leaves and hold no batch-sized scoring scratch | one group |
+| `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_harvest_bytes`, and on the CPU the final leaves a run holds between its seed slices (see Seed slices). The pruning functors score in tiles of 16 leaves and hold no batch-sized scoring scratch | one group |
 | `shared_bytes` | FFA workspace fold buffer and coordinates + output fold buffer, sized from the global maxima of `buffer_size` and `coord_size` | whole sweep |
 | `input_bytes` | `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
 
@@ -534,6 +534,51 @@ late can enlarge them after earlier groups were already fitted:
 After a replan the planner checks that the final peak is within the limit.
 `ChunkPlan::replanned` and `shared_cap_scale` record which path ran. Chunk
 evaluations (each builds an `FFAPlan`) are memoised across passes.
+
+### Seed slices
+
+A chunk whose tree does not fit with every seed at once is pruned in seed
+slices before the width search narrows it. On CUDA the planner then halves
+the batch while the plan uses slices and a forecast of the search time
+(batch iterations per level, slices times levels, and leaves) drops: a
+smaller batch is cheap until launches dominate, while every slice repeats all
+levels. The batch ladder still runs when no chunk fits at all. Each run then prunes its seeds in
+K sequential slices of frequency cells (every acceleration) over the same FFA
+output, and writes one merged result. Each subtree descends from one seed and
+every lookup goes to the whole FFA output, so the slices' final leaves are
+those of one prune, unless the tree overflows or an early harvest widens the
+mask (a harvest can then record another leaf of the same source).
+
+The planner forecasts a slice from its cells. The branching simulation gives
+each frequency cell's leaves per seed after stage `s`, `w_s[i]`, whose sums
+over the grid give the branching pattern. With the region's pass rates
+`q_s = c_s m_s / prod_{j <= s} bp_j`, cell `i` holds
+`n_accel * w_s[i] * q_s` leaves after stage `s`; the cells sum to the chunk's
+`L_s`. A cell's live is the largest adjacent sum, and a slice's live is at
+most the sum of its cells':
+
+```text
+live_slice = max over slices (sum of cell lives) + reserve
+reserve    = min(32 * largest cell live, live / 16)
+```
+
+The reserve is room for data that departs from the noise model: a pulsar or
+RFI puts its subtrees into a few cells, so one slice can hold far more than
+its share (one slice keeps the whole forecast as that headroom).
+`max_sugg` is sized from `live_slice` as above, and `EPChunkConfig`'s
+`max_sugg`, `predicted_peak` and `predicted_live` are the largest slice's.
+The planner takes the fewest slices that fit, at most 64 while it widens a
+chunk and up to one per frequency cell at the minimum width, with edges that
+make the slices' forecasts as equal as possible (`seed_slice_edges`, stored in
+the plan cache). A chunk that needs slices may widen only while its own FFA
+buffers take at most a quarter of the limit: those buffers are shared by the
+whole sweep, and wider sliced chunks would hand them the room the slices
+free. On the CPU a run keeps its finished slices' final leaves (the
+leaf, two scores and a width, doubled for vector growth) until it writes them,
+`L_final` leaves per worker (`held_final_leaves`); the CUDA engine keeps them
+on the host, which the CUDA policy does not model. Every slice repeats all
+pruning levels, so slices cost search time (docs/performance.md, "Seed slices
+of a run"); the planner warns once when it uses them.
 
 `EPChunkConfig::chunk_memory_gb` and `EPChunkStats::memory_gb` are the memory of
 one chunk run alone. `EPRegionStats::get_max_memory_gb()` is the sweep peak

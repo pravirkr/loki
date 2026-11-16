@@ -21,6 +21,8 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/common/plans_detail.hpp"
+#include "lib/core/branching.hpp"
 #include "lib/core/chebyshev.hpp"
 #include "lib/core/circular.hpp"
 #include "lib/core/taylor.hpp"
@@ -30,6 +32,60 @@
 #include "lib/detail/utils.hpp"
 
 namespace loki::plans {
+
+namespace {
+
+/// The exact branching simulation of @p poly_basis for @p n_params
+/// parameters on the last FFA level's grid @p param_arr.
+BranchingForecast
+dispatch_branching(std::string_view poly_basis,
+                   SizeType n_params,
+                   std::span<const std::vector<double>> param_arr,
+                   std::span<const double> dparams,
+                   double tseg_ffa,
+                   SizeType n_segs_active,
+                   SizeType nbins,
+                   double eta,
+                   SizeType ref_seg,
+                   bool use_conservative_tile,
+                   const core::BranchingStageFn& on_stage) {
+    if (poly_basis == "taylor") {
+        if (n_params <= 4) {
+            return core::generate_bp_poly_taylor(
+                param_arr, dparams, tseg_ffa, n_segs_active, nbins, eta,
+                ref_seg, use_conservative_tile, on_stage);
+        }
+        if (n_params == 5) {
+            return core::generate_bp_circ_taylor(
+                param_arr, dparams, tseg_ffa, n_segs_active, nbins, eta,
+                ref_seg, use_conservative_tile, on_stage);
+        }
+        throw std::invalid_argument("nparams > 5 not supported for "
+                                    "branching pattern generation");
+    }
+    if (poly_basis == "chebyshev") {
+        if (use_conservative_tile) {
+            throw std::invalid_argument(
+                "Conservative tile is not supported for chebyshev "
+                "branching pattern generation");
+        }
+        if (n_params == 5) {
+            throw std::invalid_argument("nparams > 5 not supported for "
+                                        "branching pattern for chebyshev "
+                                        "basis");
+        }
+        if (n_params <= 4) {
+            return core::generate_bp_poly_chebyshev(
+                param_arr, dparams, tseg_ffa, n_segs_active, nbins, eta,
+                ref_seg, on_stage);
+        }
+    }
+    throw std::invalid_argument(
+        fmt::format("Invalid poly_basis ({}) for branching pattern generation",
+                    poly_basis));
+}
+
+} // namespace
 
 struct FFAPlanBase::Impl {
     SizeType n_params{}; // # of parameters to search over (..., a, f)
@@ -282,44 +338,11 @@ struct FFAPlanBase::Impl {
     BranchingForecast simulate_branching(std::string_view poly_basis,
                                          SizeType ref_seg,
                                          bool use_conservative_tile) const {
-        const auto param_arr         = compute_param_grid(n_levels - 1);
-        const SizeType n_segs_active = get_nsegments_active();
-        if (poly_basis == "taylor") {
-            if (n_params <= 4) {
-                return core::generate_bp_poly_taylor(
-                    param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
-                    n_segs_active, m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg,
-                    use_conservative_tile);
-            }
-            if (n_params == 5) {
-                return core::generate_bp_circ_taylor(
-                    param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
-                    n_segs_active, m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg,
-                    use_conservative_tile);
-            }
-            throw std::invalid_argument("nparams > 5 not supported for "
-                                        "branching pattern generation");
-        }
-        if (poly_basis == "chebyshev") {
-            if (use_conservative_tile) {
-                throw std::invalid_argument(
-                    "Conservative tile is not supported for chebyshev "
-                    "branching pattern generation");
-            }
-            if (n_params == 5) {
-                throw std::invalid_argument(
-                    "nparams > 5 not supported for "
-                    "branching pattern for chebyshev basis");
-            }
-            if (n_params <= 4) {
-                return core::generate_bp_poly_chebyshev(
-                    param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
-                    n_segs_active, m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg);
-            }
-        }
-        throw std::invalid_argument(fmt::format(
-            "Invalid poly_basis ({}) for branching pattern generation",
-            poly_basis));
+        return dispatch_branching(
+            poly_basis, n_params, compute_param_grid(n_levels - 1),
+            dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
+            get_nsegments_active(), m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg,
+            use_conservative_tile, {});
     }
 
 private:
@@ -514,6 +537,19 @@ FFAPlanBase::get_branching_pattern(std::string_view poly_basis,
 BranchingForecast FFAPlanBase::forecast_branching(std::string_view poly_basis,
                                                   SizeType ref_seg) const {
     return m_impl->forecast_branching(poly_basis, ref_seg);
+}
+
+BranchingForecast
+detail::simulate_branching_stages(const FFAPlanBase& plan,
+                                  std::string_view poly_basis,
+                                  const core::BranchingStageFn& on_stage) {
+    const auto n_levels = plan.get_n_levels();
+    const auto& cfg     = plan.get_config();
+    return dispatch_branching(
+        poly_basis, plan.get_n_params(), plan.compute_param_grid(n_levels - 1),
+        plan.get_dparams_actual()[n_levels - 1], cfg.get_tseg_ffa(),
+        plan.get_nsegments_active(), cfg.get_nbins(), cfg.get_eta(),
+        /*ref_seg=*/0, /*use_conservative_tile=*/false, on_stage);
 }
 
 // --- Implementation for FFAPlan ---
