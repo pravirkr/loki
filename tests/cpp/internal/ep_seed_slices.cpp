@@ -236,8 +236,17 @@ std::vector<RunResults> read_run_results(const std::filesystem::path& dir) {
         }
         RunResults out{.name   = name,
                        .leaves = make_leaves(params, scores, scores_ep, widths),
-                       .stats =
-                           read_level_stats(run.getDataSet("level_stats"))};
+                       .stats = read_level_stats(run.getDataSet("level_stats")),
+                       .n_harvested_total = 0,
+                       .reduction         = {}};
+        for (const char* attr :
+             {"n_final_leaves", "n_leaves_above_snr_min", "n_cell_dropped",
+              "n_dominated", "n_leaves_retained"}) {
+            if (run.hasAttribute(attr)) {
+                out.reduction.push_back(
+                    run.getAttribute(attr).read<std::uint64_t>());
+            }
+        }
         if (run.exist("harvest")) {
             run.getGroup("harvest")
                 .getAttribute("n_harvested_total")
@@ -253,7 +262,8 @@ RunResults to_run_results(const pipelines::detail::EPResultPayload& payload) {
             .leaves            = make_leaves(payload.leaves, payload.scores,
                                              payload.scores_ep, payload.widths),
             .stats             = payload.stats.get_packed_data().first,
-            .n_harvested_total = payload.n_harvested_total};
+            .n_harvested_total = payload.n_harvested_total,
+            .reduction         = {}};
 }
 
 void check_same_runs(const std::vector<RunResults>& a,
@@ -263,6 +273,7 @@ void check_same_runs(const std::vector<RunResults>& a,
         CAPTURE(a[r].name);
         CHECK(a[r].name == b[r].name);
         CHECK(a[r].n_harvested_total == b[r].n_harvested_total);
+        CHECK(a[r].reduction == b[r].reduction);
         REQUIRE(a[r].n_leaves() == b[r].n_leaves());
         CHECK(a[r].leaves == b[r].leaves);
         REQUIRE(a[r].stats.size() == b[r].stats.size());

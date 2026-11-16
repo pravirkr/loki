@@ -112,9 +112,9 @@ public:
                  const std::filesystem::path& outdir = "./",
                  std::string_view file_prefix        = "test");
 
-    /// Prune each run's seeds in @p n_slices sequential frequency slices
-    /// (see EPMultiPassEngine::set_seed_slices); 1 by default.
-    void set_seed_slices(SizeType n_slices);
+    /// Prune each run's seeds in the frequency slices between @p f_edges
+    /// (see EPMultiPassEngine::set_seed_slices); empty by default (one slice).
+    void set_seed_slices(std::vector<SizeType> f_edges);
 
     /// Runs the FFA of the chunk on the shared device inputs and prunes it.
     /// Only for the shared-pipeline constructor.

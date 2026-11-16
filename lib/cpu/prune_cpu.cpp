@@ -110,10 +110,10 @@ public:
         m_reduction = reduction;
     }
 
-    /// Prune each run's seeds in @p n_slices sequential frequency slices
-    /// (clamped to the frequency cells); 1 prunes them all at once.
-    void set_seed_slices(SizeType n_slices) noexcept {
-        m_n_seed_slices = n_slices;
+    /// Prune each run's seeds in the frequency slices between @p f_edges
+    /// (checked by the engine); empty prunes them all at once.
+    void set_seed_slices(std::span<const SizeType> f_edges) {
+        m_seed_edges.assign(f_edges.begin(), f_edges.end());
     }
 
     void execute(std::span<const FoldType> ffa_fold,
@@ -176,7 +176,8 @@ public:
                                          n_slices);
                 slice_log.close();
                 initialize(ffa_fold, ref_seg, actual_log_file,
-                           search::seed_slice(s, n_slices, get_n_freq()));
+                           search::SeedSlice{.f_begin = m_seed_edges[s],
+                                             .f_end   = m_seed_edges[s + 1]});
                 prune_seeds(ffa_fold, ascend_levels, actual_log_file, bar.get(),
                             s * (nsegments - 1));
                 collect_slice(merged);
@@ -210,7 +211,8 @@ private:
     SizeType m_branch_max;
     std::string m_poly_basis;
     SizeType m_total_levels;
-    SizeType m_n_seed_slices{1};
+    /// Frequency-cell edges of the seed slices; empty: one slice.
+    std::vector<SizeType> m_seed_edges;
 
     bool m_prune_complete{false};
     SizeType m_prune_level{};
@@ -261,8 +263,8 @@ private:
     [[nodiscard]] SizeType get_n_freq() const {
         return m_ffa_plan.get_param_counts().back().back();
     }
-    [[nodiscard]] SizeType get_n_seed_slices() const {
-        return search::clamp_seed_slices(m_n_seed_slices, get_n_freq());
+    [[nodiscard]] SizeType get_n_seed_slices() const noexcept {
+        return m_seed_edges.empty() ? 1 : m_seed_edges.size() - 1;
     }
 
     /// Per-run state, shared by the run's seed slices: the snail scheme and
@@ -1337,12 +1339,10 @@ public:
         m_reduction = std::move(spec);
     }
 
-    void set_seed_slices(SizeType n_slices) override {
-        if (n_slices == 0) {
-            throw std::invalid_argument(
-                "EPMultiPass: the number of seed slices must be at least 1");
-        }
-        m_n_seed_slices = n_slices;
+    void set_seed_slices(std::vector<SizeType> f_edges) override {
+        search::check_seed_slice_edges(
+            f_edges, m_ffa_plan.get_param_counts().back().back());
+        m_seed_edges = std::move(f_edges);
     }
 
     void execute(std::span<const float> ts_e,
@@ -1446,7 +1446,7 @@ private:
     std::string m_poly_basis;
     bool m_show_progress;
     std::optional<search::detail::LeafReductionSpec> m_reduction;
-    SizeType m_n_seed_slices{1};
+    std::vector<SizeType> m_seed_edges;
     PruneRFIConfig m_rfi_config;
 
     plans::FFAPlan<FoldType> m_ffa_plan;
@@ -1506,7 +1506,7 @@ private:
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
         prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
-        prune.set_seed_slices(m_n_seed_slices);
+        prune.set_seed_slices(m_seed_edges);
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
@@ -1535,8 +1535,8 @@ private:
         task_ids.reserve(ref_segs.size());
 
         const auto nsegments = m_ffa_plan.get_nsegments_active();
-        const auto n_slices  = search::clamp_seed_slices(
-            m_n_seed_slices, m_ffa_plan.get_param_counts().back().back());
+        const auto n_slices =
+            m_seed_edges.empty() ? SizeType{1} : m_seed_edges.size() - 1;
         int id = 0;
         for (const auto ref_seg : ref_segs) {
             if (tracker) {
@@ -1561,7 +1561,7 @@ private:
                     ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
                     m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
                 prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
-                prune.set_seed_slices(m_n_seed_slices);
+                prune.set_seed_slices(m_seed_edges);
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,

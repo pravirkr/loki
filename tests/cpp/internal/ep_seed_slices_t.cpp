@@ -20,9 +20,11 @@
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
+#include "loki/search/candidates.hpp"
 #include "loki/search/configs.hpp"
 
 #include "lib/algorithms/prune_engine.hpp"
+#include "lib/search/candidate_processing.hpp"
 #include "lib/search/cands.hpp"
 #include "lib/search/prune_mask.hpp"
 
@@ -36,27 +38,37 @@ using loki::search::GridMask;
 using loki::search::PruneStats;
 using loki::search::PruneStatsCollection;
 using loki::search::SeedSlice;
+using loki::search::detail::LeafReductionSpec;
 using loki::test::read_run_results;
 using loki::test::RunResults;
 using loki::test::TempDir;
 
 namespace {
 
-/// Prunes @p cfg on the CPU with @p n_slices seed slices and returns every
-/// run of the result file.
-std::vector<RunResults> run_cpu(const loki::search::PulsarSearchConfig& cfg,
-                                const std::vector<float>& ts_e,
-                                const std::vector<float>& ts_v,
-                                SizeType n_slices,
-                                const PruneRFIConfig& rfi = {}) {
-    const TempDir outdir(fmt::format("loki-seed-slices-{}", n_slices));
+SizeType n_freq_cells(const loki::search::PulsarSearchConfig& cfg) {
+    const loki::plans::FFAPlan<float> plan(cfg);
+    return plan.get_param_counts().back().back();
+}
+
+/// Prunes @p cfg on the CPU with the seed slices between @p edges (and the
+/// per-run leaf reduction @p reduction) and returns every run of the result
+/// file.
+std::vector<RunResults>
+run_cpu_edges(const loki::search::PulsarSearchConfig& cfg,
+              const std::vector<float>& ts_e,
+              const std::vector<float>& ts_v,
+              const std::vector<SizeType>& edges,
+              const PruneRFIConfig& rfi                         = {},
+              const std::optional<LeafReductionSpec>& reduction = {}) {
+    const TempDir outdir(fmt::format("loki-seed-slices-{}", edges.size()));
     const auto thresholds = loki::test::seed_slice_thresholds(cfg);
     const auto run        = [&]<typename FoldType>() {
         auto engine = loki::algorithms::detail::make_ep_cpu<FoldType>(
             cfg, thresholds, /*n_runs=*/2, /*ref_segs=*/std::nullopt,
             /*ascend_levels=*/{}, /*max_sugg=*/1U << 16U, /*batch_size=*/64,
             "taylor", /*show_progress=*/false, rfi);
-        engine->set_seed_slices(n_slices);
+        engine->set_seed_slices(edges);
+        engine->set_leaf_reduction(reduction);
         engine->execute(ts_e, ts_v, outdir.path(), "slices");
     };
     if (cfg.get_use_fourier()) {
@@ -67,31 +79,43 @@ std::vector<RunResults> run_cpu(const loki::search::PulsarSearchConfig& cfg,
     return read_run_results(outdir.path());
 }
 
-SizeType n_freq_cells(const loki::search::PulsarSearchConfig& cfg) {
-    const loki::plans::FFAPlan<float> plan(cfg);
-    return plan.get_param_counts().back().back();
+/// As run_cpu_edges, with @p n_slices even slices (clamped to the cells).
+std::vector<RunResults> run_cpu(const loki::search::PulsarSearchConfig& cfg,
+                                const std::vector<float>& ts_e,
+                                const std::vector<float>& ts_v,
+                                SizeType n_slices,
+                                const PruneRFIConfig& rfi = {}) {
+    return run_cpu_edges(
+        cfg, ts_e, ts_v,
+        loki::search::even_seed_slice_edges(n_slices, n_freq_cells(cfg)), rfi);
 }
 
 } // namespace
 
-TEST_CASE("Seed slices split the frequency cells evenly and in order",
+TEST_CASE("Seed slice edges split the frequency cells evenly and in order",
           "[ep][seed_slices]") {
-    CHECK(loki::search::clamp_seed_slices(0, 10) == 1);
-    CHECK(loki::search::clamp_seed_slices(4, 10) == 4);
-    CHECK(loki::search::clamp_seed_slices(40, 10) == 10);
-    CHECK(loki::search::clamp_seed_slices(3, 0) == 1);
+    using loki::search::check_seed_slice_edges;
+    using loki::search::even_seed_slice_edges;
+    using Edges = std::vector<SizeType>;
+    CHECK(even_seed_slice_edges(0, 10) == Edges{0, 10});
+    CHECK(even_seed_slice_edges(4, 10) == Edges{0, 2, 5, 7, 10});
+    CHECK(even_seed_slice_edges(40, 3) == Edges{0, 1, 2, 3});
+    CHECK(even_seed_slice_edges(3, 0) == Edges{0, 0});
     for (const SizeType n_freq : {SizeType{1}, SizeType{7}, SizeType{64}}) {
         for (SizeType k = 1; k <= n_freq; ++k) {
-            SizeType next = 0;
+            const auto edges = even_seed_slice_edges(k, n_freq);
+            REQUIRE(edges.size() == k + 1);
+            CHECK_NOTHROW(check_seed_slice_edges(edges, n_freq));
             for (SizeType s = 0; s < k; ++s) {
-                const auto slice = loki::search::seed_slice(s, k, n_freq);
-                CHECK(slice.f_begin == next);
-                CHECK(slice.f_end > slice.f_begin);
-                CHECK(slice.f_end - slice.f_begin <= (n_freq / k) + 1);
-                next = slice.f_end;
+                CHECK(edges[s + 1] - edges[s] <= (n_freq / k) + 1);
             }
-            CHECK(next == n_freq);
         }
+    }
+    CHECK_NOTHROW(check_seed_slice_edges({}, 10));
+    CHECK_NOTHROW(check_seed_slice_edges(Edges{0, 1, 9, 10}, 10));
+    for (const auto& bad : {Edges{0}, Edges{1, 10}, Edges{0, 9}, Edges{0, 11},
+                            Edges{0, 5, 5, 10}, Edges{0, 6, 4, 10}}) {
+        CHECK_THROWS_AS(check_seed_slice_edges(bad, 10), std::invalid_argument);
     }
 }
 
@@ -117,9 +141,10 @@ TEST_CASE("Slice seeds cover every unmasked seed exactly once",
     REQUIRE(n_unmasked < kNAccel * kNFreq);
     for (const SizeType k : {SizeType{1}, SizeType{3}, kNFreq}) {
         std::set<SizeType> seen;
+        const auto edges = loki::search::even_seed_slice_edges(k, kNFreq);
         for (SizeType s = 0; s < k; ++s) {
-            const auto slice = loki::search::seed_slice(s, k, kNFreq);
-            const auto n     = loki::search::select_slice_seeds(
+            const SeedSlice slice{.f_begin = edges[s], .f_end = edges[s + 1]};
+            const auto n = loki::search::select_slice_seeds(
                 keep, kNAccel, kNFreq, slice, mask);
             for (SizeType i = 0; i < n; ++i) {
                 const auto f = keep[i] % kNFreq;
@@ -242,10 +267,43 @@ TEST_CASE("CPU EP: seed slices give the leaves and stats of one prune",
         const auto sliced = run_cpu(cfg, ts_e, ts_v, k);
         loki::test::check_same_runs(whole, sliced);
     }
-    CHECK_THROWS(loki::algorithms::detail::make_ep_cpu<float>(
-                     cfg, loki::test::seed_slice_thresholds(cfg), 2,
-                     std::nullopt, {}, 1U << 16U, 256, "taylor", false, {})
-                     ->set_seed_slices(0));
+    // Uneven slices, as a planner balancing the tree of each slice sets.
+    loki::test::check_same_runs(
+        whole, run_cpu_edges(cfg, ts_e, ts_v,
+                             {0, 1, 2, n_freq / 2, n_freq - 1, n_freq}));
+    const auto engine = loki::algorithms::detail::make_ep_cpu<float>(
+        cfg, loki::test::seed_slice_thresholds(cfg), 2, std::nullopt, {},
+        1U << 16U, 256, "taylor", false, {});
+    CHECK_THROWS_AS(engine->set_seed_slices({0, n_freq + 1}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(engine->set_seed_slices({0, 4, 4, n_freq}),
+                    std::invalid_argument);
+}
+
+TEST_CASE("CPU EP: seed slices keep the per-run leaf reduction",
+          "[ep][seed_slices]") {
+    const auto cfg          = loki::test::seed_slice_config(/*nparams=*/2,
+                                                            /*fourier=*/false,
+                                                            /*nthreads=*/1);
+    const auto [ts_e, ts_v] = loki::test::seed_slice_series(cfg);
+    auto options            = loki::search::CandidateOptions::ep_defaults();
+    options.max_per_cell    = 2; // small enough that cells drop leaves
+    const LeafReductionSpec spec{
+        .options = options,
+        .snr_min = 4.0,
+        .tobs    = cfg.get_tobs(),
+        .nbins   = static_cast<std::uint32_t>(cfg.get_nbins())};
+    const auto whole = run_cpu_edges(cfg, ts_e, ts_v, {}, {}, spec);
+    REQUIRE(whole.size() == 2);
+    REQUIRE(whole.front().reduction.size() == 5);
+    REQUIRE(whole.front().reduction[2] > 0); // cells dropped leaves
+    // The same retained leaves and counts (leaf order differs, so an exact
+    // tie could pick another representative; this input has none).
+    loki::test::check_same_runs(
+        whole,
+        run_cpu_edges(cfg, ts_e, ts_v,
+                      loki::search::even_seed_slice_edges(7, n_freq_cells(cfg)),
+                      {}, spec));
 }
 
 TEST_CASE("CPU EP: seed slices are exact in the Fourier domain",

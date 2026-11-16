@@ -35,14 +35,19 @@ struct RunResults {
     std::vector<SliceLeaf> leaves;
     std::vector<search::PruneStats> stats;
     SizeType n_harvested_total{0};
+    /// The per-run reduction's counts, when the run was reduced:
+    /// n_final_leaves, n_leaves_above_snr_min, n_cell_dropped, n_dominated,
+    /// n_leaves_retained.
+    std::vector<std::uint64_t> reduction;
 
     [[nodiscard]] SizeType n_leaves() const noexcept { return leaves.size(); }
     [[nodiscard]] SizeType total_overloads() const noexcept;
     [[nodiscard]] SizeType total_masked() const noexcept;
 };
 
-/// 2^16 samples in 8 segments over 140-146 Hz, nbins 32, with @p nparams
-/// parameters (2: acceleration, 3: jerk).
+/// 2^18 samples in 16 segments over 140-160 Hz, nbins 32, with @p nparams
+/// parameters (2: acceleration, 3: jerk, 5: circular), wide enough that the
+/// higher derivatives branch.
 search::PulsarSearchConfig
 seed_slice_config(SizeType nparams, bool fourier, int nthreads);
 

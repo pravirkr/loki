@@ -7,7 +7,12 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <utility>
+#include <vector>
+
+#include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
@@ -245,15 +250,31 @@ SizeType GridMask::select_seeds(std::span<SizeType> keep_indices,
     return n_keep;
 }
 
-SizeType clamp_seed_slices(SizeType n_slices, SizeType n_freq) noexcept {
-    return std::clamp<SizeType>(n_slices, 1, std::max<SizeType>(n_freq, 1));
+std::vector<SizeType> even_seed_slice_edges(SizeType n_slices,
+                                            SizeType n_freq) {
+    const auto k =
+        std::clamp<SizeType>(n_slices, 1, std::max<SizeType>(n_freq, 1));
+    std::vector<SizeType> edges(k + 1);
+    for (SizeType s = 0; s <= k; ++s) {
+        edges[s] = (s * n_freq) / k;
+    }
+    return edges;
 }
 
-SeedSlice seed_slice(SizeType slice, SizeType n_slices, SizeType n_freq) {
-    error_check::check(n_slices > 0 && slice < n_slices,
-                       "seed_slice: slice index out of range");
-    return {.f_begin = (slice * n_freq) / n_slices,
-            .f_end   = ((slice + 1) * n_freq) / n_slices};
+void check_seed_slice_edges(std::span<const SizeType> edges, SizeType n_freq) {
+    if (edges.empty()) {
+        return;
+    }
+    bool ok = edges.size() >= 2 && edges.front() == 0 && edges.back() == n_freq;
+    for (SizeType i = 1; ok && i < edges.size(); ++i) {
+        ok = edges[i] > edges[i - 1];
+    }
+    if (!ok) {
+        throw std::invalid_argument(fmt::format(
+            "Seed slice edges must rise strictly from 0 to the {} frequency "
+            "cells, got [{}]",
+            n_freq, fmt::join(edges, ", ")));
+    }
 }
 
 SizeType select_slice_seeds(std::span<SizeType> keep_indices,

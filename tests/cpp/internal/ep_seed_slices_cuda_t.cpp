@@ -26,6 +26,7 @@
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/pipelines/ep_sweep_common.hpp"
+#include "lib/search/prune_mask.hpp"
 
 #include "ep_seed_slices.hpp"
 #include "temp_dir.hpp"
@@ -59,7 +60,11 @@ std::vector<RunResults> run_engine(const loki::search::PulsarSearchConfig& cfg,
         cfg, loki::test::seed_slice_thresholds(cfg), /*n_runs=*/2,
         /*ref_segs=*/std::nullopt, /*ascend_levels=*/{}, kMaxSugg, kBatch,
         "taylor", /*device_id=*/0);
-    engine->set_seed_slices(n_slices);
+    engine->set_seed_slices(loki::search::even_seed_slice_edges(
+        n_slices, loki::plans::FFAPlan<ComplexType>(cfg)
+                      .get_param_counts()
+                      .back()
+                      .back()));
     engine->execute(ts_e, ts_v, outdir.path(), "slices");
     return loki::test::read_run_results(outdir.path());
 }
@@ -144,7 +149,8 @@ template <typename FoldTypeCUDA> struct SharedChunk {
             pipeline, cfg, loki::test::seed_slice_thresholds(cfg),
             /*n_runs=*/2, std::nullopt, {}, kMaxSugg, kBatch, "taylor",
             /*device_id=*/0, rfi);
-        core.set_seed_slices(n_slices);
+        core.set_seed_slices(loki::search::even_seed_slice_edges(
+            n_slices, plan.get_param_counts().back().back()));
         core.execute_device(outdir.path(), "chunk");
         std::vector<RunResults> runs;
         for (const auto& payload : results) {

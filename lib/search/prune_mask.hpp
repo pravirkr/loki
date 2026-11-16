@@ -166,17 +166,20 @@ struct SeedSlice {
     SizeType f_end{0};
 };
 
-/// @p n_slices clamped to `[1, max(n_freq, 1)]`: a slice holds at least one
-/// frequency cell.
-[[nodiscard]] SizeType clamp_seed_slices(SizeType n_slices,
-                                         SizeType n_freq) noexcept;
+/**
+ * @brief Edges of @p n_slices seed slices with (as nearly as possible)
+ * equal frequency cell counts: `e[0] = 0 < e[1] < ... < e[K] = n_freq`, with
+ * `K = n_slices` clamped to `[1, max(n_freq, 1)]`.
+ */
+[[nodiscard]] std::vector<SizeType> even_seed_slice_edges(SizeType n_slices,
+                                                          SizeType n_freq);
 
 /**
- * @brief Slice @p slice of @p n_slices (already clamped): the frequency cells
- * split as evenly as possible, in ascending order.
+ * @brief Check seed-slice edges: empty (one slice), or strictly increasing
+ * frequency cells from 0 to @p n_freq. Slice s is `[e[s], e[s + 1])`.
+ * @throws std::invalid_argument otherwise.
  */
-[[nodiscard]] SeedSlice
-seed_slice(SizeType slice, SizeType n_slices, SizeType n_freq);
+void check_seed_slice_edges(std::span<const SizeType> edges, SizeType n_freq);
 
 /**
  * @brief Select the seeds of @p slice that @p mask does not mask.

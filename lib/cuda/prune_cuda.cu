@@ -270,10 +270,10 @@ public:
                m_prune_funcs->get_scorer_scratch_memory_gib();
     }
 
-    /// Prune each run's seeds in @p n_slices sequential frequency slices
-    /// (clamped to the frequency cells); 1 prunes them all at once.
-    void set_seed_slices(SizeType n_slices) noexcept {
-        m_n_seed_slices = n_slices;
+    /// Prune each run's seeds in the frequency slices between @p f_edges
+    /// (checked by the engine); empty prunes them all at once.
+    void set_seed_slices(std::span<const SizeType> f_edges) {
+        m_seed_edges.assign(f_edges.begin(), f_edges.end());
     }
 
     void execute(cuda::std::span<const FoldTypeCUDA> ffa_fold,
@@ -323,7 +323,8 @@ public:
             SizeType prune_level = 0;
             for (SizeType s = 0; s < n_slices; ++s) {
                 initialize(ffa_fold, ref_seg, m_stream,
-                           search::seed_slice(s, n_slices, get_n_freq()));
+                           search::SeedSlice{.f_begin = m_seed_edges[s],
+                                             .f_end   = m_seed_edges[s + 1]});
                 prune_seeds(ffa_fold, ascend_levels);
                 collect_survivors(results);
                 // Resolved leaves are not counted on the GPU.
@@ -367,7 +368,8 @@ private:
     int m_device_id;
     cudaStream_t m_stream;
     std::function<void(pipelines::detail::EPResultPayload)> m_result_sink;
-    SizeType m_n_seed_slices{1};
+    /// Frequency-cell edges of the seed slices; empty: one slice.
+    std::vector<SizeType> m_seed_edges;
 
     bool m_prune_complete{false};
     SizeType m_prune_level{};
@@ -648,8 +650,8 @@ private:
     [[nodiscard]] SizeType get_n_freq() const {
         return m_ffa_plan.get_param_counts().back().back();
     }
-    [[nodiscard]] SizeType get_n_seed_slices() const {
-        return search::clamp_seed_slices(m_n_seed_slices, get_n_freq());
+    [[nodiscard]] SizeType get_n_seed_slices() const noexcept {
+        return m_seed_edges.empty() ? 1 : m_seed_edges.size() - 1;
     }
 
     /// Seeds the tree with the first @p n_keep seeds listed in @p keep.
@@ -1903,12 +1905,10 @@ public:
 
     /// Shared-pipeline execution: the FFA runs into the sweep's fold buffer
     /// from the sweep's device inputs, then the runs are pruned in turn.
-    void set_seed_slices(SizeType n_slices) {
-        if (n_slices == 0) {
-            throw std::invalid_argument(
-                "EPMultiPass: the number of seed slices must be at least 1");
-        }
-        m_n_seed_slices = n_slices;
+    void set_seed_slices(std::vector<SizeType> f_edges) {
+        search::check_seed_slice_edges(
+            f_edges, m_ffa_plan.get_param_counts().back().back());
+        m_seed_edges = std::move(f_edges);
     }
 
     void execute_device(const std::filesystem::path& outdir,
@@ -1958,7 +1958,7 @@ private:
     // RFI control of the chunk and its static mask on the FFA base grid.
     PruneRFIConfig m_rfi_config;
     search::GridMask m_mask_base;
-    SizeType m_n_seed_slices{1};
+    std::vector<SizeType> m_seed_edges;
 
     // Validate the RFI configuration and rasterise the static pulsar mask
     // onto the (accel, freq) grid that resolve() snaps to (as on CPU).
@@ -2065,7 +2065,7 @@ private:
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get(),
             sink, &m_rfi_config, &m_mask_base);
-        prune.set_seed_slices(m_n_seed_slices);
+        prune.set_seed_slices(m_seed_edges);
         for (const auto ref_seg : ref_segs_to_process) {
             loki::interrupt::check(m_execution_stream.get());
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
@@ -2176,8 +2176,9 @@ void EPMultiPassCudaCore<FoldTypeCUDA>::execute(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-void EPMultiPassCudaCore<FoldTypeCUDA>::set_seed_slices(SizeType n_slices) {
-    m_impl->set_seed_slices(n_slices);
+void EPMultiPassCudaCore<FoldTypeCUDA>::set_seed_slices(
+    std::vector<SizeType> f_edges) {
+    m_impl->set_seed_slices(std::move(f_edges));
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -2247,8 +2248,8 @@ public:
         m_impl.execute(ts_e, ts_v, outdir, file_prefix);
     }
 
-    void set_seed_slices(SizeType n_slices) override {
-        m_impl.set_seed_slices(n_slices);
+    void set_seed_slices(std::vector<SizeType> f_edges) override {
+        m_impl.set_seed_slices(std::move(f_edges));
     }
 
 private:
