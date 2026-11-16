@@ -144,7 +144,8 @@ TEST_CASE("timeseries read_info returns the header without the samples",
     REQUIRE(info.nsamps == samples.size());
     REQUIRE_THAT(info.dt, WithinAbs(1.28e-4, 0.0));
     // The observation metadata matches what read() reports.
-    const auto full = loki::io::TimeSeries::read(path, {.preprocess = false});
+    const auto full = loki::io::TimeSeries::read(
+        path, {.preprocess = false, .preprocessing = {}});
     const auto& obs = full.get_observation();
     CHECK(info.observation.input_path == obs.input_path);
     CHECK(info.observation.source == obs.source);

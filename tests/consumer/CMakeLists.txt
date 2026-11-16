@@ -5,6 +5,10 @@
 cmake_minimum_required(VERSION 3.28...4.4)
 project(loki_consumer LANGUAGES CXX)
 
+# No C++20 modules here; without this, CMake >= 3.28 requires clang-scan-deps
+# for Clang (as the main project does, see CMakeLists.txt).
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 find_package(loki CONFIG REQUIRED)
 
 add_executable(loki_consumer main.cpp)
