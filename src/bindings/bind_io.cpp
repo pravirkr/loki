@@ -117,11 +117,13 @@ void bind_io(py::module_& m) {
         "preprocess",
         [](const PyArrayT<float>& raw, double tsamp, const PO& options,
            int nthreads, std::string_view backend, int device) {
-            const auto in = to_span<const float>(raw);
+            const auto in   = to_span<const float>(raw);
+            const auto exec = make_exec(backend, device, nthreads);
             std::vector<float> ts_e(in.size());
             std::vector<float> ts_v(in.size());
-            auto report = io::preprocess(in, tsamp, ts_e, ts_v, options,
-                                         make_exec(backend, device, nthreads));
+            auto report = long_call([&] {
+                return io::preprocess(in, tsamp, ts_e, ts_v, options, exec);
+            });
             return py::make_tuple(as_pyarray(std::move(ts_e)),
                                   as_pyarray(std::move(ts_v)),
                                   std::move(report));
@@ -159,15 +161,19 @@ void bind_io(py::module_& m) {
              }),
              py::arg("ts_e"), py::arg("ts_v"), py::arg("dt"))
         .def_static("read", &io::TimeSeries::read, py::arg("path"),
-                    py::arg("options") = io::ReadOptions{})
-        .def_static("read_info", &io::TimeSeries::read_info, py::arg("path"))
-        .def("write", &io::TimeSeries::write, py::arg("path"))
+                    py::arg("options") = io::ReadOptions{},
+                    py::call_guard<LongCall>())
+        .def_static("read_info", &io::TimeSeries::read_info, py::arg("path"),
+                    py::call_guard<LongCall>())
+        .def("write", &io::TimeSeries::write, py::arg("path"),
+             py::call_guard<LongCall>())
         .def(
             "preprocess",
             [](io::TimeSeries& self, const PO& options, int nthreads,
                std::string_view backend, int device) {
-                return self.preprocess(options,
-                                       make_exec(backend, device, nthreads));
+                const auto exec = make_exec(backend, device, nthreads);
+                return long_call(
+                    [&] { return self.preprocess(options, exec); });
             },
             py::arg("options") = PO{}, py::arg("nthreads") = 1, py::kw_only(),
             py::arg("backend") = "cpu", py::arg("device") = 0)
@@ -229,7 +235,7 @@ void bind_io(py::module_& m) {
     m_io.def(
         "sift",
         [](const std::vector<std::filesystem::path>& files, const SO& options) {
-            return io::sift(files, options);
+            return long_call([&] { return io::sift(files, options); });
         },
         py::arg("files"), py::arg("options") = SO{},
         "Group the candidates of published result files by frequency: S/N "

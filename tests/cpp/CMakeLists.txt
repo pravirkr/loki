@@ -279,13 +279,20 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
                    0.000064 --nsamps 32768 --seed 1 -o ${LOKI_EP_CLI_DIR}/header.tim
   )
   set_tests_properties(loki_search_ep_header_simulate PROPERTIES FIXTURES_SETUP loki_ep_cli_header)
+  add_test(NAME loki_search_ep_clean_header_cache
+           COMMAND ${CMAKE_COMMAND} -E rm -f ${LOKI_EP_CLI_DIR}/out/header_ep_plan.h5
+  )
+  set_tests_properties(
+    loki_search_ep_clean_header_cache PROPERTIES FIXTURES_SETUP loki_ep_cli_header_cache
+  )
   add_test(NAME loki_search_ep_plan_only_header
            COMMAND $<TARGET_FILE:loki_app> search ep --config ${LOKI_EP_CLI_DIR}/nodims.toml -i
                    ${LOKI_EP_CLI_DIR}/header.tim --plan-only
   )
   set_tests_properties(
-    loki_search_ep_plan_only_header PROPERTIES FIXTURES_REQUIRED loki_ep_cli_header
-                                               PASS_REGULAR_EXPRESSION "nsamps = 32768"
+    loki_search_ep_plan_only_header
+    PROPERTIES FIXTURES_REQUIRED "loki_ep_cli_header;loki_ep_cli_header_cache"
+               PASS_REGULAR_EXPRESSION "nsamps = 32768"
   )
   add_test(NAME loki_search_ep_plan_only_needs_dims
            COMMAND $<TARGET_FILE:loki_app> search ep --config ${LOKI_EP_CLI_DIR}/nodims.toml

@@ -202,6 +202,24 @@ void check_same_ep(const EPTomlConfig& a, const EPTomlConfig& b) {
     CHECK(a.propagator_significance == b.propagator_significance);
     CHECK(a.validation_significance == b.validation_significance);
     CHECK(a.use_conservative_tile == b.use_conservative_tile);
+    CHECK(a.overflow_keep_fraction == b.overflow_keep_fraction);
+    REQUIRE(a.rfi.has_value() == b.rfi.has_value());
+    if (a.rfi) {
+        CHECK(a.rfi->pulsar_mask == b.rfi->pulsar_mask);
+        CHECK(a.rfi->n_harmonics == b.rfi->n_harmonics);
+        CHECK(a.rfi->fractional_harmonics == b.rfi->fractional_harmonics);
+        CHECK(a.rfi->harvest == b.rfi->harvest);
+        CHECK(a.rfi->harvest_min_level == b.rfi->harvest_min_level);
+        CHECK(a.rfi->harvest_offset == b.rfi->harvest_offset);
+        CHECK(a.rfi->harvest_min_snr == b.rfi->harvest_min_snr);
+        CHECK(a.rfi->harvest_mask_ntiles == b.rfi->harvest_mask_ntiles);
+        CHECK(a.rfi->max_harvests == b.rfi->max_harvests);
+        CHECK(a.rfi->harvest_store_folds == b.rfi->harvest_store_folds);
+        CHECK(a.rfi->impulsive_veto == b.rfi->impulsive_veto);
+        CHECK(a.rfi->impulsive_kappa == b.rfi->impulsive_kappa);
+        CHECK(a.rfi->impulsive_min_level == b.rfi->impulsive_min_level);
+        CHECK(a.rfi->impulsive_min_snr == b.rfi->impulsive_min_snr);
+    }
     CHECK(a.plan_cache == b.plan_cache);
     CHECK(a.use_plan_cache == b.use_plan_cache);
 }
@@ -256,9 +274,25 @@ TEST_CASE("EPTomlConfig to_toml_string gives back every setting",
     cfg.propagator_significance = 2.5;
     cfg.validation_significance = 4.5;
     cfg.use_conservative_tile   = true;
-    cfg.plan_cache              = std::filesystem::path("plans/ep.h5");
-    cfg.use_plan_cache          = false;
-    const auto text             = cfg.to_toml_string();
+    cfg.overflow_keep_fraction  = 0.25;
+    cfg.rfi                     = loki::search::EPRFIOptions{
+        .pulsar_mask          = {{50.0, 50.2}, {100.0, 100.5}},
+        .n_harmonics          = 4,
+        .fractional_harmonics = true,
+        .harvest              = true,
+        .harvest_min_level    = 6,
+        .harvest_offset       = 8.5F,
+        .harvest_min_snr      = 30.0F,
+        .harvest_mask_ntiles  = 2.5,
+        .max_harvests         = 1024,
+        .harvest_store_folds  = false,
+        .impulsive_veto       = true,
+        .impulsive_kappa      = 4.5,
+        .impulsive_min_level  = 4,
+        .impulsive_min_snr    = 12.0F};
+    cfg.plan_cache     = std::filesystem::path("plans/ep.h5");
+    cfg.use_plan_cache = false;
+    const auto text    = cfg.to_toml_string();
     CAPTURE(text);
     check_same_ep(cfg, EPTomlConfig::from_string(text));
 

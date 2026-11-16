@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -14,6 +16,7 @@
 #include "loki/io/observation.hpp"
 #include "loki/search/candidates.hpp"
 
+#include "lib/detail/utils.hpp"
 #include "lib/search/candidate_processing.hpp"
 #include "lib/search/cands.hpp"
 
@@ -593,4 +596,75 @@ TEST_CASE("Over the memory budget, every cell keeps fewer trials in any order",
             }
         }(),
         Catch::Matchers::ContainsSubstring("one trial each"));
+}
+
+TEST_CASE("CellCap halving at budget boundary does not double-halve full cell",
+          "[candidates]") {
+    constexpr std::size_t kBytesPerTrial = 3 * sizeof(loki::search::Candidate);
+    constexpr std::size_t kBytesPerCell =
+        sizeof(std::vector<loki::search::Candidate>) + 128;
+
+    loki::search::CandidateOptions options;
+    options.cell_bins   = 4; // 0.4 Hz cells over tobs = 10 s
+    options.memory_gb   = 0.0001;
+    const double budget = options.memory_gb * loki::utils::kBytesPerGB / 2.0;
+    const auto n_fit    = static_cast<std::size_t>(
+        std::floor((budget - (2.0 * static_cast<double>(kBytesPerCell))) /
+                   static_cast<double>(kBytesPerTrial)));
+    REQUIRE(n_fit >= 4);
+    const std::size_t half_cap = std::bit_floor(n_fit - 1);
+    const std::size_t c0_count = n_fit - half_cap;
+    REQUIRE(c0_count >= 1);
+    REQUIRE(c0_count <= half_cap);
+    options.max_per_cell = 2 * half_cap;
+
+    auto make_trial = [](double f, float snr, std::uint64_t id) {
+        loki::search::Candidate c;
+        c.derivatives[0] = f;
+        c.parameters[0]  = f;
+        c.snr            = snr;
+        c.width          = 1;
+        c.nbins          = 10;
+        c.id             = id;
+        return c;
+    };
+
+    std::vector<loki::search::Candidate> cell0;
+    for (std::size_t k = 0; k < c0_count; ++k) {
+        cell0.push_back(make_trial(100.0 + (0.0001 * static_cast<double>(k)),
+                                   static_cast<float>(500 - k), k));
+    }
+    std::vector<loki::search::Candidate> cell1;
+    for (std::size_t k = 0; k < half_cap + 1; ++k) {
+        cell1.push_back(make_trial(100.5 + (0.0001 * static_cast<double>(k)),
+                                   static_cast<float>(1000 - k), 10000 + k));
+    }
+
+    const auto run_order = [&](const std::vector<loki::search::Candidate>& in) {
+        loki::search::detail::CellCap cap(options, 10);
+        for (const auto& c : in) {
+            cap.add(c);
+        }
+        REQUIRE(cap.max_per_cell_used() == half_cap);
+        auto out = cap.take();
+        std::vector<std::uint64_t> ids;
+        for (const auto& c : out) {
+            ids.push_back(c.id);
+        }
+        std::ranges::sort(ids);
+        return ids;
+    };
+
+    std::vector<loki::search::Candidate> order_a;
+    order_a.insert(order_a.end(), cell0.begin(), cell0.end());
+    order_a.insert(order_a.end(), cell1.begin(), cell1.end());
+
+    std::vector<loki::search::Candidate> order_b;
+    order_b.insert(order_b.end(), cell1.begin(), cell1.end());
+    order_b.insert(order_b.end(), cell0.begin(), cell0.end());
+
+    const auto ids_a = run_order(order_a);
+    const auto ids_b = run_order(order_b);
+    REQUIRE(ids_a.size() == n_fit);
+    REQUIRE(ids_a == ids_b);
 }

@@ -351,4 +351,7 @@ TEST_CASE("FFATomlConfig suggests the key a typo meant", "[config][ffa]") {
                    "search.f_mn: unknown key (did you mean 'f_min'?)"));
     CHECK_THAT(ffa_message_for("[serach]\nf_min = 1.0\n"),
                Catch::Matchers::ContainsSubstring("(did you mean 'search'?)"));
+    CHECK_THAT(ffa_message_for("[performance]\noctave_scale = 2.0\n"),
+               Catch::Matchers::ContainsSubstring(
+                   "use performance.region_growth_factor"));
 }

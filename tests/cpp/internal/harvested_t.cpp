@@ -1,6 +1,7 @@
 #include "lib/search/harvested.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -122,6 +123,13 @@ TEST_CASE("write_harvested writes nothing without harvest records",
     const loki::test::TempDir dir("loki-harvested-none");
     auto file = make_result(dir / "r.h5");
     file.createGroup("chunks/chunk_0000/runs/000_00");
+    CHECK(loki::search::write_harvested(file) == 0);
+    CHECK_FALSE(file.exist("harvested"));
+
+    // An empty harvest group (e.g. [ep.rfi] harvest = true with 0 harvests)
+    // also leaves no /harvested table, and clears a stale one if present.
+    add_run(file, "004_01", {});
+    file.createGroup("harvested");
     CHECK(loki::search::write_harvested(file) == 0);
     CHECK_FALSE(file.exist("harvested"));
 }

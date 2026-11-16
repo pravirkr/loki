@@ -154,7 +154,6 @@ SizeType write_harvested(HighFive::File& file) {
     }
     const double tobs = observation_length(file);
     std::vector<Record> records;
-    bool any_harvest  = false;
     const auto chunks = file.getGroup("chunks");
     for (const auto& chunk_name : chunks.listObjectNames()) {
         const auto chunk = chunks.getGroup(chunk_name);
@@ -169,13 +168,15 @@ SizeType write_harvested(HighFive::File& file) {
             if (!run.exist("harvest")) {
                 continue;
             }
-            any_harvest = true;
             read_run(run.getGroup("harvest"),
                      "chunks/" + chunk_name + "/runs/" + run_name, n_params,
                      tobs, ntiles, a_max, records);
         }
     }
-    if (!any_harvest) {
+    if (records.empty()) {
+        if (file.exist("harvested")) {
+            file.unlink("harvested");
+        }
         return 0;
     }
 

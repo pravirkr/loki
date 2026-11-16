@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -142,4 +143,48 @@ TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",
     const auto forecast = plan.forecast_branching("taylor", 0U);
     REQUIRE(forecast.mean.size() == plan.get_nsegments_active() - 1U);
     REQUIRE(forecast.max_children >= 1U);
+}
+
+TEST_CASE("FFAPlan preserves use_conservative_tile without slicing",
+          "[ep_branching]") {
+    const std::vector<ParamLimit> limits{
+        {.min = -2.0, .max = 2.0},
+        {.min = -500.0, .max = 500.0},
+        {.min = 120.0, .max = 240.0},
+    };
+    const loki::plans::FFAPlan<loki::ComplexType> cons_plan(
+        make_cfg(limits, /*conservative=*/true));
+    const loki::plans::FFAPlan<loki::ComplexType> flat_plan(
+        make_cfg(limits, /*conservative=*/false));
+    REQUIRE_THROWS_AS(cons_plan.get_branching_pattern("chebyshev", 0U),
+                      std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        cons_plan.get_branching_pattern_approx("chebyshev", 0U, 1000),
+        std::invalid_argument);
+    REQUIRE_NOTHROW(flat_plan.get_branching_pattern("chebyshev", 0U));
+    REQUIRE_NOTHROW(
+        flat_plan.get_branching_pattern_approx("chebyshev", 0U, 1000));
+
+    const auto approx_cons =
+        cons_plan.get_branching_pattern_approx("taylor", 0U, 1000);
+    const auto approx_flat =
+        flat_plan.get_branching_pattern_approx("taylor", 0U, 1000);
+    REQUIRE(approx_cons.size() == approx_flat.size());
+    // Before the first stage where branching diverges, both plans track the
+    // same child center while the conservative tile widens uncertainties at
+    // least as fast, so at the first differing stage the conservative plan
+    // must split strictly more (later stages can then split less because the
+    // earlier split already narrowed the tracked child).
+    const auto [it_cons, it_flat] =
+        std::ranges::mismatch(approx_cons, approx_flat);
+    REQUIRE(it_cons != approx_cons.end());
+    REQUIRE(*it_cons > *it_flat);
+
+    const auto forecast_cons = cons_plan.forecast_branching("taylor", 0U);
+    const auto forecast_flat = flat_plan.forecast_branching("taylor", 0U);
+    REQUIRE(forecast_cons.max_children >= forecast_flat.max_children);
+    // Mean branching for threshold solving uses the non-conservative tile.
+    REQUIRE(forecast_cons.mean == forecast_flat.mean);
+    REQUIRE(cons_plan.get_branching_pattern("taylor", 0U) ==
+            flat_plan.get_branching_pattern("taylor", 0U));
 }

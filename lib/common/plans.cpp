@@ -237,10 +237,10 @@ struct FFAPlanBase::Impl {
                 param_counts[n_levels - 1], dparams_act[n_levels - 1],
                 m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(), n_segs_active,
                 m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg, isuggest,
-                m_cfg.get_use_conservative_tile());
+                m_conservative_tile);
         }
         if (poly_basis == "chebyshev") {
-            if (m_cfg.get_use_conservative_tile()) {
+            if (m_conservative_tile) {
                 throw std::invalid_argument(
                     "Conservative tile is not supported for chebyshev "
                     "branching pattern generation");
@@ -266,13 +266,15 @@ struct FFAPlanBase::Impl {
     // config, so it is replayed with that tile.
     BranchingForecast forecast_branching(std::string_view poly_basis,
                                          SizeType ref_seg) const {
-        auto forecast = simulate_branching(poly_basis, ref_seg,
-                                           m_cfg.get_use_conservative_tile());
-        if (poly_basis == "taylor" &&
-            m_conservative_tile != m_cfg.get_use_conservative_tile()) {
+        if (poly_basis == "chebyshev" && m_conservative_tile) {
+            throw std::invalid_argument(
+                "Conservative tile is not supported for chebyshev "
+                "branching pattern generation");
+        }
+        auto forecast = simulate_branching(poly_basis, ref_seg, false);
+        if (poly_basis == "taylor" && m_conservative_tile) {
             forecast.max_children =
-                simulate_branching(poly_basis, ref_seg, m_conservative_tile)
-                    .max_children;
+                simulate_branching(poly_basis, ref_seg, true).max_children;
         }
         return forecast;
     }

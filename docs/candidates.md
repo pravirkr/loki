@@ -106,10 +106,10 @@ using the same backend scorer; the first configured width wins an exact tie.
 Each run now saves this identity in `width`; a chunk saves `scoring_widths`.
 
 This increment supports full-observation Taylor searches (acceleration, jerk,
-snap, and the five-parameter circular-orbit search through crackle) with RFI
-control disabled. Common-product construction rejects active RFI and Chebyshev
-requests. The existing diagnostic constructor remains available for other
-supported searches. Harvesting and masking are outside this candidate path.
+snap, and the five-parameter circular-orbit search through crackle), with or
+without `[ep.rfi]`. Common-product construction rejects Chebyshev requests, and
+CUDA EP rejects `impulsive_veto`. The existing diagnostic constructor remains
+available for other supported searches.
 
 A circular search reports each leaf's derivatives at the observation midpoint
 under the leaf's own model (an orbit, or a polynomial where its terms are not
@@ -189,11 +189,10 @@ The EP pruning can mask frequency windows, harvest leaves far above the
 pruning threshold (a bright source or an RFI line) and veto leaves whose last
 segment adds an implausible share of their S/N. The mask and the harvest run
 on both backends; the veto runs on the CPU only (with `backend = "cuda"`,
-`impulsive_veto = true` fails before any data is read). On CUDA a harvested
-leaf, and the leaves of its source below the harvest threshold, can survive
-the level they were found at; their children fall in the masked cells at the
-next level, so a source harvested at the last level also stays among the
-final leaves. A CUDA plan counts the device memory of the mask (and, when
+`impulsive_veto = true` fails before any data is read). On both CPU and CUDA a
+harvested leaf and newly masked leaves in its batch are dropped immediately at
+the level where the source is harvested, including at the final pruning level. A
+CUDA plan counts the device memory of the mask (and, when
 harvesting, of the harvest staging), and its plan cache records whether the
 table is active and the harvest settings: turning either on or off needs a
 new plan, whose chunk edges can differ, and so can the search grid of

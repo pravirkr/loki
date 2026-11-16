@@ -29,7 +29,7 @@ namespace py = pybind11;
 template <SupportedFoldType FoldType>
 void bind_ffa_plan(py::module& m, const std::string& name) {
     py::class_<FFAPlan<FoldType>, FFAPlanBase>(m, name.c_str())
-        .def(py::init<FFASearchConfig>(), py::arg("cfg"))
+        .def(py::init<const FFASearchConfig&>(), py::arg("cfg"))
         .def_property_readonly("fold_shapes",
                                [](const FFAPlan<FoldType>& self) {
                                    return as_listof_pyarray(
@@ -94,7 +94,15 @@ void bind_ffa_class(py::module& m, const std::string& name) {
 template <typename T>
 void bind_ffa_region_planner(py::module& m, const std::string& name) {
     py::class_<FFARegionPlanner<T>>(m, name.c_str())
-        .def(py::init<FFASearchConfig>(), py::arg("cfg"))
+        .def(py::init([](const FFASearchConfig& cfg, std::string_view backend,
+                         int device) {
+                 const auto exec = make_exec(backend, device);
+                 return long_call([&] {
+                     return std::make_unique<FFARegionPlanner<T>>(cfg, exec);
+                 });
+             }),
+             py::arg("cfg"), py::kw_only(), py::arg("backend") = "cpu",
+             py::arg("device") = 0)
         .def_property_readonly("cfgs", &FFARegionPlanner<T>::get_cfgs)
         .def_property_readonly("nregions", &FFARegionPlanner<T>::get_nregions)
         .def_property_readonly("stats", &FFARegionPlanner<T>::get_stats);

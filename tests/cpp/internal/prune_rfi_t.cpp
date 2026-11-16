@@ -113,8 +113,12 @@ TEST_CASE("HarvestBuffer stores optional folds", "[prune_rfi]") {
 
 TEST_CASE("PruneStats RFI summaries", "[prune_rfi]") {
     loki::search::PruneStats stats{};
+    stats.n_branches    = 0;
+    stats.n_leaves      = 0;
     stats.n_leaves_phy  = 0;
     stats.n_leaves_surv = 0;
+    REQUIRE(stats.branch_frac() == 0.0);
+    REQUIRE(stats.phys_frac() == 0.0);
     REQUIRE(stats.surv_frac() == 0.0);
     stats.n_leaves_phy    = 10;
     stats.n_leaves_surv   = 5;

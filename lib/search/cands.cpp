@@ -250,10 +250,16 @@ double PruneStats::lb_leaves_phys() const noexcept {
     return round_dp(std::log2(static_cast<double>(n_leaves_phy)), 2);
 }
 double PruneStats::branch_frac() const noexcept {
+    if (n_branches == 0) {
+        return 0.0;
+    }
     return round_dp(
         static_cast<double>(n_leaves) / static_cast<double>(n_branches), 2);
 }
 double PruneStats::phys_frac() const noexcept {
+    if (n_leaves == 0) {
+        return 0.0;
+    }
     return round_dp(
         static_cast<double>(n_leaves_phy) / static_cast<double>(n_leaves), 2);
 }
@@ -687,8 +693,10 @@ void FFAResultWriter::write_metadata(const FFAResultMetadata& metadata) {
     h5_file().createAttribute("eta", metadata.eta);
     // Duty-cycle resolution of the grid: eta / nbins turns in every region.
     h5_file().createAttribute("phase_tolerance",
-                              metadata.eta /
-                                  static_cast<double>(metadata.nbins_min));
+                              metadata.nbins_min > 0
+                                  ? metadata.eta /
+                                        static_cast<double>(metadata.nbins_min)
+                                  : 0.0);
     h5_file().createAttribute("use_fourier", metadata.use_fourier);
     if (metadata.bseg_brute.has_value()) {
         h5_file().createAttribute("bseg_brute", *metadata.bseg_brute);

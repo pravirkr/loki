@@ -367,6 +367,7 @@ void bind_configs(py::module_& m) {
         .def_readwrite("propagator_significance", &ETC::propagator_significance)
         .def_readwrite("validation_significance", &ETC::validation_significance)
         .def_readwrite("use_conservative_tile", &ETC::use_conservative_tile)
+        .def_readwrite("overflow_keep_fraction", &ETC::overflow_keep_fraction)
         .def_readwrite("plan_cache", &ETC::plan_cache)
         .def_readwrite("use_plan_cache", &ETC::use_plan_cache)
         .def_readwrite("rfi", &ETC::rfi)

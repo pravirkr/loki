@@ -194,12 +194,12 @@ void bind_prune(py::module_& m) {
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir") = "./",
             py::arg("file_prefix") = "test", py::kw_only(),
             py::arg("observation") = io::ObservationMetadata{})
-        .def_static("publish_candidates", &EPFreqSweep::publish_candidates,
-                    py::arg("spool"), py::arg("output"), py::kw_only(),
-                    py::arg("candidates") =
-                        search::CandidateOptions::ep_defaults(),
-                    py::arg("observation") = io::ObservationMetadata{},
-                    py::arg("snr_min")     = std::nullopt);
+        .def_static(
+            "publish_candidates", &EPFreqSweep::publish_candidates,
+            py::arg("spool"), py::arg("output"), py::kw_only(),
+            py::arg("candidates")  = search::CandidateOptions::ep_defaults(),
+            py::arg("observation") = io::ObservationMetadata{},
+            py::arg("snr_min")     = std::nullopt, py::call_guard<LongCall>());
 }
 
 } // namespace loki

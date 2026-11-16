@@ -34,12 +34,11 @@ namespace loki::pipelines {
  * fixed reserve (as for FFAFreqSweep), and host memory is never checked.
  * A plan cache written on either backend is accepted on the other: the peak is
  * rechecked with the current backend, and a plan that does not fit is
- * rejected. An active
- * rfi_config (pulsar mask, harvesting, impulsive veto) is not implemented on
- * CUDA and is rejected with std::invalid_argument. On the CPU, harvest
- * defaults (PruneRFIConfig::harvest_defaults) are expanded for each chunk
- * from its own threshold scheme, and an active config is recorded in
- * `chunks/<chunk>/rfi_config`.
+ * rejected. On both CPU and CUDA, @p rfi_config pulsar masking and early
+ * harvest are supported (harvest defaults from PruneRFIConfig::harvest_defaults
+ * are expanded per chunk from its own threshold scheme, and an active config is
+ * recorded in `chunks/<chunk>/rfi_config`). `impulsive_veto` is CPU-only and
+ * rejected on CUDA with std::invalid_argument.
  */
 class EPFreqSweep {
 public:

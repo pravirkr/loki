@@ -322,6 +322,9 @@ private:
         std::ofstream log(log_file, std::ios::app);
         log << pstats_cur.get_summary();
         log.close();
+        if (world_tree.get_size() == 0) {
+            m_prune_complete = true;
+        }
     }
 
     void ascend_survivors_batched(std::span<const FoldType> ffa_fold) {

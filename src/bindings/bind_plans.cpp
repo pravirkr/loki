@@ -32,7 +32,7 @@ void bind_plans(py::module_& m) {
 
     // Bind FFAPlanBase
     py::class_<FFAPlanBase>(m_plans, "FFAPlanBase")
-        .def(py::init<FFASearchConfig>(), py::arg("cfg"))
+        .def(py::init<const FFASearchConfig&>(), py::arg("cfg"))
         .def_property_readonly("n_params", &FFAPlanBase::get_n_params)
         .def_property_readonly("n_levels", &FFAPlanBase::get_n_levels)
         .def_property_readonly("segment_lens",
@@ -191,7 +191,8 @@ void bind_plans(py::module_& m) {
         py::arg("p_min"), py::arg("p_max"), py::arg("tsamp"),
         py::arg("nbins_min"), py::arg("eta_min"),
         py::arg("region_growth_factor") = 1.5, py::arg("nbins_max") = 1024,
-        "Octave regions of a frequency sweep, as a structured array with "
+        "Geometric period regions of a frequency sweep, as a structured array "
+        "with "
         "fields f_start, f_end (Hz), nbins and eta.");
 
     // FFA submodule

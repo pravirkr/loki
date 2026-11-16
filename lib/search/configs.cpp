@@ -65,6 +65,9 @@ using toml_utils::reject_nonfinite_floats;
     if (path == "performance.device_id") {
         return "use performance.device";
     }
+    if (path == "performance.octave_scale") {
+        return "use performance.region_growth_factor";
+    }
     return {};
 }
 
@@ -2113,7 +2116,8 @@ EPSearchConfig::with_ep_default_nsegments(SizeType target_n_segs) const {
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
-        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override);
+        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
+        m_ep_impl->m_overflow_keep_fraction);
 }
 
 EPSearchConfig EPSearchConfig::from_toml(const std::filesystem::path& path,

@@ -727,6 +727,9 @@ private:
             .n_leaves_masked = n_seeds_masked,
         };
         m_pstats.update_stats(pstats_cur);
+        if (world_tree.get_size() == 0) {
+            m_prune_complete = true;
+        }
     }
 
     void ascend_survivors_batched(cuda::std::span<const FoldTypeCUDA> ffa_fold,

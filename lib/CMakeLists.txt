@@ -49,6 +49,10 @@ set_property(SOURCE search/provenance.cpp APPEND PROPERTY COMPILE_DEFINITIONS
 # The git commit of the build, for /run_stats: regenerated at every build
 # (written only when it changes) as "lib/generated/git_commit.hpp".
 set(LOKI_GIT_COMMIT_HEADER ${PROJECT_BINARY_DIR}/lib/generated/git_commit.hpp)
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR} -DOUT=${LOKI_GIT_COMMIT_HEADER} -P
+          ${PROJECT_SOURCE_DIR}/cmake/LokiGitCommit.cmake
+)
 add_custom_target(
   loki_git_commit
   COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR} -DOUT=${LOKI_GIT_COMMIT_HEADER} -P

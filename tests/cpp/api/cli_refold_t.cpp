@@ -2,7 +2,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
+#include <utility>
 
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>

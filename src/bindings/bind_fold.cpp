@@ -28,10 +28,15 @@ void bind_fold(py::module_& m) {
            const PyArrayT<double>& freq_arr, SizeType segment_len,
            SizeType nbins, double tsamp, double t_ref, int nthreads,
            std::string_view backend, int device) {
-            return as_pyarray(algorithms::compute_brute_fold<float>(
-                to_span<const float>(ts_e), to_span<const float>(ts_v),
-                to_span<const double>(freq_arr), segment_len, nbins, tsamp,
-                t_ref, make_exec(backend, device, nthreads)));
+            const auto ts_e_span = to_span<const float>(ts_e);
+            const auto ts_v_span = to_span<const float>(ts_v);
+            const auto freq_span = to_span<const double>(freq_arr);
+            const auto exec      = make_exec(backend, device, nthreads);
+            return as_pyarray(long_call([&] {
+                return algorithms::compute_brute_fold<float>(
+                    ts_e_span, ts_v_span, freq_span, segment_len, nbins, tsamp,
+                    t_ref, exec);
+            }));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("freq_arr"),
         py::arg("segment_len"), py::arg("nbins"), py::arg("tsamp"),
@@ -43,10 +48,15 @@ void bind_fold(py::module_& m) {
            const PyArrayT<double>& freq_arr, SizeType segment_len,
            SizeType nbins, double tsamp, double t_ref, int nthreads,
            std::string_view backend, int device) {
-            return as_pyarray(algorithms::compute_brute_fold<ComplexType>(
-                to_span<const float>(ts_e), to_span<const float>(ts_v),
-                to_span<const double>(freq_arr), segment_len, nbins, tsamp,
-                t_ref, make_exec(backend, device, nthreads)));
+            const auto ts_e_span = to_span<const float>(ts_e);
+            const auto ts_v_span = to_span<const float>(ts_v);
+            const auto freq_span = to_span<const double>(freq_arr);
+            const auto exec      = make_exec(backend, device, nthreads);
+            return as_pyarray(long_call([&] {
+                return algorithms::compute_brute_fold<ComplexType>(
+                    ts_e_span, ts_v_span, freq_span, segment_len, nbins, tsamp,
+                    t_ref, exec);
+            }));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("freq_arr"),
         py::arg("segment_len"), py::arg("nbins"), py::arg("tsamp"),
@@ -56,9 +66,13 @@ void bind_fold(py::module_& m) {
         "fold_phase",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const PyArrayT<double>& phase, SizeType nbins) {
-            auto fold = as_pyarray(algorithms::fold_phase(
-                to_span<const float>(ts_e), to_span<const float>(ts_v),
-                to_span<const double>(phase), nbins));
+            const auto ts_e_span  = to_span<const float>(ts_e);
+            const auto ts_v_span  = to_span<const float>(ts_v);
+            const auto phase_span = to_span<const double>(phase);
+            auto fold             = as_pyarray(long_call([&] {
+                return algorithms::fold_phase(ts_e_span, ts_v_span, phase_span,
+                                              nbins);
+            }));
             return fold.reshape(
                 {static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(nbins)});
         },
@@ -83,7 +97,9 @@ Returns shape (2, nbins): the sums of ts_e, then of ts_v, per bin.)doc");
                 throw std::invalid_argument(
                     "model must be \"taylor\" or \"leaf\"");
             }
-            const auto lv = to_span<const double>(leaf);
+            const auto lv        = to_span<const double>(leaf);
+            const auto ts_e_span = to_span<const float>(ts_e);
+            const auto ts_v_span = to_span<const float>(ts_v);
             const search::RefoldTarget target{
                 .leaf     = {lv.begin(), lv.end()},
                 .n_params = static_cast<SizeType>(leaf.shape(0)) - 2,
@@ -99,9 +115,10 @@ Returns shape (2, nbins): the sums of ts_e, then of ts_v, per bin.)doc");
                                                 .fd_span      = fd_span,
                                                 .split        = split,
                                                 .nthreads     = nthreads};
-            const auto r = search::refold(to_span<const float>(ts_e),
-                                          to_span<const float>(ts_v), tsamp,
-                                          t_ref, target, options);
+            const auto r = long_call([&] {
+                return search::refold(ts_e_span, ts_v_span, tsamp, t_ref,
+                                      target, options);
+            });
             py::dict out;
             out["nbins"]     = r.nbins;
             out["model"]     = r.model;

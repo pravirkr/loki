@@ -409,6 +409,15 @@ TEST_CASE("EP config defaults to 128 FFA segments when nsegments is omitted",
     REQUIRE(raw_cfg.get_nsegments() == 1U);
     const auto norm_cfg = raw_cfg.with_ep_default_nsegments();
     REQUIRE(norm_cfg.has_explicit_nsegments());
+    REQUIRE(norm_cfg.get_overflow_keep_fraction() == 0.5);
+
+    const loki::search::PulsarSearchConfig custom_keep(
+        70000, 64e-6, 32, 1.0, limits, 0.2, 1.5, true, 1, 8.0, 1.5, 1024, 64,
+        std::nullopt, std::nullopt, 7.0, 1U << 22U, 3, 1e-5, 10.0, 1.4, 2.0,
+        5.0, false, false, std::nullopt, 0.25);
+    REQUIRE(
+        custom_keep.with_ep_default_nsegments().get_overflow_keep_fraction() ==
+        0.25);
     REQUIRE(norm_cfg.get_nsegments() == 128U);
     REQUIRE(norm_cfg.get_nsamps_input() == 70000U);
     REQUIRE(norm_cfg.get_nsamps() == norm_cfg.get_bseg_ffa() * 128U);

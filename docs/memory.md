@@ -151,7 +151,7 @@ fitted to.
 
 | Term | Contents | Lifetime |
 | --- | --- | --- |
-| group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_irfft_scratch_bytes` (the fused pruning kernel's statistics and tile states, one 8-byte word per branched leaf at most; no IRFFT fold scratch) | one group |
+| group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_scorer_scratch_bytes` (the fused pruning kernel's statistics and tile states, one 8-byte word per branched leaf at most; no IRFFT fold scratch) | one group |
 | shared | `ep_cuda_shared_bytes`: logical FFA internal fold size, coordinates, and seed-output fold buffer; internal/tree overlap is subtracted once from the group total | coordinates/output: whole sweep; shared fold arena: one group |
 | inputs | the device copy of `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
 | RFI control | with an active `[ep.rfi]`, `ep_cuda_rfi_bytes`: the device mask bitset and seed index list (one cell per FFA coordinate) and, with harvesting enabled, the staging of one batch's harvest candidates (reported leaves and scores, at most `batch_size * branch_max`) and of the recorded folds. Zero without RFI control, so default plans do not change. The run's harvest store is host memory and not counted | one group |
@@ -214,8 +214,9 @@ Differences from the CPU policy:
   chip, the CPU with the lane FFT inside its scoring tiles. The FFA stage's
   GPU transforms keep only the small Bluestein tables; the host FFT tables
   are small, immutable and shared by all threads.
-- `PruneRFIConfig` (pulsar mask, harvesting, impulsive veto) is not implemented
-  on CUDA: an active one is rejected with `std::invalid_argument`.
+- `PruneRFIConfig` pulsar masking and early harvest run on CUDA (budgeted by
+  `ep_cuda_rfi_bytes`); `impulsive_veto` is CPU-only and rejected on CUDA with
+  `std::invalid_argument`.
 
 The FFA internal fold and EP tree folds use the same allocation in a sweep:
 the arena is `max(FFA internal bytes, tree fold bytes)`, rather than their sum.

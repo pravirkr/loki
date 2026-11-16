@@ -772,8 +772,10 @@ public:
             m_s0[q + 1]    = m_s0[q] + p;
             m_s1[q + 1]    = m_s1[q] + (static_cast<double>(q) * p);
         }
+        const double nyq =
+            (nd % 2 == 0) ? (std::norm(spec.back()) * norm) : 0.0;
         m_dc    = m_s0[1];
-        m_total = (2.0 * m_s0.back()) - m_dc; // Parseval: the valid fraction
+        m_total = (2.0 * m_s0.back()) - m_dc - nyq; // Parseval: valid fraction
     }
 
     /// Retention for a run of @p width bins.
@@ -1070,7 +1072,7 @@ zap_bands(std::span<const float> ts,
     }
     std::vector<PreprocessReport::ZapBand> out;
     for (SizeType i = 0; i < nband; ++i) {
-        if (cnt_in[i] == 0 || cnt_out[i] == 0) {
+        if (cnt_in[i] == 0 || cnt_out[i] == 0 || !(sum_out[i] > 0.0)) {
             continue;
         }
         out.push_back(

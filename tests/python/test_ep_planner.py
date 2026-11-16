@@ -457,3 +457,30 @@ def test_ep_toml_and_plan_active_segments_bindings() -> None:
         device=0,
     )
     assert sweep is not None
+
+    ffa_planner = libloki.plans.FFARegionPlannerTime(
+        _search_config(1), backend="cpu", device=0
+    )
+    assert ffa_planner.nregions >= 1
+
+    cons_cfg = libloki.configs.PulsarSearchConfig(
+        nsamps=1 << 16,
+        tsamp=64e-6,
+        nbins=32,
+        eta=1.0,
+        param_limits=np.array(
+            [[-1.0, 1.0], [-10.0, 10.0], [140.0, 145.0]], dtype=np.float64
+        ),
+        bseg_brute=1024,
+        nsegments=8,
+        use_conservative_tile=True,
+    )
+    cons_plan = libloki.plans.FFAPlanTime(cons_cfg)
+    with pytest.raises(ValueError, match="Conservative tile"):
+        cons_plan.get_branching_pattern("chebyshev", 0)
+    with pytest.raises(ValueError, match="Conservative tile"):
+        cons_plan.get_branching_pattern_approx("chebyshev", 0, 1000)
+
+    ep_toml_py = libloki.configs.EPTomlConfig()
+    ep_toml_py.overflow_keep_fraction = 0.25
+    assert ep_toml_py.overflow_keep_fraction == pytest.approx(0.25)

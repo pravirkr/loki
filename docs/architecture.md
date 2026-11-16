@@ -432,7 +432,8 @@ Both sweeps have a CPU engine and a CUDA engine. On CUDA,
 it and the free device memory less `kDeviceReserveGB`
 (`FFARegionPlanner(cfg, Exec)` and `EPRegionPlanner` with a GPU `Exec`; the
 CLI's `--dry-run` plans the same way). `EPFreqSweep` on CUDA prunes the runs
-of a chunk one at a time and rejects an active `rfi_config`.
+of a chunk one at a time and supports `rfi_config` (pulsar mask and early
+harvest; `impulsive_veto` is CPU-only and rejected).
 
 ## Checks
 

@@ -4,6 +4,7 @@
 #include "loki/algorithms/ffa.hpp"           // IWYU pragma: export
 #include "loki/algorithms/fold.hpp"          // IWYU pragma: export
 #include "loki/algorithms/prune.hpp"         // IWYU pragma: export
+#include "loki/algorithms/prune_rfi.hpp"     // IWYU pragma: export
 #include "loki/algorithms/regions.hpp"       // IWYU pragma: export
 #include "loki/common/backend.hpp"           // IWYU pragma: export
 #include "loki/common/coord.hpp"             // IWYU pragma: export

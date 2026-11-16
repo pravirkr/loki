@@ -391,7 +391,8 @@ void CellCap::add(const Candidate& c) {
         constexpr std::size_t kBytesPerCell =
             sizeof(std::vector<Candidate>) + 128;
         const auto required = [&] {
-            return (static_cast<double>(m_kept + 1) * kBytesPerTrial) +
+            const std::size_t extra = kept.size() < m_cap ? 1U : 0U;
+            return (static_cast<double>(m_kept + extra) * kBytesPerTrial) +
                    (static_cast<double>(m_cells.size()) * kBytesPerCell);
         };
         // Over budget, every cell keeps fewer trials: halving the cap of all

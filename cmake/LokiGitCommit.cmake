@@ -2,13 +2,16 @@
 # `git describe --always --dirty` of SRC, or "unknown" outside a git checkout.
 # The header is rewritten only when the commit changes, so a build recompiles
 # its one user only then. Run at every build by the loki_git_commit target.
-execute_process(
-  COMMAND git -C "${SRC}" describe --always --dirty --abbrev=12
-  OUTPUT_VARIABLE LOKI_COMMIT
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  ERROR_QUIET
-  RESULT_VARIABLE LOKI_GIT_STATUS
-)
+set(LOKI_GIT_STATUS 1)
+if(EXISTS "${SRC}/.git")
+  execute_process(
+    COMMAND git -C "${SRC}" describe --always --dirty --abbrev=12
+    OUTPUT_VARIABLE LOKI_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE LOKI_GIT_STATUS
+  )
+endif()
 if(NOT LOKI_GIT_STATUS EQUAL 0 OR LOKI_COMMIT STREQUAL "")
   set(LOKI_COMMIT "unknown")
 endif()
@@ -20,5 +23,7 @@ if(EXISTS "${OUT}")
   file(READ "${OUT}" LOKI_OLD_HEADER)
 endif()
 if(NOT LOKI_OLD_HEADER STREQUAL LOKI_HEADER)
+  get_filename_component(LOKI_OUT_DIR "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${LOKI_OUT_DIR}")
   file(WRITE "${OUT}" "${LOKI_HEADER}")
 endif()
