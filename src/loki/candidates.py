@@ -168,6 +168,7 @@ class CandidateFile:
                     "source_index",
                     "param_errors",
                     "has_parameter_errors",
+                    "outside_prior",
                 ):
                     if name in group:
                         rows[name] = group[name][start:stop]

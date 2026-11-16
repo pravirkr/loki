@@ -18,9 +18,9 @@ inline constexpr SizeType kFFAFreqSweepWriteBatchSize = 1U << 16U;
  * Divides a period range into contiguous bands that keep a nearly constant
  * physical time resolution per folding bin. Bin count grows with period until
  * `nbins_max`. Once the cap is hit, the remaining period range is still split
- * by `octave_scale`, so each sub-band can choose its own brute-fold segment
- * length. Requested `nbins_min` must fit in `p_min / tsamp` or the function
- * throws.
+ * by `region_growth_factor`, so each sub-band can choose its own brute-fold
+ * segment length. Requested `nbins_min` must fit in `p_min / tsamp` or the
+ * function throws.
  *
  * @param p_min Minimum period (seconds). Must exceed 2*tsamp (Nyquist) and
  * satisfy p_min >= nbins_min * tsamp.
@@ -28,21 +28,23 @@ inline constexpr SizeType kFFAFreqSweepWriteBatchSize = 1U << 16U;
  * @param tsamp Sampling interval (seconds).
  * @param nbins_min Folding bins at the shortest period. Must be >= 2.
  * @param eta_min Tolerance in bins at the shortest period. Must be positive.
- * @param octave_scale multiplicative factor between successive FFA search
- * bands. An octave_scale = 2.0 gives true octave spacing (each band doubles in
- * period and bin count). Values in (1.0, 2.0) create pseudo-octaves for
- * smoother duty-cycle resolution. Must be strictly > 1.0.
+ * @param region_growth_factor Geometric growth factor of the period range
+ * from one region to the next (2.0 = octaves). Bin count and eta grow with
+ * the period, so the tolerance in phase (eta_min / nbins_min turns) is the
+ * same in every region; a smaller factor keeps each region's bins closer to
+ * the finest time resolution at more regions (cost). Must be > 1.0.
  * @param nbins_max Cap on folding bins for long periods. Must be >= nbins_min.
  * @return Contiguous FFARegion bands covering [1/p_max, 1/p_min] Hz.
  * @throws std::runtime_error if the inputs are illogical.
  */
-std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
-                                                   double p_max,
-                                                   double tsamp,
-                                                   SizeType nbins_min,
-                                                   double eta_min,
-                                                   double octave_scale = 2.0,
-                                                   SizeType nbins_max  = 1024);
+std::vector<coord::FFARegion>
+generate_ffa_regions(double p_min,
+                     double p_max,
+                     double tsamp,
+                     SizeType nbins_min,
+                     double eta_min,
+                     double region_growth_factor = 1.5,
+                     SizeType nbins_max          = 1024);
 
 /**
  * @brief A class to store the size stats for FFA regions (Time or Fourier

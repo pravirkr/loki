@@ -64,7 +64,7 @@ TEST_CASE("Fused brute fold + FFA levels is bit-exact with the plain path",
         const PulsarSearchConfig cfg(
             kNsamps, kTsamp, /*nbins=*/32, /*eta=*/0.5, limits,
             /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/false, nthreads,
-            /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+            /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, bseg_brute);
         const auto reference = run_ffa(cfg, ts_e, ts_v, SizeType{0});
         for (const SizeType k : levels) {
@@ -104,7 +104,7 @@ TEST_CASE("Accel execute_scored is bit-exact with a scan of the stored fold",
     const PulsarSearchConfig cfg(
         kNsamps, kTsamp, nbins, /*eta=*/0.5, limits, /*ducy_max=*/0.2,
         /*wtsp=*/1.5, /*use_fourier=*/false, nthreads,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, /*bseg_brute=*/128);
     const auto widths = cfg.get_scoring_widths();
 
@@ -181,7 +181,7 @@ TEST_CASE("Fourier execute_scored matches a scan of the stored fold",
     const PulsarSearchConfig cfg(
         kNsamps, kTsamp, nbins, /*eta=*/0.5, limits, /*ducy_max=*/0.2,
         /*wtsp=*/1.5, /*use_fourier=*/true, nthreads,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, /*bseg_brute=*/128);
     const auto widths = cfg.get_scoring_widths();
 

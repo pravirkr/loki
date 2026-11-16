@@ -4,6 +4,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <utility>
@@ -99,7 +100,8 @@ void GridMask::add_window_single(double f_lo,
 }
 
 void GridMask::add_window(const algorithms::ParamWindow& window,
-                          SizeType n_harmonics) {
+                          SizeType n_harmonics,
+                          bool fractional_harmonics) {
     error_check::check(!utils::is_nan(window.f_lo) &&
                            !utils::is_nan(window.f_hi),
                        "GridMask::add_window: frequency bounds must not be "
@@ -111,6 +113,23 @@ void GridMask::add_window(const algorithms::ParamWindow& window,
                                   "GridMask::add_window: requires a_lo <= "
                                   "a_hi");
     add_window_single(window.f_lo, window.f_hi, window.a_lo, window.a_hi);
+    if (fractional_harmonics) {
+        for (SizeType q = 1; q <= n_harmonics; ++q) {
+            for (SizeType p = 1; p <= n_harmonics; ++p) {
+                if (p == q || std::gcd(p, q) != 1) {
+                    continue;
+                }
+                // (f * p) / q: the same operations as the integer
+                // expansion when p or q is 1.
+                const auto pd = static_cast<double>(p);
+                const auto qd = static_cast<double>(q);
+                add_window_single((window.f_lo * pd) / qd,
+                                  (window.f_hi * pd) / qd, window.a_lo,
+                                  window.a_hi);
+            }
+        }
+        return;
+    }
     for (SizeType k = 2; k <= n_harmonics; ++k) {
         const auto kd = static_cast<double>(k);
         add_window_single(window.f_lo * kd, window.f_hi * kd, window.a_lo,
@@ -120,10 +139,26 @@ void GridMask::add_window(const algorithms::ParamWindow& window,
     }
 }
 
+bool GridMask::is_masked_at(double accel, double freq) const noexcept {
+    if (empty() || utils::is_nan(accel) || utils::is_nan(freq)) {
+        return false;
+    }
+    // A point reported just outside the grid takes the nearest edge cell.
+    const double a_c   = std::clamp(accel, m_lim_accel.min, m_lim_accel.max);
+    const double f_c   = std::clamp(freq, m_lim_freq.min, m_lim_freq.max);
+    const auto f_range = cell_range(f_c, f_c, m_lim_freq, m_n_freq);
+    const auto a_range = cell_range(a_c, a_c, m_lim_accel, m_n_accel);
+    if (!f_range || !a_range) {
+        return false;
+    }
+    return is_masked((a_range->first * m_n_freq) + f_range->first);
+}
+
 void GridMask::add_windows(std::span<const algorithms::ParamWindow> windows,
-                           SizeType n_harmonics) {
+                           SizeType n_harmonics,
+                           bool fractional_harmonics) {
     for (const auto& w : windows) {
-        add_window(w, n_harmonics);
+        add_window(w, n_harmonics, fractional_harmonics);
     }
 }
 

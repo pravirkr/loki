@@ -68,7 +68,7 @@ loki::search::PulsarSearchConfig overflow_config() {
         /*use_fourier=*/true,
         /*nthreads=*/1,
         /*max_process_memory_gb=*/8.0,
-        /*octave_scale=*/2.0,
+        /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/kNsamps / kNseg / 16,
@@ -117,13 +117,13 @@ TEST_CASE("Branch workspace uses the worst simulated leaf",
     const auto old_branch_max = std::max(
         static_cast<SizeType>(std::ceil(peak_mean * 2.0)), SizeType{32});
     // The worst frequency's product sits above twice the mean, which is what
-    // used to size the workspace (and above the floor of 32 on this box).
+    // used to size the workspace (and above the old floor of 32 on this box).
     REQUIRE(forecast.max_children > old_branch_max);
-    REQUIRE(
-        loki::algorithms::detail::compute_branch_max(forecast.max_children) ==
-        std::max(forecast.max_children, SizeType{32}));
-    // A quiet plan still keeps the floor.
-    REQUIRE(loki::algorithms::detail::compute_branch_max(1) == 32);
+    REQUIRE(loki::algorithms::detail::compute_branch_max(
+                forecast.max_children) == forecast.max_children);
+    // The worst leaf is the ceiling: a quiet plan gets no floor of 32.
+    REQUIRE(loki::algorithms::detail::compute_branch_max(1) == 1);
+    REQUIRE(loki::algorithms::detail::compute_branch_max(0) == 1);
 }
 
 TEST_CASE("Taylor branching that fits is written in full",

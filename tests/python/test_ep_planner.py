@@ -43,9 +43,9 @@ def test_ep_region_planner_accepts_workers_and_rfi_config() -> None:
     "cuda" not in libloki.available_backends(),
     reason="CUDA backend not built",
 )
-def test_ep_region_planner_cuda_rejects_an_active_rfi_config() -> None:
+def test_ep_region_planner_cuda_rejects_the_impulsive_veto() -> None:
     cfg = _search_config(nthreads=1)
-    rfi = libloki.prune.PruneRFIConfig(harvest_scheme=[5.0], max_harvests=64)
+    rfi = libloki.prune.PruneRFIConfig(impulsive_veto=True)
     with pytest.raises(ValueError):  # noqa: PT011
         libloki.prune.EPRegionPlannerTime(cfg, rfi_config=rfi, backend="cuda")
 
@@ -96,7 +96,7 @@ def test_ep_region_planner_rejects_unknown_backend() -> None:
 
 
 @pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
-def test_ep_freq_sweep_cuda_runs_and_rejects_rfi(tmp_path: Path) -> None:
+def test_ep_freq_sweep_cuda_runs_and_rejects_the_veto(tmp_path: Path) -> None:
     cfg = _search_config(nthreads=1)
     rng = np.random.default_rng(0)
     ts_e = rng.standard_normal(1 << 16).astype(np.float32)
@@ -111,8 +111,8 @@ def test_ep_freq_sweep_cuda_runs_and_rejects_rfi(tmp_path: Path) -> None:
     sweep.execute(ts_e, ts_v, str(tmp_path), "py_cuda")
     assert (tmp_path / "py_cuda_ep_results.h5").exists()
 
-    rfi = libloki.prune.PruneRFIConfig(harvest_scheme=[5.0], max_harvests=64)
-    with pytest.raises(ValueError, match="rfi_config"):
+    rfi = libloki.prune.PruneRFIConfig(impulsive_veto=True)
+    with pytest.raises(ValueError, match="impulsive_veto"):
         libloki.prune.EPFreqSweep(cfg, rfi_config=rfi, backend="cuda")
 
 
@@ -153,6 +153,27 @@ def test_ep_target_snr_is_independent_and_invalidates_cache(tmp_path: Path) -> N
     changed = _search_config(nthreads=1, target_snr=12.0)
     with pytest.raises(ValueError, match="target_snr"):
         libloki.prune.EPRegionPlannerTime(changed, ref_segs=[0], plan_cache_file=cache)
+
+
+@pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
+def test_ep_cuda_plan_cache_is_keyed_on_rfi_control(tmp_path: Path) -> None:
+    # A pulsar mask adds device buffers to a CUDA plan, harvest or not.
+    cfg = _search_config(nthreads=1)
+    window = libloki.prune.ParamWindow(141.0, 142.0)
+    mask = libloki.prune.PruneRFIConfig(pulsar_mask=[window])
+    cache = tmp_path / "rfi_plan.h5"
+    libloki.prune.EPRegionPlannerTime(cfg, backend="cuda").save_cache(str(cache))
+    with pytest.raises(ValueError, match="rfi_active"):
+        libloki.prune.EPRegionPlannerTime(
+            cfg, rfi_config=mask, plan_cache_file=str(cache), backend="cuda"
+        )
+    # A CPU plan does not count them.
+    cpu_cache = tmp_path / "rfi_plan_cpu.h5"
+    libloki.prune.EPRegionPlannerTime(cfg, ref_segs=[0]).save_cache(str(cpu_cache))
+    reloaded = libloki.prune.EPRegionPlannerTime(
+        cfg, rfi_config=mask, ref_segs=[0], plan_cache_file=str(cpu_cache)
+    )
+    assert reloaded.nchunks >= 1
 
 
 def test_ep_plan_cache_is_keyed_on_ffa_segmentation(tmp_path: Path) -> None:
@@ -436,3 +457,30 @@ def test_ep_toml_and_plan_active_segments_bindings() -> None:
         device=0,
     )
     assert sweep is not None
+
+    ffa_planner = libloki.plans.FFARegionPlannerTime(
+        _search_config(1), backend="cpu", device=0
+    )
+    assert ffa_planner.nregions >= 1
+
+    cons_cfg = libloki.configs.PulsarSearchConfig(
+        nsamps=1 << 16,
+        tsamp=64e-6,
+        nbins=32,
+        eta=1.0,
+        param_limits=np.array(
+            [[-1.0, 1.0], [-10.0, 10.0], [140.0, 145.0]], dtype=np.float64
+        ),
+        bseg_brute=1024,
+        nsegments=8,
+        use_conservative_tile=True,
+    )
+    cons_plan = libloki.plans.FFAPlanTime(cons_cfg)
+    with pytest.raises(ValueError, match="Conservative tile"):
+        cons_plan.get_branching_pattern("chebyshev", 0)
+    with pytest.raises(ValueError, match="Conservative tile"):
+        cons_plan.get_branching_pattern_approx("chebyshev", 0, 1000)
+
+    ep_toml_py = libloki.configs.EPTomlConfig()
+    ep_toml_py.overflow_keep_fraction = 0.25
+    assert ep_toml_py.overflow_keep_fraction == pytest.approx(0.25)

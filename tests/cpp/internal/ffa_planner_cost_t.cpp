@@ -27,13 +27,14 @@ namespace detail = loki::algorithms::detail;
 namespace {
 
 // 2^22 samples at 64 us (tobs ~ 268 s), accel +-200 m/s^2, 20-80 Hz, nbins
-// 32: two regions; memory binds below ~1 GB.
+// 32, octave regions: two regions; memory binds below ~1 GB.
 constexpr SizeType kNsamps = SizeType{1} << 22U;
 constexpr double kTsamp    = 6.4e-5;
 constexpr double kAccel    = 200.0;
 constexpr double kFMin     = 20.0;
 constexpr double kFMax     = 80.0;
 constexpr SizeType kNbins  = 32;
+constexpr double kGrowth   = 2.0;
 
 FFASearchConfig make_cfg(bool use_fourier, double max_memory_gb, bool accel) {
     std::vector<ParamLimit> limits;
@@ -41,8 +42,8 @@ FFASearchConfig make_cfg(bool use_fourier, double max_memory_gb, bool accel) {
         limits.push_back({.min = -kAccel, .max = kAccel});
     }
     limits.push_back({.min = kFMin, .max = kFMax});
-    return {kNsamps, kTsamp, kNbins,      /*eta=*/1.0, limits,
-            0.2,     1.5,    use_fourier, 1,           max_memory_gb};
+    return {kNsamps, kTsamp,      kNbins, /*eta=*/1.0,   limits, 0.2,
+            1.5,     use_fourier, 1,      max_memory_gb, kGrowth};
 }
 
 double max_drift(bool accel) {
@@ -74,7 +75,7 @@ template <typename FoldType>
 void check_covers_regions(const FFARegionPlanner<FoldType>& planner,
                           bool accel) {
     const auto regions = generate_ffa_regions(1.0 / kFMax, 1.0 / kFMin, kTsamp,
-                                              kNbins, /*eta_min=*/1.0);
+                                              kNbins, /*eta_min=*/1.0, kGrowth);
     const double drift = max_drift(accel);
     const auto& cfgs   = planner.get_cfgs();
     REQUIRE(!cfgs.empty());
@@ -178,7 +179,7 @@ TEST_CASE("FFARegionPlanner CPU: an accel search is cheaper than one chunk "
     const auto cfg = make_cfg(/*use_fourier=*/true, 8.0, /*accel=*/true);
     const FFARegionPlanner<ComplexType> planner(cfg);
     const auto regions = generate_ffa_regions(1.0 / kFMax, 1.0 / kFMin, kTsamp,
-                                              kNbins, /*eta_min=*/1.0);
+                                              kNbins, /*eta_min=*/1.0, kGrowth);
     REQUIRE(planner.get_nregions() > regions.size());
 
     const double drift = max_drift(true);
@@ -199,7 +200,7 @@ TEST_CASE("FFARegionPlanner CPU: a frequency-only search keeps one chunk per "
     // Without an accel grid nothing oversamples: splitting would only move
     // the frequency grid's origin, so the widest chunks are kept.
     const auto regions = generate_ffa_regions(1.0 / kFMax, 1.0 / kFMin, kTsamp,
-                                              kNbins, /*eta_min=*/1.0);
+                                              kNbins, /*eta_min=*/1.0, kGrowth);
     for (const bool use_fourier : {false, true}) {
         CAPTURE(use_fourier);
         const auto cfg = make_cfg(use_fourier, 8.0, /*accel=*/false);
@@ -219,7 +220,7 @@ TEST_CASE("FFARegionPlanner GPU: cost-model chunks tile the regions and split "
           "wide accel bands",
           "[regions][planner_cost]") {
     const auto regions = generate_ffa_regions(1.0 / kFMax, 1.0 / kFMin, kTsamp,
-                                              kNbins, /*eta_min=*/1.0);
+                                              kNbins, /*eta_min=*/1.0, kGrowth);
     for (const bool use_fourier : {false, true}) {
         CAPTURE(use_fourier);
         const auto accel_cfg = make_cfg(use_fourier, 8.0, /*accel=*/true);

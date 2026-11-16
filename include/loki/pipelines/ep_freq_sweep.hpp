@@ -34,9 +34,11 @@ namespace loki::pipelines {
  * fixed reserve (as for FFAFreqSweep), and host memory is never checked.
  * A plan cache written on either backend is accepted on the other: the peak is
  * rechecked with the current backend, and a plan that does not fit is
- * rejected. An active
- * rfi_config (pulsar mask, harvesting, impulsive veto) is not implemented on
- * CUDA and is rejected with std::invalid_argument.
+ * rejected. On both CPU and CUDA, @p rfi_config pulsar masking and early
+ * harvest are supported (harvest defaults from PruneRFIConfig::harvest_defaults
+ * are expanded per chunk from its own threshold scheme, and an active config is
+ * recorded in `chunks/<chunk>/rfi_config`). `impulsive_veto` is CPU-only and
+ * rejected on CUDA with std::invalid_argument.
  */
 class EPFreqSweep {
 public:
@@ -57,7 +59,9 @@ public:
         Exec exec                                     = {});
 
     /// Publish common candidates after all independent runs have finished.
-    /// Currently supports polynomial Taylor with an inactive RFI config.
+    /// Currently supports polynomial Taylor. With an active @p rfi_config
+    /// (CPU), the final leaves are published as usual and each run's
+    /// harvested leaves stay in its `harvest` group (docs/candidates.md).
     explicit EPFreqSweep(
         const search::PulsarSearchConfig& cfg,
         const search::CandidateOptions& candidates,
@@ -86,10 +90,12 @@ public:
 
     /// Retry postprocessing of a completed EP spool without searching again.
     /// With no override, snr_min is read from the saved search configuration.
+    /// Candidates default to the EP defaults (per-run reduction on).
     static void
     publish_candidates(const std::filesystem::path& spool,
                        const std::filesystem::path& output,
-                       const search::CandidateOptions& candidates = {},
+                       const search::CandidateOptions& candidates =
+                           search::CandidateOptions::ep_defaults(),
                        const io::ObservationMetadata& observation = {},
                        std::optional<double> snr_min = std::nullopt);
 

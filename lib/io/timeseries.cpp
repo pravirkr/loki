@@ -110,6 +110,77 @@ open_reader(const std::filesystem::path& path) {
     throw error_check::DetailedException("unhandled timeseries path");
 }
 
+/// The observation metadata of @p path from its parsed @p header: the
+/// fields the header actually holds (psrio's unified header uses zero for a
+/// missing value).
+ObservationMetadata observation_from_header(const std::filesystem::path& path,
+                                            const psrio::Header& header,
+                                            SizeType nsamps) {
+    ObservationMetadata obs;
+    obs.input_path      = path.string();
+    obs.source          = header.source;
+    obs.original_nsamps = nsamps;
+    if (kind_from_path(path) == FileKind::kTim) {
+        const psrio::detail::MappedFile mapped(path);
+        const auto h = psrio::formats::sigproc::FilterbankHeader::parse(
+            mapped.bytes(), path.string());
+        obs.dm        = h.refdm;
+        obs.start_mjd = h.tstart;
+        if (h.barycentric) {
+            obs.barycentric = *h.barycentric != 0;
+        }
+    } else {
+        auto inf = path;
+        inf.replace_extension(".inf");
+        std::ifstream input(inf);
+        std::string line;
+        // psrio's unified Header uses zero for missing optional metadata.
+        // Inspect presence only; numerical parsing stays owned by psrio.
+        while (std::getline(input, line)) {
+            const auto eq = line.rfind('=');
+            if (eq == std::string::npos ||
+                line.find_first_not_of(" \t", eq + 1) == std::string::npos) {
+                continue;
+            }
+            auto key = line.substr(0, eq);
+            std::ranges::transform(key, key.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            key.erase(0, key.find_first_not_of(" \t"));
+            if (key.starts_with("dispersion measure")) {
+                obs.dm = header.dm;
+            }
+            if (key.starts_with("epoch of observation")) {
+                obs.start_mjd = header.tstart;
+            }
+            if (key.starts_with("barycentered?")) {
+                obs.barycentric = header.barycentric != 0;
+            }
+        }
+    }
+    // psrio serializes its absent unified start time as zero on synthetic
+    // data. It is a sentinel, not a usable observational reference MJD.
+    if (obs.start_mjd && *obs.start_mjd == 0) {
+        obs.start_mjd.reset();
+    }
+    // A header value the metadata cannot hold (a negative reference DM, say)
+    // makes that field unknown rather than the file unreadable.
+    if (obs.dm && (!utils::is_finite(*obs.dm) || *obs.dm < 0)) {
+        spdlog::warn("'{}': ignoring header DM {} (not a finite, nonnegative "
+                     "value); the DM is unknown",
+                     path.string(), *obs.dm);
+        obs.dm.reset();
+    }
+    if (obs.start_mjd &&
+        (!utils::is_finite(*obs.start_mjd) || *obs.start_mjd <= 0)) {
+        spdlog::warn("'{}': ignoring header start MJD {}; it is unknown",
+                     path.string(), *obs.start_mjd);
+        obs.start_mjd.reset();
+    }
+    obs.validate();
+    return obs;
+}
+
 } // namespace
 
 class TimeSeries::Impl {
@@ -195,74 +266,17 @@ TimeSeries TimeSeries::read(const std::filesystem::path& path,
     series.m_impl->header          = std::move(header);
     series.m_impl->header.tsamp    = tsamp;
     series.m_impl->header.nsamples = series.get_nsamps();
-    auto& obs                      = series.m_impl->observation;
-    obs.input_path                 = path.string();
-    obs.source                     = series.m_impl->header.source;
-    obs.original_nsamps            = series.get_nsamps();
-    if (kind_from_path(path) == FileKind::kTim) {
-        const psrio::detail::MappedFile mapped(path);
-        const auto h = psrio::formats::sigproc::FilterbankHeader::parse(
-            mapped.bytes(), path.string());
-        obs.dm        = h.refdm;
-        obs.start_mjd = h.tstart;
-        if (h.barycentric) {
-            obs.barycentric = *h.barycentric != 0;
-        }
-    } else {
-        auto inf = path;
-        inf.replace_extension(".inf");
-        std::ifstream input(inf);
-        std::string line;
-        // psrio's unified Header uses zero for missing optional metadata.
-        // Inspect presence only; numerical parsing stays owned by psrio.
-        while (std::getline(input, line)) {
-            const auto eq = line.rfind('=');
-            if (eq == std::string::npos ||
-                line.find_first_not_of(" \t", eq + 1) == std::string::npos) {
-                continue;
-            }
-            auto key = line.substr(0, eq);
-            std::ranges::transform(key, key.begin(), [](unsigned char c) {
-                return static_cast<char>(std::tolower(c));
-            });
-            key.erase(0, key.find_first_not_of(" \t"));
-            if (key.starts_with("dispersion measure")) {
-                obs.dm = series.m_impl->header.dm;
-            }
-            if (key.starts_with("epoch of observation")) {
-                obs.start_mjd = series.m_impl->header.tstart;
-            }
-            if (key.starts_with("barycentered?")) {
-                obs.barycentric = series.m_impl->header.barycentric != 0;
-            }
-        }
-    }
-    // psrio serializes its absent unified start time as zero on synthetic
-    // data. It is a sentinel, not a usable observational reference MJD.
-    if (obs.start_mjd && *obs.start_mjd == 0) {
-        obs.start_mjd.reset();
-    }
-    // A header value the metadata cannot hold (a negative reference DM, say)
-    // makes that field unknown rather than the file unreadable.
-    if (obs.dm && (!utils::is_finite(*obs.dm) || *obs.dm < 0)) {
-        spdlog::warn("'{}': ignoring header DM {} (not a finite, nonnegative "
-                     "value); the DM is unknown",
-                     path.string(), *obs.dm);
-        obs.dm.reset();
-    }
-    if (obs.start_mjd &&
-        (!utils::is_finite(*obs.start_mjd) || *obs.start_mjd <= 0)) {
-        spdlog::warn("'{}': ignoring header start MJD {}; it is unknown",
-                     path.string(), *obs.start_mjd);
-        obs.start_mjd.reset();
-    }
-    obs.validate();
+    series.m_impl->observation     = observation_from_header(
+        path, series.m_impl->header, series.get_nsamps());
     return series;
 }
 
 TimeSeriesInfo TimeSeries::read_info(const std::filesystem::path& path) {
     const psrio::TimeSeriesReader reader = open_reader(path);
-    return {.nsamps = reader.nsamples(), .dt = reader.dt()};
+    return {.nsamps      = reader.nsamples(),
+            .dt          = reader.dt(),
+            .observation = observation_from_header(path, reader.header(),
+                                                   reader.nsamples())};
 }
 
 PreprocessReport TimeSeries::preprocess(const PreprocessOptions& options,

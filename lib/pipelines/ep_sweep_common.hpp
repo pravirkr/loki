@@ -13,12 +13,17 @@
 #include <filesystem>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #include "loki/algorithms/ep_regions.hpp"
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -27,13 +32,35 @@
 
 namespace loki::pipelines::detail {
 
+/// Removes a directory tree when it goes out of scope, on success and when
+/// an exception (an interrupt, a failed chunk) unwinds the sweep. Errors are
+/// ignored: cleanup must not mask the exception in flight.
+class RemoveOnExit {
+public:
+    explicit RemoveOnExit(std::filesystem::path path)
+        : m_path(std::move(path)) {}
+    ~RemoveOnExit() {
+        std::error_code error;
+        std::filesystem::remove_all(m_path, error);
+    }
+    RemoveOnExit(const RemoveOnExit&)            = delete;
+    RemoveOnExit& operator=(const RemoveOnExit&) = delete;
+    RemoveOnExit(RemoveOnExit&&)                 = delete;
+    RemoveOnExit& operator=(RemoveOnExit&&)      = delete;
+
+private:
+    std::filesystem::path m_path;
+};
+
 /**
  * @brief Merges the per-chunk result files in @p tmp_dir into @p result_file.
  *
  * Chunk `i` is read from
  * `chunk_{i:04d}_pruning_nstages_{nsegments}_results.h5` and its "runs" group
- * is copied under `chunks/chunk_{i:04d}/runs`. The layout does not depend on
- * the backend that wrote the chunk files.
+ * is copied under `chunks/chunk_{i:04d}/runs`; with @p copy_rfi_config (an
+ * active PruneRFIConfig) its `rfi_config` group, which holds the chunk's own
+ * harvest scheme, too. The layout does not depend on the backend that wrote
+ * the chunk files.
  * @return Total pruning GFLOPs of all runs.
  */
 double
@@ -44,7 +71,8 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                        float min_pd,
                        std::string_view poly_basis,
                        float ref_ducy,
-                       float total_runtime);
+                       float total_runtime,
+                       bool copy_rfi_config = false);
 
 /// Owning host snapshot; no spans may refer to a reusable device workspace.
 struct EPResultPayload {
@@ -58,13 +86,22 @@ struct EPResultPayload {
     double gflops{0.0};
     SizeType nparams{0};
     search::PruneStatsCollection stats;
+    /// The run's early-harvest records when harvesting is on (written under
+    /// `runs/<run>/harvest`), else empty.
+    std::variant<std::monostate,
+                 search::HarvestBuffer<float>,
+                 search::HarvestBuffer<ComplexType>>
+        harvest;
+    /// Every harvest of the run, including those beyond max_harvests.
+    SizeType n_harvested_total{0};
 };
 
 /// One active write and at most one waiting payload. All final-file HDF5
 /// operations run on the writer thread until finish() joins it.
 /// Writes the sweep's results from one background thread. They go to
 /// `<result_file>.partial`, which finish() renames to @p result_file, so an
-/// aborted sweep never leaves a file that looks complete.
+/// aborted sweep never leaves a file that looks complete. A writer destroyed
+/// before finish() published its file removes the partial file.
 class EPSweepWriter {
 public:
     EPSweepWriter(const std::filesystem::path& result_file,
@@ -72,7 +109,10 @@ public:
                   const search::PulsarSearchConfig& cfg,
                   float min_pd,
                   std::string_view poly_basis,
-                  float ref_ducy);
+                  float ref_ducy,
+                  std::optional<search::detail::LeafReductionSpec> reduction =
+                      std::nullopt,
+                  std::span<const algorithms::PruneRFIConfig> rfi_configs = {});
     ~EPSweepWriter();
     EPSweepWriter(const EPSweepWriter&)            = delete;
     EPSweepWriter& operator=(const EPSweepWriter&) = delete;
@@ -84,7 +124,13 @@ private:
     std::filesystem::path m_file;
     std::filesystem::path m_partial_file;
     SizeType m_nchunks;
+    /// Per chunk: the leaf reduction with the chunk's nbins, if any.
+    std::vector<search::detail::LeafReductionSpec> m_reductions;
+    /// True when the chunks carry an active RFI configuration: finish()
+    /// then writes /harvested.
+    bool m_rfi_active{false};
     bool m_finished{false};
+    bool m_published{false};
     std::mutex m_mutex;
     std::condition_variable m_ready;
     std::optional<EPResultPayload> m_pending;

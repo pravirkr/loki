@@ -2,7 +2,7 @@
 
 Usage: python compare_h5.py <dirA> <dirB> [--rtol R] [--ignore-attr NAME ...]
 Attributes that record time, host, version, toolchain or run provenance (the
-backend and config text) are skipped by default.
+backend and config text), and the /run_stats group, are skipped by default.
 Exit 0 when every file, dataset and attribute matches.
 """
 
@@ -43,6 +43,16 @@ VOLATILE = (
 def volatile(name: str, extra: list[str]) -> bool:
     low = name.lower()
     return any(v in low for v in VOLATILE) or name in extra
+
+
+# Groups that hold measurements of the run, not results: skipped whole.
+# /run_stats (stage timings, peak RSS, overload counts) was added for batch
+# scheduling; a build without it still compares equal on every result.
+VOLATILE_GROUPS = ("run_stats",)
+
+
+def volatile_object(name: str) -> bool:
+    return name.split("/", 1)[0] in VOLATILE_GROUPS
 
 
 ROOTS: list[str] = ["", ""]
@@ -96,6 +106,8 @@ def compare_file(fa, fb, rtol, extra, report):
     names_a, names_b = set(), set()
     fa.visit(names_a.add)
     fb.visit(names_b.add)
+    names_a = {n for n in names_a if not volatile_object(n)}
+    names_b = {n for n in names_b if not volatile_object(n)}
     for n in sorted(names_a ^ names_b):
         report(f"  object {n}: only in {'A' if n in names_a else 'B'}")
         ok = False

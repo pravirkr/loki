@@ -47,13 +47,6 @@ using toml_utils::reject_nonfinite_floats;
 
 /// Keys removed from the schema, with what replaces them.
 [[nodiscard]] std::string_view removed_key_hint(std::string_view path) {
-    if (path == "rfi" || path.starts_with("rfi.") ||
-        path.find("harvest") != std::string_view::npos ||
-        path.find("pulsar_mask") != std::string_view::npos ||
-        path.find("impulsive") != std::string_view::npos) {
-        return "RFI options (pulsar mask, harvesting, impulsive veto) are not "
-               "available in the EP search yet";
-    }
     if (path == "cuda" || path.starts_with("cuda.")) {
         return "the [cuda] table was removed; use [performance] backend = "
                "\"cuda\" and device = <id>";
@@ -71,6 +64,9 @@ using toml_utils::reject_nonfinite_floats;
     }
     if (path == "performance.device_id") {
         return "use performance.device";
+    }
+    if (path == "performance.octave_scale") {
+        return "use performance.region_growth_factor";
     }
     return {};
 }
@@ -101,6 +97,67 @@ const toml_utils::Schema<Orbit>& orbit_schema() {
     return schema;
 }
 
+/// The [ep.rfi] table.
+const toml_utils::Schema<EPRFIOptions>& rfi_schema() {
+    using toml_utils::custom;
+    using toml_utils::field;
+    using R = EPRFIOptions;
+    static const toml_utils::Schema<R> schema{
+        custom<R>(
+            "", "pulsar_mask",
+            [](const toml::table& t, const std::string& path, R& r) {
+                const auto* arr = t["pulsar_mask"].as_array();
+                if (arr == nullptr) {
+                    throw std::invalid_argument(fmt::format(
+                        "{} must be an array of [f_lo, f_hi]", path));
+                }
+                r.pulsar_mask.clear();
+                for (const auto& el : *arr) {
+                    const auto* pair = el.as_array();
+                    if (pair == nullptr || pair->size() != 2) {
+                        throw std::invalid_argument(fmt::format(
+                            "{} entries must be [f_lo, f_hi] in Hz", path));
+                    }
+                    r.pulsar_mask.push_back({array_number((*pair)[0], path),
+                                             array_number((*pair)[1], path)});
+                }
+            },
+            [](const R& r, toml::table& t) {
+                toml::array windows;
+                for (const auto& [f_lo, f_hi] : r.pulsar_mask) {
+                    windows.push_back(toml::array{f_lo, f_hi});
+                }
+                t.insert("pulsar_mask", std::move(windows));
+            }),
+        field<R>("", "n_harmonics",
+                 [](auto& r) -> auto& { return r.n_harmonics; }),
+        field<R>("", "fractional_harmonics",
+                 [](auto& r) -> auto& { return r.fractional_harmonics; }),
+        field<R>("", "harvest", [](auto& r) -> auto& { return r.harvest; }),
+        field<R>("", "harvest_min_level",
+                 [](auto& r) -> auto& { return r.harvest_min_level; }),
+        field<R>("", "harvest_offset",
+                 [](auto& r) -> auto& { return r.harvest_offset; }),
+        field<R>("", "harvest_min_snr",
+                 [](auto& r) -> auto& { return r.harvest_min_snr; }),
+        field<R>("", "harvest_mask_ntiles",
+                 [](auto& r) -> auto& { return r.harvest_mask_ntiles; }),
+        field<R>("", "max_harvests",
+                 [](auto& r) -> auto& { return r.max_harvests; }),
+        field<R>("", "harvest_store_folds",
+                 [](auto& r) -> auto& { return r.harvest_store_folds; }),
+        field<R>("", "impulsive_veto",
+                 [](auto& r) -> auto& { return r.impulsive_veto; }),
+        field<R>("", "impulsive_kappa",
+                 [](auto& r) -> auto& { return r.impulsive_kappa; }),
+        field<R>("", "impulsive_min_level",
+                 [](auto& r) -> auto& { return r.impulsive_min_level; }),
+        field<R>("", "impulsive_min_snr",
+                 [](auto& r) -> auto& { return r.impulsive_min_snr; }),
+    };
+    return schema;
+}
+
 /// The keys of an FFA config, shared by the EP config.
 template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
     using toml_utils::choice;
@@ -114,6 +171,11 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
         std::pair{std::string_view{"additive"}, io::GainModel::kAdditive},
         std::pair{std::string_view{"multiplicative"},
                   io::GainModel::kMultiplicative},
+    };
+    constexpr std::array kZapModes{
+        std::pair{std::string_view{"noise"}, io::ZapMode::kNoise},
+        std::pair{std::string_view{"phase_kept"}, io::ZapMode::kPhaseKept},
+        std::pair{std::string_view{"zero"}, io::ZapMode::kZero},
     };
     return {
         // [input]
@@ -186,6 +248,12 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
         field<Cfg>(
             "preprocessing", "zap_whiten_bins",
             [](auto& c) -> auto& { return c.preprocessing.zap_whiten_bins; }),
+        choice<Cfg>(
+            "preprocessing", "zap_mode",
+            [](auto& c) -> auto& { return c.preprocessing.zap_mode; },
+            kZapModes),
+        field<Cfg>("preprocessing", "zap_seed",
+                   [](auto& c) -> auto& { return c.preprocessing.zap_seed; }),
         custom<Cfg>(
             "preprocessing", "birdies",
             [](const toml::table& t, const std::string& path, Cfg& c) {
@@ -255,8 +323,8 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    [](auto& c) -> auto& { return c.device; }),
         field<Cfg>("performance", "max_process_memory_gb",
                    [](auto& c) -> auto& { return c.max_process_memory_gb; }),
-        field<Cfg>("performance", "octave_scale",
-                   [](auto& c) -> auto& { return c.octave_scale; }),
+        field<Cfg>("performance", "region_growth_factor",
+                   [](auto& c) -> auto& { return c.region_growth_factor; }),
         field<Cfg>("performance", "nbins_max",
                    [](auto& c) -> auto& { return c.nbins_max; }),
         field<Cfg>("performance", "nbins_min_lossy_bf",
@@ -302,11 +370,24 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    [](auto& c) -> auto& {
                        return c.candidates.harmonic_snr_distance;
                    }),
+        field<Cfg>("candidates", "harmonic_doppler_tolerance",
+                   [](auto& c) -> auto& {
+                       return c.candidates.harmonic_doppler_tolerance;
+                   }),
+        field<Cfg>("candidates", "harmonic_doppler_min_snr",
+                   [](auto& c) -> auto& {
+                       return c.candidates.harmonic_doppler_min_snr;
+                   }),
         field<Cfg>("candidates", "max_per_cell",
                    [](auto& c) -> auto& { return c.candidates.max_per_cell; }),
+        field<Cfg>("candidates", "cell_bins",
+                   [](auto& c) -> auto& { return c.candidates.cell_bins; }),
         field<Cfg>(
             "candidates", "cell_log_width",
             [](auto& c) -> auto& { return c.candidates.cell_log_width; }),
+        field<Cfg>(
+            "candidates", "dominance_kappa",
+            [](auto& c) -> auto& { return c.candidates.dominance_kappa; }),
         field<Cfg>(
             "candidates", "max_candidates",
             [](auto& c) -> auto& { return c.candidates.max_candidates; }),
@@ -369,6 +450,9 @@ const toml_utils::Schema<EPTomlConfig>& ep_schema() {
                      [](auto& c) -> auto& { return c.use_conservative_tile; }),
             field<E>("ep", "overflow_keep_fraction",
                      [](auto& c) -> auto& { return c.overflow_keep_fraction; }),
+            toml_utils::sub_table<E>(
+                "ep", "rfi", [](auto& c) -> auto& { return c.rfi; },
+                rfi_schema()),
             field<E>("output", "plan_cache",
                      [](auto& c) -> auto& { return c.plan_cache; }),
             field<E>("output", "use_plan_cache",
@@ -397,6 +481,11 @@ void check_ffa_fields(const FFATomlConfig& cfg) {
     if (cfg.candidates.harmonic_denominator_max > 10000) {
         throw std::invalid_argument(
             "candidates.harmonic_denominator_max must be at most 10000");
+    }
+    if (!utils::is_finite(cfg.region_growth_factor) ||
+        cfg.region_growth_factor <= 1.0) {
+        throw std::invalid_argument(
+            "performance.region_growth_factor must be finite and > 1.0");
     }
     cfg.candidates.validate();
     cfg.observation.validate();
@@ -480,6 +569,13 @@ clip_sigma = 6.0
 zap_periodic = false
 zap_sigma = 8.0
 zap_whiten_bins = 1001
+# Robust: how zapped bins are replaced. "noise": complex Gaussian noise of
+# the local mean power (birdie windows excluded from that mean), drawn from
+# a seed hashed from the input (or zap_seed); "phase_kept": bins above the
+# local mean keep their phase at the mean power (a residual may remain);
+# "zero": set to zero.
+zap_mode = "noise"
+# zap_seed = 12345
 
 # Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
 birdies = []
@@ -538,8 +634,10 @@ nthreads = 4
 # Maximum memory cap in GB used for chunk planning
 max_process_memory_gb = 8.0
 
-# Octave scaling factor between successive search bands (2.0 = octave doubling)
-octave_scale = 2.0
+# Geometric growth factor of the period range from one search region to the
+# next (2.0 = octaves). nbins and eta grow with it, so the phase tolerance
+# (eta / nbins turns) is the same in every region.
+region_growth_factor = 1.5
 
 # Maximum number of fold bins for long-period bands
 nbins_max = 1024
@@ -581,14 +679,25 @@ phase_radius = 0.05
 retain_detections = true
 flag_harmonics = false
 remove_harmonics = false
-harmonic_denominator_max = 100
+# Harmonic ratios p/q with p, q <= harmonic_denominator_max (1:1 included)
+harmonic_denominator_max = 16
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
-# Keep only the strongest max_per_cell trials of each frequency cell, before
-# grouping. 0 keeps every trial. Cells are cell_log_width wide in
-# ln(frequency); it has no default and must be set with max_per_cell.
+# Parents of at least this S/N also take children within this fractional
+# frequency of p/q times their own, with no track test (bright binaries, e.g.
+# 3e-4); 0 disables. Each such parent covers ~2% of the frequencies.
+harmonic_doppler_tolerance = 0.0
+harmonic_doppler_min_snr = 20.0
+# Keep only the strongest max_per_cell trials of each frequency cell of each
+# source region, before grouping. 0 keeps every trial. Cells are cell_bins
+# Fourier bins (1/tobs) or cell_log_width in ln(frequency) wide; set exactly
+# one of them with max_per_cell.
 max_per_cell = 0
+# cell_bins = <cell width in Fourier bins>
 # cell_log_width = <cell width in ln(frequency)>
+# Within each run's capped cells, absorb trials a stronger trial explains
+# (S/N at most dominance_kappa times what its pulse gives); 0 disables.
+dominance_kappa = 0.0
 max_candidates = 0 # unlimited; applied after harmonic filtering
 memory_gb = 1.0 # additional host budget, reserved within CPU search budget
 # temporary_directory = "/scratch/loki"
@@ -625,7 +734,11 @@ std::vector<std::string> ffa_config_keys() {
 }
 
 std::vector<std::string> ep_config_keys() {
-    return with_orbit_keys(toml_utils::schema_keys(ep_schema()));
+    auto keys = with_orbit_keys(toml_utils::schema_keys(ep_schema()));
+    for (const auto& f : rfi_schema()) {
+        keys.push_back(fmt::format("ep.rfi.{}", f.key));
+    }
+    return keys;
 }
 
 std::string FFATomlConfig::to_toml_string() const {
@@ -816,7 +929,7 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
             use_fourier,
             effective_nthreads,
             max_process_memory_gb,
-            octave_scale,
+            region_growth_factor,
             nbins_max,
             nbins_min_lossy_bf,
             bseg_brute,
@@ -874,7 +987,7 @@ public:
          bool use_fourier,
          int nthreads,
          double max_process_memory_gb,
-         double octave_scale,
+         double region_growth_factor,
          SizeType nbins_max,
          SizeType nbins_min_lossy_bf,
          std::optional<SizeType> bseg_brute,
@@ -893,7 +1006,7 @@ public:
           m_use_fourier(use_fourier),
           m_nthreads(nthreads),
           m_max_process_memory_gb(max_process_memory_gb),
-          m_octave_scale(octave_scale),
+          m_region_growth_factor(region_growth_factor),
           m_nbins_max(nbins_max),
           m_nbins_min_lossy_bf(nbins_min_lossy_bf),
           m_snr_min(snr_min),
@@ -972,7 +1085,7 @@ public:
     bool get_use_fourier() const { return m_use_fourier; }
     int get_nthreads() const { return m_nthreads; }
     double get_max_process_memory_gb() const { return m_max_process_memory_gb; }
-    double get_octave_scale() const { return m_octave_scale; }
+    double get_region_growth_factor() const { return m_region_growth_factor; }
     SizeType get_nbins_max() const { return m_nbins_max; }
     SizeType get_nbins_min_lossy_bf() const { return m_nbins_min_lossy_bf; }
     SizeType get_bseg_brute() const { return m_bseg_brute; }
@@ -1098,7 +1211,7 @@ private:
         return FFASearchConfig(std::make_unique<Impl>(
             m_nsamps_input, m_tsamp, nbins, eta, param_limits, m_ducy_max,
             m_wtsp, m_use_fourier, m_nthreads, m_max_process_memory_gb,
-            m_octave_scale, m_nbins_max, m_nbins_min_lossy_bf,
+            m_region_growth_factor, m_nbins_max, m_nbins_min_lossy_bf,
             m_bseg_brute_explicit, nsegments, m_snr_min,
             m_max_passing_candidates, m_use_boxcar_kadane, bseg_ffa_lock));
     }
@@ -1117,7 +1230,7 @@ private:
     bool m_use_fourier;
     int m_nthreads;
     double m_max_process_memory_gb;
-    double m_octave_scale;
+    double m_region_growth_factor;
     SizeType m_nbins_max;
     SizeType m_nbins_min_lossy_bf;
     double m_snr_min;
@@ -1154,6 +1267,9 @@ private:
         error_check::check_greater(m_wtsp, 1.0, "wtsp must be > 1.0");
         error_check::check_greater(m_max_process_memory_gb, 0,
                                    "max_process_memory_gb must be positive");
+        error_check::check(utils::is_finite(m_region_growth_factor) &&
+                               m_region_growth_factor > 1.0,
+                           "region_growth_factor must be finite and > 1.0");
         error_check::check_greater_equal(
             m_nbins_max, m_nbins,
             "nbins_max must be greater than or equal to nbins");
@@ -1295,7 +1411,7 @@ private:
      * bench/scripts/ffa/bseg_brute_sensitivity.py: about 1% per halving of B
      * below ~8 cycles at nbins 32, with the loss falling as nbins grows). So
      * B is set from a target number of cycles at f_max, the fast end of the
-     * chunk, which the planner keeps within octave_scale of f_min.
+     * chunk, which the planner keeps within region_growth_factor of f_min.
      *
      * Takes the largest valid B at or below the candidate nearest to the
      * target; the smallest valid B if all candidates are above it.
@@ -1574,7 +1690,7 @@ FFASearchConfig::FFASearchConfig(SizeType nsamps,
                                  bool use_fourier,
                                  int nthreads,
                                  double max_process_memory_gb,
-                                 double octave_scale,
+                                 double region_growth_factor,
                                  SizeType nbins_max,
                                  SizeType nbins_min_lossy_bf,
                                  std::optional<SizeType> bseg_brute,
@@ -1592,7 +1708,7 @@ FFASearchConfig::FFASearchConfig(SizeType nsamps,
                                     use_fourier,
                                     nthreads,
                                     max_process_memory_gb,
-                                    octave_scale,
+                                    region_growth_factor,
                                     nbins_max,
                                     nbins_min_lossy_bf,
                                     bseg_brute,
@@ -1651,8 +1767,8 @@ int FFASearchConfig::get_nthreads() const noexcept {
 double FFASearchConfig::get_max_process_memory_gb() const noexcept {
     return m_impl->get_max_process_memory_gb();
 }
-double FFASearchConfig::get_octave_scale() const noexcept {
-    return m_impl->get_octave_scale();
+double FFASearchConfig::get_region_growth_factor() const noexcept {
+    return m_impl->get_region_growth_factor();
 }
 SizeType FFASearchConfig::get_nbins_max() const noexcept {
     return m_impl->get_nbins_max();
@@ -1850,7 +1966,7 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                                bool use_fourier,
                                int nthreads,
                                double max_process_memory_gb,
-                               double octave_scale,
+                               double region_growth_factor,
                                SizeType nbins_max,
                                SizeType nbins_min_lossy_bf,
                                std::optional<SizeType> bseg_brute,
@@ -1877,7 +1993,7 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                       use_fourier,
                       nthreads,
                       max_process_memory_gb,
-                      octave_scale,
+                      region_growth_factor,
                       nbins_max,
                       nbins_min_lossy_bf,
                       bseg_brute,
@@ -2000,7 +2116,8 @@ EPSearchConfig::with_ep_default_nsegments(SizeType target_n_segs) const {
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
-        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override);
+        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
+        m_ep_impl->m_overflow_keep_fraction);
 }
 
 EPSearchConfig EPSearchConfig::from_toml(const std::filesystem::path& path,
@@ -2094,6 +2211,9 @@ void validate_ep_config(const EPTomlConfig& cfg) {
             fmt::format("ep.overflow_keep_fraction must be in (0, 1] (got {})",
                         cfg.overflow_keep_fraction));
     }
+    if (cfg.rfi.has_value()) {
+        cfg.rfi->validate();
+    }
 }
 
 } // namespace
@@ -2166,6 +2286,13 @@ clip_sigma = 6.0
 zap_periodic = false
 zap_sigma = 8.0
 zap_whiten_bins = 1001
+# Robust: how zapped bins are replaced. "noise": complex Gaussian noise of
+# the local mean power (birdie windows excluded from that mean), drawn from
+# a seed hashed from the input (or zap_seed); "phase_kept": bins above the
+# local mean keep their phase at the mean power (a residual may remain);
+# "zero": set to zero.
+zap_mode = "noise"
+# zap_seed = 12345
 
 # Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
 birdies = []
@@ -2255,6 +2382,40 @@ use_conservative_tile = false
 # larger value keeps more of the best leaves but trims more often.
 overflow_keep_fraction = 0.5
 
+# RFI control of the pruning (impulsive_veto: CPU only). Omit the table for
+# none.
+# pulsar_mask: frequency windows [f_lo, f_hi] in Hz, masked at every
+#   acceleration. n_harmonics also masks f*k and f/k for k in [2, n], for
+#   the mask windows and for every harvest window. fractional_harmonics masks
+#   every reduced p/q != 1 with p, q <= n_harmonics instead (3/2, 3/4, ...;
+#   n_harmonics <= 32).
+# harvest: record and remove leaves far above the pruning threshold (a bright
+#   source or RFI line), and mask their neighbourhood for the rest of the run.
+#   From level harvest_min_level on, a level's harvest threshold is
+#   max(harvest_min_snr, pruning threshold + harvest_offset), computed for each
+#   chunk from its own threshold scheme. The window is harvest_mask_ntiles
+#   tiles wide plus the Doppler sweep. At most max_harvests records per run
+#   (masking continues beyond); harvest_store_folds keeps their profiles.
+# impulsive_veto: drop a leaf (S/N >= impulsive_min_snr, from level
+#   impulsive_min_level on) whose last segment adds more than
+#   impulsive_kappa times a coherent signal's share of the S/N squared.
+# Options of a mechanism that is off are kept but unused.
+# [ep.rfi]
+# pulsar_mask = [[49.9, 50.1], [59.9, 60.1]]
+# n_harmonics = 0
+# fractional_harmonics = false
+# harvest = false
+# harvest_min_level = 10
+# harvest_offset = 10.0
+# harvest_min_snr = 40.0
+# harvest_mask_ntiles = 4.0
+# max_harvests = 4096
+# harvest_store_folds = true
+# impulsive_veto = false
+# impulsive_kappa = 6.0
+# impulsive_min_level = 6
+# impulsive_min_snr = 8.0
+
 # Alternative to acc_* and jerk_*: limits of physical circular orbits. The
 # acceleration, jerk (snap, crackle) limits and a Doppler-widened frequency
 # range are derived from them (f_min and f_max are then intrinsic spin
@@ -2275,8 +2436,10 @@ nthreads = 4
 # Maximum memory cap in GB: process RSS on CPU, device memory on CUDA
 max_process_memory_gb = 8.0
 
-# Octave scaling factor between successive search bands (2.0 = octave doubling)
-octave_scale = 2.0
+# Geometric growth factor of the period range from one search region to the
+# next (2.0 = octaves). nbins and eta grow with it, so the phase tolerance
+# (eta / nbins turns) is the same in every region.
+region_growth_factor = 1.5
 
 # Maximum number of EP fold bins for long-period bands (cannot exceed 1024)
 nbins_max = 1024
@@ -2310,12 +2473,23 @@ phase_radius = 0.05
 retain_detections = true
 flag_harmonics = false
 remove_harmonics = false
-harmonic_denominator_max = 100
+# Harmonic ratios p/q with p, q <= harmonic_denominator_max (1:1 included)
+harmonic_denominator_max = 16
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
-# Strongest trials kept per frequency cell, before grouping; 0 keeps all.
-max_per_cell = 0
-# cell_log_width = <cell width in ln(frequency)>; required with max_per_cell
+# Parents of at least this S/N also take children within this fractional
+# frequency of p/q times their own, with no track test (bright binaries, e.g.
+# 3e-4); 0 disables. Each such parent covers ~2% of the frequencies.
+harmonic_doppler_tolerance = 0.0
+harmonic_doppler_min_snr = 20.0
+# Per-run reduction of the final leaves, before grouping: keep the
+# max_per_cell strongest leaves of each frequency cell of each run, then absorb
+# leaves a stronger leaf of the run explains (dominance_kappa; 0 disables).
+# max_per_cell = 0 keeps every leaf. Set exactly one cell width.
+max_per_cell = 32
+cell_bins = 64.0 # cell width in Fourier bins (1/tobs)
+# cell_log_width = <cell width in ln(frequency)>
+dominance_kappa = 1.5
 max_candidates = 0
 # Separate host candidate budget; reserved before CPU chunk planning.
 memory_gb = 1.0
@@ -2385,6 +2559,8 @@ EPSearchConfig
 EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
                                   std::optional<double> override_tsamp) const {
     validate_ep_config(*this);
+    // Checked here, not on parse: the command line may still set the backend.
+    check_rfi_backend();
     // Checked here, not on parse: the command line may still set the runs.
     if (n_runs.has_value() && ref_segs.has_value()) {
         throw std::invalid_argument(
@@ -2425,6 +2601,93 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
                           orbit_m_c, orbit_m_p, propagator_significance,
                           validation_significance, use_conservative_tile,
                           target_snr, overflow_keep_fraction);
+}
+
+void EPRFIOptions::validate() const {
+    for (const auto& [f_lo, f_hi] : pulsar_mask) {
+        if (!utils::is_finite(f_lo) || !utils::is_finite(f_hi) || f_lo <= 0.0 ||
+            f_hi < f_lo) {
+            throw std::invalid_argument(fmt::format(
+                "ep.rfi.pulsar_mask windows need 0 < f_lo <= f_hi (got [{}, "
+                "{}])",
+                f_lo, f_hi));
+        }
+    }
+    if (n_harmonics > 1024) {
+        throw std::invalid_argument("ep.rfi.n_harmonics must be at most 1024");
+    }
+    if (fractional_harmonics &&
+        n_harmonics > algorithms::kMaxFractionalHarmonics) {
+        throw std::invalid_argument(
+            "ep.rfi.fractional_harmonics needs n_harmonics <= 32");
+    }
+    if (harvest_min_level < 1) {
+        throw std::invalid_argument("ep.rfi.harvest_min_level must be >= 1");
+    }
+    if (!utils::is_finite(harvest_offset)) {
+        throw std::invalid_argument("ep.rfi.harvest_offset must be finite");
+    }
+    if (!utils::is_finite(harvest_min_snr) || harvest_min_snr <= 0.0F) {
+        throw std::invalid_argument("ep.rfi.harvest_min_snr must be positive");
+    }
+    if (!utils::is_finite(harvest_mask_ntiles) || harvest_mask_ntiles <= 0.0) {
+        throw std::invalid_argument(
+            "ep.rfi.harvest_mask_ntiles must be positive");
+    }
+    if (max_harvests < 1) {
+        throw std::invalid_argument("ep.rfi.max_harvests must be >= 1");
+    }
+    if (!utils::is_finite(impulsive_kappa) || impulsive_kappa <= 0.0) {
+        throw std::invalid_argument("ep.rfi.impulsive_kappa must be positive");
+    }
+    if (impulsive_min_level < 1) {
+        throw std::invalid_argument("ep.rfi.impulsive_min_level must be >= 1");
+    }
+    if (!utils::is_finite(impulsive_min_snr)) {
+        throw std::invalid_argument("ep.rfi.impulsive_min_snr must be finite");
+    }
+}
+
+algorithms::PruneRFIConfig EPRFIOptions::to_prune_rfi_config() const {
+    algorithms::PruneRFIConfig rfi;
+    rfi.pulsar_mask.reserve(pulsar_mask.size());
+    for (const auto& [f_lo, f_hi] : pulsar_mask) {
+        rfi.pulsar_mask.push_back(
+            algorithms::ParamWindow{.f_lo = f_lo, .f_hi = f_hi});
+    }
+    rfi.n_harmonics          = n_harmonics;
+    rfi.fractional_harmonics = fractional_harmonics;
+    if (harvest) {
+        rfi.harvest_defaults = algorithms::HarvestDefaults{
+            .min_level = harvest_min_level,
+            .offset    = harvest_offset,
+            .min_snr   = harvest_min_snr,
+        };
+    }
+    rfi.harvest_mask_ntiles = harvest_mask_ntiles;
+    rfi.max_harvests        = max_harvests;
+    rfi.harvest_store_folds = harvest_store_folds;
+    rfi.impulsive_veto      = impulsive_veto;
+    rfi.impulsive_kappa     = impulsive_kappa;
+    rfi.impulsive_min_level = impulsive_min_level;
+    rfi.impulsive_min_snr   = impulsive_min_snr;
+    return rfi;
+}
+
+algorithms::PruneRFIConfig EPTomlConfig::prune_rfi_config() const {
+    return rfi.has_value() ? rfi->to_prune_rfi_config()
+                           : algorithms::PruneRFIConfig{};
+}
+
+void EPTomlConfig::check_rfi_backend() const {
+    if (rfi.has_value() && rfi->is_active() && rfi->impulsive_veto &&
+        backend != Backend::kCPU) {
+        throw std::invalid_argument(
+            fmt::format("[ep.rfi] impulsive_veto runs on the CPU only, but "
+                        "performance.backend = \"{}\": use backend = \"cpu\" "
+                        "(--backend cpu), or set impulsive_veto = false",
+                        to_string(backend)));
+    }
 }
 
 } // namespace loki::search

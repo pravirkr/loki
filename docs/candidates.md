@@ -20,7 +20,8 @@ search. FFA writes the flat detection file `<prefix>_ffa_results.h5` of
 earlier versions, one root row per passing trial with the search attributes
 at the root. It also carries two additive items, `detection_id` and
 `/regions`. This flat file is also the spool candidate processing starts
-from, so `FFAFreqSweep.publish_candidates` can publish it later. EP writes
+from, so `loki publish` (or `FFAFreqSweep.publish_candidates`) can
+publish it later. EP writes
 only its run diagnostics, as the constructor without candidates does; Taylor
 runs still save their winning `width`. `publish_candidates` refuses options
 with processing off.
@@ -30,17 +31,72 @@ with processing off.
 Taylor EP sweeps can publish the same common candidate tables after every
 independent run has finished and the run files have been merged. CPU runs
 remain independent and may execute concurrently. Postprocessing reads their
-final leaves across all runs/chunks, applies `snr_min`, then uses the same
-phase-track grouping and selection as FFA. Every surviving leaf contributes
-one winning boxcar width. There is no expansion into multiple width trials,
-and no early suppression of a weaker run's leaves before transitive closure.
+final leaves across all runs/chunks, applies `snr_min`, reduces each run's
+leaves (by default; see [Keeping the strongest trials per frequency
+cell](#keeping-the-strongest-trials-per-frequency-cell)), then uses the same
+phase-track grouping and selection as FFA. Every retained leaf contributes
+one winning boxcar width. There is no expansion into multiple width trials.
+The reduction works within each run, so it never suppresses a weaker run's
+leaves in favour of a stronger run's.
 
 The result remains `<prefix>_ep_results.h5`. Existing `/chunks/.../runs/...`
 diagnostics and search attributes are preserved alongside `/observation`,
 `/processing`, `/search`, `/detections`, `/clusters` and `/candidates`.
-`retain_detections = false` removes the common raw table; the original run
+`retain_detections = false` removes the common raw table; the run
 diagnostics remain available. Root compatibility arrays refer to selected
 candidates, as for FFA.
+
+With the reduction on, a run group keeps only its retained leaves: its
+`param_sets`, `scores`, `scores_ep` and `width` hold one row per retained leaf,
+in spool order, and `leaf_index` gives each row's row in the search spool,
+which is the `source_index` of its detection. Its other datasets
+(`level_stats`, `snail_scheme`) and attributes are copied whole, and it gains
+the attributes
+
+| Attribute | Meaning |
+| --- | --- |
+| `n_final_leaves` | Leaves of the run in the spool |
+| `n_leaves_above_snr_min` | Of those, leaves at or above `snr_min` |
+| `n_cell_dropped` | Dropped by the cell cap |
+| `n_dominated` | Absorbed by a stronger leaf of the run |
+| `n_leaves_retained` | Retained: the run's rows, and its detections |
+| `max_cell_dropped_snr` | Highest S/N the cell cap dropped (0 when none) |
+| `max_per_cell_used` | Leaves each cell kept: `max_per_cell`, or less when `memory_gb` forced it lower |
+
+so `n_leaves_above_snr_min = n_cell_dropped + n_dominated +
+n_leaves_retained`.
+
+A candidate search applies the reduction while it writes each run, so its
+spool already holds only the retained leaves: a search whose 32 runs ended
+with 83 million final leaves wrote a spool of about 1.5 MB instead of 10 GB,
+and its postprocessing took a fraction of a second. The run groups of such a
+spool carry `leaf_index`, the counts above and the options they were reduced
+with (`reduced_max_per_cell`, `reduced_cell_bins`, `reduced_cell_log_width`,
+`reduced_dominance_kappa`, `reduced_radius`, `reduced_phase_radius`,
+`reduced_snr_min`), and `reduced_at = "search"`; a run reduced at
+publication records the same, with `reduced_at = "publication"`. Leaves
+below `snr_min` are not kept. Publishing such a
+spool again (`publish_candidates`, for example after an interrupted
+postprocessing), or republishing a reduced product, requires the same
+options and `snr_min`, and gives the same product; other options raise an
+error, since the dropped leaves are gone. To
+keep every final leaf, search with `max_per_cell = 0`, or without candidates
+(`--no-candidates`), which never reduces. Publishing a full spool, such as
+one written with `--no-candidates`, reduces it then: a 10 GB spool of 83
+million leaves gave a 1.5 MB result. With `max_per_cell = 0` the run groups
+are copied whole, as before.
+
+EP limits on acceleration, jerk and higher derivatives (from `[search]` or
+`[search.orbit]`) apply at the epoch of each run's reference segment, while
+leaves are reported at the observation midpoint. A leaf's reported
+parameters can therefore lie outside the box: for a jerk search,
+`|a| <= a_max + j_max * T / 2` (tested in
+`tests/cpp/api/ep_outside_prior_t.cpp`), and correspondingly for higher
+orders. Such leaves are kept, not vetoed, since a real system near the edge
+of the prior lands there, and every table row carries `outside_prior` (1 when
+a non-frequency parameter lies outside its chunk's limits, recorded in the
+chunk's `param_limits`, `(nparams, 2)` as `[min, max]` in `param_names`
+order). It is 0 for FFA rows and for spools written before `param_limits`.
 
 The candidate score is the existing run `scores` value: maximum boxcar S/N of
 the final reintegrated fold. `scores_ep` remains the pruning-score diagnostic.
@@ -50,10 +106,10 @@ using the same backend scorer; the first configured width wins an exact tie.
 Each run now saves this identity in `width`; a chunk saves `scoring_widths`.
 
 This increment supports full-observation Taylor searches (acceleration, jerk,
-snap, and the five-parameter circular-orbit search through crackle) with RFI
-control disabled. Common-product construction rejects active RFI and Chebyshev
-requests. The existing diagnostic constructor remains available for other
-supported searches. Harvesting and masking are outside this candidate path.
+snap, and the five-parameter circular-orbit search through crackle), with or
+without `[ep.rfi]`. Common-product construction rejects Chebyshev requests, and
+CUDA EP rejects `impulsive_veto`. The existing diagnostic constructor remains
+available for other supported searches.
 
 A circular search reports each leaf's derivatives at the observation midpoint
 under the leaf's own model (an orbit, or a polynomial where its terms are not
@@ -62,8 +118,9 @@ Clustering compares candidates by the Taylor track through crackle; over an
 observation that is a small fraction of the orbit, the next term is small,
 and it largely cancels between two candidates on the same orbit.
 
-In Python, pass `candidates=CandidateOptions()` to opt in; `candidates=None`
-retains the existing diagnostic-only API. In C++, use the overload whose
+In Python, pass `candidates=CandidateOptions.ep_defaults()` to opt in with
+the EP defaults (a plain `CandidateOptions()` keeps every leaf);
+`candidates=None` retains the existing diagnostic-only API. In C++, use the overload whose
 second argument is `CandidateOptions`. The CLI enables candidate processing
 for supported Taylor searches using the existing `[candidates]` table and
 the same flags as FFA, including `--no-cluster`. Other CLI models retain
@@ -108,7 +165,9 @@ width, bin count and native parameters.
 
 Publication is atomic. If postprocessing fails after the search completes,
 the previous product is preserved and completed runs are kept in
-`<prefix>_ep_spool.h5`. Retry without searching again:
+`<prefix>_ep_spool.h5`. Retry without searching again with
+`loki publish results/search_ep_spool.h5` (see
+[Publishing a kept spool](#publishing-a-kept-spool)), or in Python:
 
 ```python
 libloki.prune.EPFreqSweep.publish_candidates(
@@ -123,6 +182,91 @@ again, as with FFA retry publication. Incomplete spools are rejected. The
 common Python reader and PulsarX converter accept supported EP products with
 the same DM/frame/epoch requirements; nonzero derivatives above jerk are
 still rejected by PulsarX export.
+
+### RFI control of the pruning (`[ep.rfi]`)
+
+The EP pruning can mask frequency windows, harvest leaves far above the
+pruning threshold (a bright source or an RFI line) and veto leaves whose last
+segment adds an implausible share of their S/N. The mask and the harvest run
+on both backends; the veto runs on the CPU only (with `backend = "cuda"`,
+`impulsive_veto = true` fails before any data is read). On both CPU and CUDA a
+harvested leaf and newly masked leaves in its batch are dropped immediately at
+the level where the source is harvested, including at the final pruning level. A
+CUDA plan counts the device memory of the mask (and, when
+harvesting, of the harvest staging), and its plan cache records whether the
+table is active and the harvest settings: turning either on or off needs a
+new plan, whose chunk edges can differ, and so can the search grid of
+chunks the mask never touches. The table is optional; without it the
+search and its output are unchanged.
+
+A line zapped as a `birdie` is notched at its unaccelerated frequency
+only; its Doppler-drifted copies at large |a| can still give detections. A
+`pulsar_mask` window over the line removes them at every acceleration.
+
+```toml
+[ep.rfi]
+pulsar_mask = [[49.9, 50.1]]   # Hz, every acceleration; f*k and f/k too
+n_harmonics = 0                #   for k in [2, n_harmonics]; harvest windows too
+fractional_harmonics = false   # every reduced p/q != 1, p, q <= n_harmonics
+harvest = true
+harvest_min_level = 10         # first pruning level that may harvest
+harvest_offset = 10.0          # above the level's pruning threshold
+harvest_min_snr = 40.0         # lowest harvest threshold
+harvest_mask_ntiles = 4.0
+max_harvests = 4096            # records per run; masking continues beyond
+harvest_store_folds = true
+impulsive_veto = false
+impulsive_kappa = 6.0
+impulsive_min_level = 6
+impulsive_min_snr = 8.0
+```
+
+With `fractional_harmonics`, every window is also masked at each reduced
+ratio `p/q != 1` with `p, q <= n_harmonics` (`n_harmonics` at most 32): a
+bright harvested source's 3/2 and 3/4 then stay out of the tree as well as
+its integer harmonics.
+
+A level's harvest threshold is `max(harvest_min_snr, threshold + harvest_offset)`
+from `harvest_min_level` on, built for each chunk from that chunk's own
+pruning threshold scheme. Any source whose partial S/N crosses it is removed,
+a real pulsar as well as RFI, so set `harvest_min_snr` above the S/N of the
+weakest source you want to keep as a candidate. A source's partial S/N grows
+about as the square root of the fraction of the data seen, so with the default
+floor of 40 a source of final S/N below 40 is never harvested and a source of
+S/N 80 is harvested about a quarter of the way through the levels
+([performance](performance.md)). The chunk records the threshold scheme in
+`/chunks/<chunk>/rfi_config/harvest_scheme`, with the other settings as
+attributes and the mask as `pulsar_mask` (`f_lo, f_hi, a_lo, a_hi` rows). A
+harvested leaf is removed from the tree and its neighbourhood (the leaf's tile
+times `harvest_mask_ntiles`, plus its Doppler sweep over the observation) is
+masked for the rest of the run. Each run's harvests are in
+`/chunks/<chunk>/runs/<run>/harvest`: `param_sets` (as the final leaves, but
+referenced at `t_ref`, the reference time of the level that harvested them),
+`scores` (the partial S/N at that level), `levels`, `seg_idx`, `t_ref`, and
+`folds` when `harvest_store_folds` is on; `n_harvested_total` counts harvests
+beyond `max_harvests` too. The command line sets `--pulsar-mask F_LO:F_HI`
+(repeatable), `--harvest/--no-harvest`, `--harvest-min-snr`, `--harvest-offset` and
+`--impulsive-veto/--no-impulsive-veto`.
+
+Common candidates work with an active `[ep.rfi]`. The final leaves are
+published as usual: a masked, vetoed or harvested source no longer reaches
+them. Harvested leaves are not detections. They are referenced at the
+harvesting level's `t_ref`, not at the midpoint, their score is a partial
+S/N, and they have no winning width, so they stay out of `/detections`,
+`/clusters` and `/candidates` and remain in each run's `harvest` group of the
+result (copied whole, also when the run's final leaves are reduced). A
+strong source is usually harvested once per run and chunk.
+
+So that a harvested source is not missed, the result also has a
+`/harvested` table, with or without common candidates: one row per source,
+merging the records whose harvest windows overlap in frequency, strongest
+first. Each row holds the strongest record's `param_sets` and
+`param_errors` (at its `t_ref`), `snr` (its partial S/N, not comparable
+with detection S/N), `level`, `seg_idx`, `t_ref`, the merged window
+`f_lo`/`f_hi`, `n_records` and `n_runs` (how many records and runs saw the
+source) and `run` (where the strongest record is). Harmonics of a source are
+separate rows. The search summary and `loki inspect` list these sources,
+and `/run_stats` counts them (`n_harvested_sources`).
 
 ### Folding a leaf with loki's own model
 
@@ -178,11 +322,19 @@ phase_radius = 0.05
 retain_detections = true
 flag_harmonics = false
 remove_harmonics = false
-harmonic_denominator_max = 100
+# Harmonic ratios p/q with p, q <= harmonic_denominator_max (1:1 included)
+harmonic_denominator_max = 16
 harmonic_phase_distance = 1.0
 harmonic_snr_distance = 3.0
-max_per_cell = 0
-# cell_log_width: required with max_per_cell
+# Parents of at least this S/N also take children within this fractional
+# frequency of p/q times their own, with no track test (bright binaries, e.g.
+# 3e-4); 0 disables. Each such parent covers ~2% of the frequencies.
+harmonic_doppler_tolerance = 0.0
+harmonic_doppler_min_snr = 20.0
+max_per_cell = 0 # EP: 32
+# cell_bins or cell_log_width: exactly one is required with max_per_cell
+# cell_bins = 64.0 # EP default
+dominance_kappa = 0.0 # EP: 1.5
 max_candidates = 0
 memory_gb = 1.0
 # temporary_directory = "/scratch/loki"
@@ -190,7 +342,7 @@ memory_gb = 1.0
 
 CLI equivalents include `--no-cluster`, `--cluster-grouping transitive|anchored`, `--cluster-radius`, `--cluster-phase-radius`,
 `--no-retain-detections`, `--flag-harmonics` / `--no-flag-harmonics`,
-`--remove-harmonics` / `--no-remove-harmonics`, `--max-per-cell`, `--cell-log-width`,
+`--remove-harmonics` / `--no-remove-harmonics`, `--max-per-cell`, `--cell-bins`, `--cell-log-width`, `--dominance-kappa`,
 `--max-candidates`, `--candidate-memory-gb`, `--candidate-tempdir`,
 `--dm`, `--start-mjd` and `--barycentric true|false`.
 Harmonic removal requires harmonic flagging. Zero maximum candidates means
@@ -272,15 +424,50 @@ Representative parameters and scores are never averaged or added. The default
 uses riptide-style transitive grouping with full Taylor phase tracks rather
 than frequency alone. Harmonic relationships are handled separately.
 
-Harmonic processing is a separate opt-in pass over representatives. It finds
-the closest positive rational frequency ratio with denominator up to the
-configured limit, excluding 1:1. It compares the full scaled phase tracks in
-units of the faster candidate's pulse width and requires S/N agreement with
-`S_parent / sqrt(p*q)`. Stronger already-flagged children do not become parents.
-The stored parent is the stronger representative; it is not a claim about which
-observed peak is the physical fundamental. All candidates in a file have the
-same DM, so no DM-distance rejection is applied. With no DM discrimination,
-inspect harmonic associations before choosing to remove them.
+Harmonic processing is a separate opt-in pass over representatives, in
+decreasing S/N. A representative is a harmonic of a stronger one that is not
+itself a harmonic (its parent) when their frequencies are in a ratio `p/q`
+with `p, q <= harmonic_denominator_max` (1:1 included, for responses the
+grouping kept apart) and either
+
+- their full phase tracks, the parent's scaled by `p/q`, stay within
+  `harmonic_phase_distance` pulse widths of the faster one, which compares
+  every searched derivative (a harmonic shares its parent's acceleration and
+  jerk); or
+- the parent's S/N is at least `harmonic_doppler_min_snr` and the frequency is
+  within `harmonic_doppler_tolerance` (a fraction) of `p/q` times the
+  parent's. This is for a binary whose orbit curves its track beyond the
+  search's order, so its family spreads over the orbital Doppler range
+  instead of following one track; 3e-4 covers 90 km/s. It is off by default
+  (`harmonic_doppler_tolerance = 0`). Enable it only when few parents reach
+  `harmonic_doppler_min_snr`: with orders up to 16 and 3e-4 each such parent
+  covers about 2% of the frequencies of a 5-720 Hz search, so with many
+  bright parents almost everything becomes a harmonic (97% of 10^4 unrelated
+  synthetic candidates of S/N 10-40). It applies only when `p/q` is the one
+  ratio of the allowed orders within the tolerance: with large
+  `harmonic_denominator_max` some ratio is within it of almost any
+  frequency.
+
+A harmonic's S/N may exceed its parent's by at most `harmonic_snr_distance`;
+there is no lower bound, since a subharmonic's S/N depends on the pulse width
+and the boxcar. Of all parents, the simplest ratio (smallest `p*q`) wins, ties
+to the stronger parent. `parent_cluster_id` is always a root, so a family is a
+root and the representatives that name it. The stored parent is the stronger
+representative; it is not a claim about which observed peak is the physical
+fundamental.
+
+On a 2^26-sample frequency-only search with two bright pulsars (an isolated
+one and a binary; 413 representatives) and the Doppler test at 3e-4, every
+representative labelled as a harmonic of either joined its family, and the
+weaker known pulsars stayed roots except one at exactly three times the
+isolated pulsar's frequency, flagged as its harmonic, which no single file
+can rule out. Without the Doppler test the binary's family stays apart:
+its track is curved beyond the search's order. Among unrelated candidates
+the track test relates some by chance, more as candidates crowd: 5% of 10^4
+and 26% of 10^5 synthetic ones spread over 5-720 Hz. All candidates in a
+file have the same DM, so no DM-distance rejection is applied; inspect
+harmonic associations before choosing to remove them. Flagging takes 0.2 s
+for 10^4 representatives and 4 s for 10^5.
 
 Removal affects the folding list, while `/clusters` retains flagged rows.
 The optional count limit is applied last, in decreasing S/N order. Neither
@@ -291,24 +478,80 @@ mechanism alters `/detections`.
 A search can leave millions of trials above `snr_min`, most of them responses
 to the same few sources or to interference. Grouping holds every distinct
 track in its index, so such a search exhausts `memory_gb` long before
-`max_candidates` applies. `max_per_cell` bounds the input instead: a trial at
-frequency f is in cell `floor(ln(f) / cell_log_width)`, and only the
-`max_per_cell` strongest trials of each cell, by the detection order above,
-are sorted, grouped and written. `cell_log_width` has no default and must be
-set with `max_per_cell`; zero `max_per_cell` keeps every trial.
+`max_candidates` applies. `max_per_cell` bounds the input instead: only the
+`max_per_cell` strongest trials of each frequency cell of each source, by the
+detection order above, are sorted, grouped and written. Zero `max_per_cell`
+keeps every trial.
+
+**EP searches reduce their final leaves by default**: `search ep` and
+`EPFreqSweep.publish_candidates` start from
+`CandidateOptions::ep_defaults()` (`libloki.configs.CandidateOptions.ep_defaults()`
+in Python), which keeps 32 leaves per cell of 64 Fourier bins (`max_per_cell
+= 32`, `cell_bins = 64`) and absorbs dominated leaves (`dominance_kappa =
+1.5`, below). `max_per_cell = 0` in `[candidates]` (or `--max-per-cell 0`)
+keeps every leaf and gives the full, unreduced product. FFA searches and a
+default-constructed `CandidateOptions` keep every trial.
+
+On searches with known pulsars and injections, these defaults kept every
+source's best S/N and every run that detected it, while publishing 2
+percent of the leaves above `snr_min` or fewer; a search of 734,590 leaves
+that took more than 30 minutes to postprocess unreduced published in about
+a second.
+
+A cell is a frequency interval of one source: one EP run, or one FFA search
+region (`source_region`). Cells of different runs never compete, so a bright
+source that fills a cell in its strongest runs does not displace its weaker
+detections in the other runs, and the number of runs that detect a source is
+kept. Set exactly one cell width with `max_per_cell` (EP sets `cell_bins`):
+
+- `cell_bins`: a trial at frequency f is in cell `floor(f * tobs / cell_bins)`,
+  a width of `cell_bins` Fourier bins;
+- `cell_log_width`: a trial is in cell `floor(ln(f) / cell_log_width)`, a
+  constant fractional width.
 
 The cap is applied as the spool is read, before the external sort, so the
-sort and the grouping see at most `max_per_cell` trials per cell. Dropped
+sort and the grouping see at most `max_per_cell` trials per cell. EP runs are
+capped one at a time, so the cap holds the kept trials of a single run. Dropped
 trials are not detections of the product: they are not in `/detections`, and
 the root attribute `n_cell_dropped` counts them (`n_detections` counts the
-kept ones). The cells' index is charged against `memory_gb` like the grouping
-index. The cap applies to EP and FFA alike, and to `publish_candidates`.
+kept ones). The kept trials are charged against `memory_gb` like the
+grouping index. When the kept trials of a run (of the whole search, for
+FFA) would exceed it, every cell keeps half as many, as often as needed, and the log warns; the kept set
+is still independent of the order the trials arrive in, and the same as a
+smaller `max_per_cell` from the start. Only when one trial per cell does not
+fit does the cap fail. The cap applies to EP and FFA alike, and to
+`publish_candidates`.
+
+### Absorbing trials a stronger trial explains
+
+Most trials a cell keeps are still responses to the same pulse: the same
+track at a slightly different acceleration or frequency, or a track that
+crosses the pulse for part of the observation. With `dominance_kappa`
+positive, each run's cell-capped trials are visited in
+detection order, and a trial is absorbed by a stronger kept trial of the same
+run that explains it:
+
+- their phase tracks stay within the suppression radius of each other,
+  `max(phase_radius, radius * w)` cycles, w the narrower duty cycle; or
+- its S/N is at most `dominance_kappa` times what the stronger trial's pulse
+  gives along its track. That fraction is estimated with a boxcar model: the
+  phase difference of the two tracks is sampled at 129 times over the
+  observation, and a boxcar of width W (from w to a duty cycle of 0.3, in
+  steps of 1.5) that holds a fraction q of the samples recovers
+  `q * sqrt(w / W)` of the stronger S/N.
+
+Only kept trials within two cell widths in frequency are compared. Absorbed
+trials are not detections of the product; the root attribute `n_dominated`
+counts them. A second source on a nearby track is kept whenever its S/N is
+more than `dominance_kappa` times what the stronger pulse explains. Zero
+disables the stage (the default outside EP), and it runs only within the cell
+cap: with `max_per_cell = 0` it has no effect.
 
 ## Common HDF5 schema 1.0
 
 Root attributes include `schema_version`, `producer`, `algorithm`, `complete`,
 `param_names`, parameter-model/order/units descriptions, and counts
-`n_detections`, `n_cell_dropped`, `n_clusters`, `n_candidates`. The initial algorithm is `ffa` and
+`n_detections`, `n_cell_dropped`, `n_dominated`, `n_clusters`, `n_candidates`. The initial algorithm is `ffa` and
 the model is `kinematic_taylor`.
 
 | Group | Meaning |
@@ -338,7 +581,7 @@ parameter uncertainties.
 `f0`, `f1`, `f2` are frequency, frequency derivative and second frequency
 derivative in Hz, Hz/s and Hz/s². Other columns include `snr`, `width`, `nbins`,
 `duty_cycle`, `member_count`, `phase_extent`, `parent_cluster_id`, `harmonic_numerator`,
-`harmonic_denominator`, and `selected`. Nonapplicable relationship fields are
+`harmonic_denominator`, `selected` and `outside_prior`. Nonapplicable relationship fields are
 zero/-1. On raw detection rows, only `cluster_id` encodes membership; `phase_extent` is zero and cluster
 counts, relationships and selection must be read from `/clusters`.
 
@@ -366,8 +609,11 @@ publication. An abandoned raw writer does not finalize in its destructor.
 If the search finishes but postprocessing fails (the candidate memory budget,
 a full scratch disk, an HDF5 error), the search's detections are kept as
 `<prefix>_ffa_spool.h5` beside the intended output and the error is
-rethrown. Publish them without searching again, with larger budgets if needed,
-passing the same observation metadata as the search:
+rethrown. Publish them without searching again with
+`loki publish out/run_ffa_spool.h5 --memory-gb 8` (see
+[Publishing a kept spool](#publishing-a-kept-spool)), or in Python, with
+larger budgets if needed, passing the same observation metadata as the
+search:
 
 ```python
 options = libloki.configs.CandidateOptions()
@@ -397,13 +643,51 @@ With both clustering and harmonic flagging disabled, singleton results stream
 directly without allocating a representative index.
 Runtime/allocator/HDF5 overhead is additional to the accounted buffers.
 
+## Run statistics
+
+The CLI adds a `/run_stats` group to every search results file after the run
+(`loki::search::write_run_stats`). Its attributes are measurements for batch
+scheduling, not search results, and change from run to run:
+
+| Attribute | Meaning |
+| --- | --- |
+| `timing_<stage>_s` | Wall time of `load`, `preprocess`, `plan`, `search`, `postprocess` and `total` (FFA: `search_and_postprocess`) |
+| `peak_rss_gb` | Peak resident set size of the process, GB of 2^30 bytes (`getrusage` `ru_maxrss`) |
+| `n_runs`, `n_runs_overloaded`, `n_overloads` | EP: runs, runs with at least one world-tree overload, and overloads summed over `level_stats` |
+| `n_harvested`, `n_harvests_recorded`, `max_harvested_per_run` | EP with `[ep.rfi]` harvesting only: harvests over all runs (including those beyond `max_harvests`), the records kept, and the most harvests of one run |
+| `n_harvested_sources` | EP results with a `/harvested` table: its rows (sources removed by early harvest) |
+| `n_leaves_masked`, `n_leaves_vetoed` | EP with an active `[ep.rfi]` only: leaves rejected by the pulsar mask (and harvest masks) and by the impulsive veto, over all levels and runs; zero means the mechanism never triggered |
+| `plan_peak_memory_gb` | EP: the largest chunk `chunk_memory_gb` of the plan (device memory on CUDA) |
+| `leaves_dropped` | Trials the candidate reduction dropped: root `n_cell_dropped` plus `n_dominated` |
+| `max_cell_dropped_snr` | EP: the highest S/N the cell cap dropped in any run (runs' `max_cell_dropped_snr`) |
+| `loki_version`, `loki_commit` | The build that wrote the statistics: release and `git describe --always --dirty` at build time (`unknown` outside a git checkout) |
+| `config_hash` | `fnv1a64:` and the 64-bit FNV-1a hash, in hex, of the root `config_effective` text; equal hashes mean the same effective configuration |
+| `input_path` | The input time series (`/observation@input_path`) |
+
+The reduction has no S/N floor (it keeps the strongest leaves of every
+frequency cell, whatever their S/N), so there is no `snr_floor_used`;
+`max_cell_dropped_snr` says how strong the strongest dropped leaf was. Per-run
+overload counts stay in each run's `level_stats` (`n_overloads`).
+
+With a `/detections` table, `detections_per_nbins/nbins` and `count` give
+the detections per profile bin count, which is one row per search region.
+EP `postprocess` is the time after the sweep's own `total_runtime`: writer
+drain, spool reading, sorting, clustering and writing the product.
+
+During postprocessing the log reports progress every 30 s (phase, records
+done, records merged by the sort, elapsed time). SIGINT and SIGTERM stop it
+at the next record or batch. A run stopped after its search finished keeps
+`<prefix>_ep_spool.h5` for `loki publish`.
+
 ## Inspecting a result file
 
 `loki inspect` summarises a result file without Python: the run metadata
 (input, nsamps, tsamp, tobs, searched ranges, version, the command line
 and the effective configuration, or the raw `config_toml` when a file
-predates provenance) and the top candidates by S/N. It reads the common schema,
-flat FFA files (`--no-candidates`) and raw EP runs.
+predates provenance) and the top candidates by S/N, then the sources removed
+by early harvest when the file has a `/harvested` table (their partial S/N,
+harvest level and run count; `harvested` in `--json`). It reads the common
+schema, flat FFA files (`--no-candidates`) and raw EP runs.
 
 ```bash
 loki inspect trial_ffa_results.h5            # top 10 candidates
@@ -418,6 +702,165 @@ products above do not, so it says so. The search writes no backend
 attribute, so the backend shows as "not recorded". C++ tools get the same
 summary from `loki::io::read_candidate_file_summary`
 (`loki/io/candidate_file.hpp`).
+
+## Refolding a candidate
+
+`loki refold` folds the searched series again at a candidate's parameters
+and scans a small grid around them. It is a **rejection test**: a candidate
+whose refold falls far below its search S/N was scored on a favourable
+path through the noise. It never confirms one: a pure-noise candidate also
+refolds near its search S/N, so a refold that agrees says nothing about
+whether it is a pulsar.
+
+```bash
+# Candidates of a search: by id, or the strongest N
+loki refold series.dat --result run_ep_results.h5 --id 12
+loki refold series.dat --result run_ep_results.h5 --top 5 --split 4
+# Parameters at the series midpoint (accel/jerk/snap/crackle, or fd/fdd)
+loki refold series.dat --f 141.0 --acc 5.0 --jerk -0.001 -c search.toml
+loki refold series.dat --f 141.0 --acc 30 --jerk 0.2 --snap -1e-4 --crackle 1e-6 --circular
+```
+
+With `--result`, the series is preprocessed as the search did (the file's
+`config_effective`, or `-c`), cut to the searched samples, and folded at
+the file's reference time. An EP candidate is folded with the phase model
+the search propagated its leaf with (`psr_utils::leaf_phase`, from the
+leaf and its errors that the run keeps): in a five-parameter search, a
+circular orbit where its terms are significant. An FFA candidate, and a
+`--f` target, is folded with the Taylor polynomial of its derivatives;
+`--circular` folds a `--f` target as a five-parameter search would. A
+candidate's id is the `id` column of the candidate table (`loki inspect
+--json` lists it); in a raw EP file
+(`--no-candidates`) it is `run << 32 | leaf`, with the runs numbered by
+chunk and run name, the same numbers the candidate products use.
+
+The fold follows the reference implementation of the analysis pipeline:
+the series is split into `--nsub` (128) subintegrations, each folded
+exactly at the target phase (sample i at time i * tsamp, its start, as the
+search's brute fold), and frequency offsets (`--df-span-t`, +-3 / T, in
+steps of `--df-step-bins` / (nbins T), 0.25) and optionally fdot offsets
+(`--fd-steps`, `--fd-span`) shift the subintegrations before they are
+summed. S/N is the best boxcar, widths 1 to nbins/2, of sum(signal) /
+sqrt(sum(variance)), with nbins min(64, max(8, samples per period)) unless
+`--nbins` is given. This is not the search's scoring (its widths and
+nbins), so the output shows the search S/N, width and nbins next to the
+refold. `--split N` also scores the best point in N contiguous parts of
+the observation (a pulsar is present in each; a short burst is not).
+`--json` writes the results for pipelines.
+
+The refold runs on the CPU. A search on a GPU preprocesses on the device,
+so a refold of its data can differ from the search's input at float level.
+In Python, `libloki.fold.refold(ts_e, ts_v, tsamp, t_ref, leaf, ...)` runs
+the same fold on a preprocessed series; C++ tools use `loki::search::refold`
+(`loki/search/refold.hpp`) and `loki::io::read_candidate_by_id`.
+
+## Publishing a kept spool
+
+`loki publish FILE` groups and publishes the candidates of a search
+without searching again. `FILE` is a `<prefix>_ffa_spool.h5` or
+`<prefix>_ep_spool.h5` that a search kept when its postprocessing failed or
+was interrupted, or the result file of a `--no-candidates` search:
+
+```bash
+loki publish out/run_ep_spool.h5                    # writes out/run_ep_results.h5
+loki publish out/run_ffa_spool.h5 --memory-gb 8     # a larger candidate budget
+loki publish out/raw_ffa_results.h5 -o out/run.h5   # a --no-candidates result
+```
+
+- **Output.** A spool publishes beside itself as `<prefix>_ffa_results.h5`
+  or `<prefix>_ep_results.h5`; any other file needs `-o`. An existing file
+  is replaced only with `--force` (atomically, once the new product is
+  written), and a published result file is refused.
+- **Candidate options.** From `-c`, else the configuration the file stores
+  (`loki search`, when it keeps a spool, records its effective configuration and
+  command line there), else the defaults, with a warning. `--memory-gb`,
+  `--candidate-tempdir`, `--cluster`/`--no-cluster`, `--max-candidates`,
+  `--max-per-cell`, `--retain-detections`/`--no-retain-detections` and
+  (EP) `--snr-min` override them. The stored configuration includes the
+  options the search failed with, so pass the one that failed (a larger
+  `--memory-gb`, a writable `--candidate-tempdir`). An EP spool whose runs
+  the search reduced publishes with the options it was reduced with (its
+  runs' `reduced_*` attributes); other options are refused, since the
+  dropped leaves are gone.
+- **Observation metadata.** From the header of the searched series (`-i`,
+  else the configuration's `[input] timeseries`), which must match the
+  file's sample interval and count; then the configuration's `[input]`
+  overrides, then `--dm`, `--start-mjd` and `--barycentric`. Without the
+  series the result lacks the source, DM and start MJD, with a warning.
+- **Provenance.** The product keeps the search's `command_line` and its
+  `config_effective` (with the options this publish used), and adds the
+  publishing command as `publish_command_line`.
+- **Cleanup.** Once the product reads back complete, a spool is removed
+  (`--keep-spool` keeps it), unless it was published without the search's
+  configuration or series: then it is kept, with a warning, so it can be
+  published again with `-c` or `-i` and `--force`. A `--no-candidates` result is never
+  removed.
+
+## Sifting many result files
+
+`loki sift` groups the candidates of many published result files, such as
+the DM trials and time segments of one source, by frequency, and describes
+each group:
+
+```bash
+loki sift 'results/*_ep_results.h5'                 # quoted: loki expands it
+loki sift 'results/*.h5' --min-segs 2 --csv groups.csv
+loki sift 'results/*.h5' --json --members > groups.json
+```
+
+- **Grouping.** Candidates at or above `--snr-min` (7) are sorted by
+  frequency and joined while consecutive frequencies differ by at most
+  `--tol` (2e-4, a fraction: the Earth's and a modest orbital Doppler shift
+  between segments). Groups seen in fewer than `--min-segs` segments are
+  dropped.
+- **DM and segment** come from each file's `/observation`, never from its
+  name: `dm`, and the segment from `start_mjd` (files with the same first
+  sample share one; without it, the same input series).
+- **Per group:** the best member (S/N, frequency, fdot, its file, DM and
+  candidate id), the best S/N per DM trial, the segments, and two
+  discriminators. `edge` is the best S/N at the lowest and highest DM of all
+  files over the group's best: a pulsar peaks inside the trials (small),
+  interference is flat in DM or strongest at the lowest trial (near 1).
+  `extrap` is how far, in frequency bins of the later segment, each
+  segment's best member is from the previous segment's Taylor extrapolation
+  (`f + fdot dt`): about 1 for an isolated pulsar, large for a binary or for
+  interference.
+- **Harmonics.** A group is a harmonic `p/q` of a stronger group (`p, q <=
+  --harmonic-order`, 16) when its best frequency is within the tolerance of
+  `p/q` times the stronger group's best, `p/q` is the only such ratio, its
+  best DM is inside the stronger group's DM range, and in a file with
+  members of both their strongest members agree with `p/q` to within
+  `--harmonic-bins` (2) bins of 1/T: within one file a harmonic shares its
+  parent's Doppler shift. The tolerance alone cannot tell, since at 2e-4 the
+  ratios cover about 1% of all frequencies: on the day above it related 155
+  of 467 groups, against 23 with the file check, which kept every
+  catalogue-labelled harmonic (offsets at most 0.17 bins).
+- **Output.** A table of the strongest `-n` (50) groups; `--csv` writes every
+  group, `--json` writes every group to stdout, and `--members` adds each
+  group's members (file index and candidate id) for
+  `loki refold --result FILE --id ID`. Result files are only read; raw and
+  spool files are refused (publish them first).
+
+On a full day of 110 files (22 DM trials x 5 segments, 13.1 million
+candidates at S/N 7, 4.4 GB on a network filesystem) it took 43 s.
+
+Matching groups to known pulsars needs the Earth's Doppler shift, so it is
+in Python: `loki-sift-match` (module `loki.sift`) runs the same grouping and
+matches each group's best frequency, divided by `1 + doppler`, with ratios
+`n/m <= 8/4` of a catalogue's frequencies:
+
+```bash
+loki-sift-match 'results/*.h5' --catalog known.csv \
+    --ra 05:34:31.9 --dec=+22:00:52 --site 50.5247,6.8836,319
+```
+
+The catalogue is a CSV with `name`, `f0` (Hz) or `p0_ms`, and optionally
+`dm` and `doppler` (a binary's largest fractional orbital Doppler shift,
+added to `--match-tol`). The Doppler correction uses astropy, an optional
+dependency; without `--ra`, `--dec` and `--site` the frequencies are matched
+as observed. In Python: `libloki.io.sift(files, options)`,
+`loki.sift.match_groups(result, catalog, doppler=...)` and
+`loki.sift.astropy_doppler(ra, dec, lat, lon, height)`.
 
 ## PulsarX conversion
 
@@ -479,7 +922,8 @@ are rejected rather than silently truncated.
 - **Types and names.** `width` and `nbins` are `uint32` (were `uint16`). Root
   `detection_id` is gone: use `/detections/id` and `/candidates/id`. The search
   attributes (`ffa_version`, `config_toml`, `tsamp`, `nsamps`, `tobs`, `f_min`,
-  `f_max`, `snr_min`, `ducy_max`, `wtsp`, `eta`, `bseg_*`, ...) moved to the
+  `f_max`, `snr_min`, `ducy_max`, `wtsp`, `eta`, `region_growth_factor`,
+  `phase_tolerance`, `bseg_*`, ...) moved to the
   `/search` group; the root keeps `param_names`, `complete` and the schema
   attributes.
 - **CPU memory.** The candidate budget `candidates.memory_gb` (default 1 GB) is
@@ -490,6 +934,13 @@ are rejected rather than silently truncated.
   separate host candidate budget.
 
 ### Reading old files
+
+Result files and spools are written in the HDF5 1.10 file format, and each
+EP run's `level_stats` and `snail_scheme` are deflate-compressed (with byte
+shuffle). Any reader built on HDF5 1.10 or newer with zlib (h5py, HighFive,
+the HDF5 tools) reads them transparently; paths, types and values are
+unchanged. HDF5 1.8 tools cannot open them. Files written before this change
+remain readable.
 
 Existing flat FFA files remain readable through `loki.candidates.CandidateFile`;
 missing observational metadata can be supplied during export. Readers must
@@ -512,8 +963,8 @@ every passing width trial; Taylor EP supplies one winning-width trial per
 final leaf across completed runs. Taylor EP recovers that width from final
 folds without overwriting reported scores or changing pruning decisions.
 
-Common EP candidates currently require an inactive RFI configuration and
-Taylor models through crackle (the circular-orbit search included).
-Chebyshev normalization and RFI harvest/masking integration are outside this
-path. PulsarX export supports
+Common EP candidates currently require Taylor models through crackle (the
+circular-orbit search included); Chebyshev normalization is outside this
+path. With RFI control of the pruning, harvested leaves stay in the run
+diagnostics (see [RFI control of the pruning](#rfi-control-of-the-pruning-eprfi)). PulsarX export supports
 terms through jerk and rejects nonzero higher derivatives.

@@ -65,6 +65,8 @@ clip_sigma = 0
 zap_periodic = true
 zap_sigma = 7.0
 zap_whiten_bins = 501
+zap_mode = "zero"
+zap_seed = 99
 birdies = [[50.0, 0.1], [60, 0]]
 )";
     const auto cfg         = loki::search::FFATomlConfig::from_string(toml);
@@ -83,6 +85,8 @@ birdies = [[50.0, 0.1], [60, 0]]
     REQUIRE(o.zap_periodic);
     REQUIRE(o.zap_sigma == 7.0);
     REQUIRE(o.zap_whiten_bins == 501);
+    REQUIRE(o.zap_mode == loki::io::ZapMode::kZero);
+    REQUIRE(o.zap_seed == 99U);
     REQUIRE(o.birdies.size() == 2);
     REQUIRE(o.birdies[0].freq == 50.0);
     REQUIRE(o.birdies[0].width == 0.1);
@@ -97,7 +101,8 @@ TEST_CASE("FFATomlConfig rejects bad [preprocessing] values", "[config][ffa]") {
         "block_scales = [0.0]", "block_scales = 1.0", "block_sigma = 0.0",
         "min_good_fraction = 1.5", "clip_sigma = -1.0", "zap_sigma = 0.0",
         "zap_whiten_bins = 2", "birdies = [[50.0]]", "birdies = [[-1.0, 0.1]]",
-        "zap_periodic = 1", "n_iter = 1.5", "unknown = 1");
+        "zap_periodic = 1", "zap_mode = \"soft\"", "n_iter = 1.5",
+        "unknown = 1");
     CAPTURE(bad);
     REQUIRE_THROWS_AS(loki::search::FFATomlConfig::from_string(
                           "[preprocessing]\n" + bad + "\n"),
@@ -317,10 +322,20 @@ TEST_CASE("FFATomlConfig names the key of every wrong type", "[config][ffa]") {
          "candidates.max_candidates must be an integer"},
         {"[candidates]\nmax_per_cell = 1.5\n",
          "candidates.max_per_cell must be an integer"},
+        {"[candidates]\ncell_bins = \"64\"\n",
+         "candidates.cell_bins must be a number"},
+        {"[candidates]\ndominance_kappa = \"1.5\"\n",
+         "candidates.dominance_kappa must be a number"},
         {"[candidates]\ncell_log_width = \"2e-4\"\n",
          "candidates.cell_log_width must be a number"},
         {"[candidates]\nharmonic_denominator_max = 20000\n",
          "candidates.harmonic_denominator_max must be at most 10000"},
+        {"[performance]\nregion_growth_factor = 1.0\n",
+         "performance.region_growth_factor must be finite and > 1.0"},
+        {"[performance]\nregion_growth_factor = 0.5\n",
+         "performance.region_growth_factor must be finite and > 1.0"},
+        {"[performance]\nregion_growth_factor = inf\n",
+         "performance.region_growth_factor must be finite (got nan or inf)"},
         {"[search.orbit]\norder = 1\n", "search.orbit.order must be a string"},
         {"[search.orbit]\norder = \"accel\"\nm_c_max = true\n",
          "search.orbit.m_c_max must be a number"},
@@ -336,4 +351,7 @@ TEST_CASE("FFATomlConfig suggests the key a typo meant", "[config][ffa]") {
                    "search.f_mn: unknown key (did you mean 'f_min'?)"));
     CHECK_THAT(ffa_message_for("[serach]\nf_min = 1.0\n"),
                Catch::Matchers::ContainsSubstring("(did you mean 'search'?)"));
+    CHECK_THAT(ffa_message_for("[performance]\noctave_scale = 2.0\n"),
+               Catch::Matchers::ContainsSubstring(
+                   "use performance.region_growth_factor"));
 }

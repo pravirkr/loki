@@ -125,7 +125,7 @@ void write_search_config(const std::filesystem::path& path,
                           "[performance]\n"
                           "nthreads = 8\n"
                           "max_process_memory_gb = 16.0\n"
-                          "octave_scale = 1.5\n"
+                          "region_growth_factor = 1.5\n"
                           "nbins_max = 1024\n"
                           "nbins_min_lossy_bf = 32\n"
                           "{}"

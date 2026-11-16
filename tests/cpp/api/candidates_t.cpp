@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <iterator>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -81,6 +82,26 @@ TEST_CASE("Phase track distance includes interior extrema", "[candidates]") {
     REQUIRE(loki::search::phase_track_distance(a, b, 2) == Catch::Approx(5));
 }
 
+TEST_CASE("Phase track distance of trials one derivative apart",
+          "[candidates]") {
+    // The residual is a monomial: every derivative of it has its root at the
+    // midpoint, where it evaluates to exactly zero.
+    const auto a = trial(0, 100, 12);
+    for (std::size_t k = 1; k < a.derivatives.size(); ++k) {
+        CAPTURE(k);
+        auto b           = a;
+        b.derivatives[k] = 1e-6;
+        double distance  = 0;
+        REQUIRE_NOTHROW(distance = loki::search::phase_track_distance(a, b, 2));
+        const volatile std::uint64_t dist_bits =
+            std::bit_cast<std::uint64_t>(distance);
+        CHECK((dist_bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL);
+        CHECK(distance > 0);
+        // Symmetric in the pair.
+        CHECK(loki::search::phase_track_distance(b, a, 2) == distance);
+    }
+}
+
 TEST_CASE("Harmonics are separately flagged filtered and capped",
           "[candidates]") {
     std::vector input{trial(0, 10, 20), trial(1, 20, 14.1421356F),
@@ -98,9 +119,115 @@ TEST_CASE("Harmonics are separately flagged filtered and capped",
     REQUIRE(out.clusters[0].selected);
     REQUIRE_FALSE(out.clusters[1].selected);
     REQUIRE_FALSE(out.clusters[2].selected);
+    // Tracks that disagree in a derivative are not related by the track
+    // test; the bright parent's Doppler test, when enabled, relates them.
     input[1].derivatives[1] = 0.1;
     out = loki::search::cluster_candidates(input, 100, options);
     REQUIRE(out.clusters[1].parent_cluster_id == -1);
+    options.harmonic_doppler_tolerance = 3e-4;
+    out = loki::search::cluster_candidates(input, 100, options);
+    REQUIRE(out.clusters[1].parent_cluster_id == 0);
+}
+
+TEST_CASE("Harmonic families take the simplest ratio and bright binaries",
+          "[candidates]") {
+    loki::search::CandidateOptions options;
+    options.flag_harmonics             = true;
+    options.cluster                    = false;
+    options.harmonic_doppler_tolerance = 3e-4;
+    constexpr double kTobs             = 1000;
+    // A bright parent; a subharmonic stronger than 1/sqrt(2) of it (the
+    // previous two-sided S/N test refused it); a third harmonic 1e-4 off
+    // in frequency (a binary: no common track over 1000 s); a ratio beyond
+    // 16; a weak line in ratio 3e-4 * 4 off; a 1:1 Doppler duplicate.
+    std::vector input{trial(0, 100, 40),
+                      trial(1, 50, 35),
+                      trial(2, 300 * (1 + 1e-4), 15),
+                      trial(3, 100.0 * 17 / 3, 12),
+                      trial(4, 400 * (1 + 1.2e-3), 11),
+                      trial(5, 100 * (1 - 2e-4), 9)};
+    auto out          = loki::search::cluster_candidates(input, kTobs, options);
+    const auto parent = [&](std::size_t i) {
+        return out.clusters[i].parent_cluster_id;
+    };
+    const auto ratio = [&](std::size_t i) {
+        return std::pair{out.clusters[i].harmonic_numerator,
+                         out.clusters[i].harmonic_denominator};
+    };
+    CHECK(parent(0) == -1);
+    CHECK(parent(1) == 0);
+    CHECK(ratio(1) == std::pair{1U, 2U});
+    CHECK(parent(2) == 0);
+    CHECK(ratio(2) == std::pair{3U, 1U});
+    CHECK(parent(3) == -1);
+    CHECK(parent(4) == -1);
+    CHECK(parent(5) == 0);
+    CHECK(ratio(5) == std::pair{1U, 1U});
+    // A parent below harmonic_doppler_min_snr needs a common track.
+    options.harmonic_doppler_min_snr = 50;
+    out = loki::search::cluster_candidates(input, kTobs, options);
+    CHECK(parent(1) == 0);
+    CHECK(parent(2) == -1);
+    CHECK(parent(5) == -1);
+    // Larger orders reach 17/3.
+    options.harmonic_denominator_max = 17;
+    out = loki::search::cluster_candidates(input, kTobs, options);
+    CHECK(parent(3) == 0);
+    CHECK(ratio(3) == std::pair{17U, 3U});
+    // With orders up to 100, 78/67, 85/73 and 92/79 all lie within 3e-4
+    // of this one: the Doppler test does not apply. 3.0003 stays unique.
+    options.harmonic_doppler_min_snr = 20;
+    options.harmonic_denominator_max = 100;
+    input.push_back(trial(6, 100.0 * 78 / 67 * (1 + 1e-4), 8));
+    out = loki::search::cluster_candidates(input, kTobs, options);
+    CHECK(parent(6) == -1);
+    CHECK(parent(2) == 0);
+
+    SECTION("Doppler test is symmetric at boundaries and exact on ambiguity") {
+        // Red-shifted exact boundary: 300 * (1 - 3e-4) is 3e-4 below 3 * 100.
+        loki::search::CandidateOptions b_opts;
+        b_opts.flag_harmonics             = true;
+        b_opts.cluster                    = false;
+        b_opts.harmonic_doppler_tolerance = 3e-4;
+        b_opts.harmonic_doppler_min_snr   = 20;
+        auto red_child                    = trial(1, 300.0 * (1.0 - 3e-4), 10);
+        red_child.derivatives[1]          = 0.1;
+        const auto red_out                = loki::search::cluster_candidates(
+            std::array{trial(0, 100.0, 40), red_child}, kTobs, b_opts);
+        CHECK(red_out.clusters[1].parent_cluster_id == 0);
+        CHECK(red_out.clusters[1].harmonic_numerator == 3U);
+        CHECK(red_out.clusters[1].harmonic_denominator == 1U);
+
+        // Counterexample for std::round(ratio * q): ratio 1.5 with q = 11 gives
+        // round(16.5) = 17 > max_order = 16, whereas 16/11 is inside 0.035.
+        loki::search::CandidateOptions amb_opts;
+        amb_opts.flag_harmonics             = true;
+        amb_opts.cluster                    = false;
+        amb_opts.harmonic_denominator_max   = 16;
+        amb_opts.harmonic_doppler_tolerance = 0.035;
+        amb_opts.harmonic_doppler_min_snr   = 20;
+        auto amb_child                      = trial(1, 150.0, 10);
+        amb_child.derivatives[1]            = 0.1;
+        const auto amb_out                  = loki::search::cluster_candidates(
+            std::array{trial(0, 100.0, 40), amb_child}, kTobs, amb_opts);
+        CHECK(amb_out.clusters[1].parent_cluster_id == -1);
+    }
+
+    SECTION("Harmonic table enforces host memory_gb before allocating") {
+        loki::search::CandidateOptions mem_opts;
+        mem_opts.flag_harmonics           = true;
+        mem_opts.cluster                  = false;
+        mem_opts.harmonic_denominator_max = 5000;
+        mem_opts.memory_gb                = 0.001;
+        REQUIRE_THROWS_AS(
+            loki::search::cluster_candidates(
+                std::array{trial(0, 100.0, 20), trial(1, 200.0, 10)}, kTobs,
+                mem_opts),
+            std::runtime_error);
+        // Single cluster skips table construction even when max_order is huge.
+        REQUIRE_NOTHROW(loki::search::cluster_candidates(
+            std::array{trial(0, 100.0, 20)}, kTobs, mem_opts));
+    }
 }
 
 TEST_CASE("Candidate processing validates input and bounds representatives",

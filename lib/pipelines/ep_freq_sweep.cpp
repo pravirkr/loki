@@ -15,6 +15,7 @@
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/backend.hpp"
+#include "loki/common/interrupt.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -47,13 +48,13 @@ std::unique_ptr<detail::EPFreqSweepEngine> make_ep_freq_sweep_engine(
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        if (rfi_config.is_active()) {
-            loki::detail::throw_unimplemented("EPFreqSweep (rfi_config)",
-                                              exec.backend);
+        if (rfi_config.impulsive_veto) {
+            loki::detail::throw_unimplemented(
+                "EPFreqSweep (rfi_config.impulsive_veto)", exec.backend);
         }
         return detail::make_ep_freq_sweep_gpu(cfg, min_pd, poly_basis, ref_ducy,
                                               plan_cache_file, n_runs, ref_segs,
-                                              exec.device);
+                                              exec.device, rfi_config);
     }
 #endif
     loki::detail::throw_unavailable("EPFreqSweep", exec.backend);
@@ -114,9 +115,8 @@ EPFreqSweep::EPFreqSweep(
         return;
     }
     if (poly_basis != "taylor" || cfg.get_nparams() < 2 ||
-        cfg.get_nparams() > kParamNames.size() || rfi_config.is_active()) {
-        throw std::invalid_argument("EP candidates require polynomial Taylor "
-                                    "and an inactive RFI config");
+        cfg.get_nparams() > kParamNames.size()) {
+        throw std::invalid_argument("EP candidates require polynomial Taylor");
     }
     auto search_cfg = cfg;
     if (exec.backend == Backend::kCPU) {
@@ -133,6 +133,15 @@ EPFreqSweep::EPFreqSweep(
         search_cfg, show_progress, min_pd, poly_basis, ref_ducy, rfi_config,
         plan_cache_file, n_runs, ref_segs, exec));
     m_impl->candidates = candidates;
+    // The search reduces each run as it writes it, exactly as publication
+    // would: the spool then holds only the retained leaves.
+    if (candidates.max_per_cell != 0) {
+        m_impl->m_engine->set_leaf_reduction(search::detail::LeafReductionSpec{
+            .options = candidates,
+            .snr_min = cfg.get_snr_min(),
+            .tobs    = cfg.get_tobs(),
+        });
+    }
 }
 
 EPFreqSweep::~EPFreqSweep()                                       = default;
@@ -177,25 +186,38 @@ void EPFreqSweep::execute(std::span<const float> ts_e,
         throw;
     }
     const auto spool = staging / "spool_ep_results.h5";
-    try {
-        publish_candidates(
-            spool, outdir / (std::string(file_prefix) + "_ep_results.h5"),
-            *m_impl->candidates, observation);
-    } catch (...) {
+    // The search finished: keep its runs so postprocessing can be retried
+    // without searching again, and remove the staging directory.
+    const auto keep_spool = [&](std::string_view reason) {
         const auto kept = outdir / (std::string(file_prefix) + "_ep_spool.h5");
         std::error_code error;
         std::filesystem::rename(spool, kept, error);
         if (!error) {
             cleanup();
+            std::error_code size_error;
+            const auto bytes = std::filesystem::file_size(kept, size_error);
             spdlog::error(
-                "EP candidate postprocessing failed; completed runs are kept "
-                "in '{}'. Retry with EPFreqSweep::publish_candidates.",
+                "EP candidate postprocessing {}; the completed search is kept "
+                "in '{}' ({:.1f} MB). Publish it with `loki publish '{}'` "
+                "(Python: libloki.prune.EPFreqSweep.publish_candidates)",
+                reason, kept.string(),
+                size_error ? 0.0 : static_cast<double>(bytes) / 1.0e6,
                 kept.string());
         } else {
-            spdlog::error("EP candidate postprocessing failed; completed runs "
+            spdlog::error("EP candidate postprocessing {}; completed runs "
                           "remain in '{}' ({})",
-                          staging.string(), error.message());
+                          reason, staging.string(), error.message());
         }
+    };
+    try {
+        publish_candidates(
+            spool, outdir / (std::string(file_prefix) + "_ep_results.h5"),
+            *m_impl->candidates, observation);
+    } catch (const loki::Interrupted&) {
+        keep_spool("was interrupted");
+        throw;
+    } catch (...) {
+        keep_spool("failed");
         throw;
     }
     cleanup();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -24,6 +25,20 @@ enum class PreprocessMethod : std::uint8_t {
 enum class GainModel : std::uint8_t {
     kAdditive,       ///< alpha = 0: g = 1 (calibrated / search data)
     kMultiplicative, ///< alpha = 1: g = mu (uncalibrated total power)
+};
+
+/// How a zapped Fourier bin (birdie window or periodic threshold) is
+/// replaced.
+enum class ZapMode : std::uint8_t {
+    /// Complex Gaussian noise of the local mean power: a hard zap that
+    /// leaves no coherent residual.
+    kNoise,
+    /// Keep the phase and scale the amplitude down to the local mean power
+    /// (bins already below it are left alone). A bright pulsar keeps a
+    /// coherent residual.
+    kPhaseKept,
+    /// Set the bin to zero.
+    kZero,
 };
 
 /// Known periodic RFI: zap Fourier bins with `|f - freq| <= width / 2`.
@@ -67,6 +82,11 @@ struct PreprocessOptions {
     SizeType zap_whiten_bins{1001};
     /// Known RFI frequencies, always zapped when non-empty.
     std::vector<Birdie> birdies;
+    /// How zapped bins are replaced.
+    ZapMode zap_mode{ZapMode::kNoise};
+    /// Seed of the kNoise fill; empty derives it from the input samples, so
+    /// different series (e.g. DM trials) get independent fills.
+    std::optional<std::uint64_t> zap_seed;
 
     // --- kZScore ---
     LocMethod loc{LocMethod::kMean};
@@ -99,6 +119,18 @@ struct PreprocessReport {
     SizeType n_clipped{0};
     /// Fourier bins zapped (threshold and birdies).
     SizeType n_zapped{0};
+    /// Self-check of the zap, per frequency band: the mean whitened power of
+    /// the output's flagged bins (birdie windows and threshold bins) over
+    /// that of its other bins. ZapMode::kNoise leaves about 1, kZero about 0
+    /// and kPhaseKept about 1 - 1/e on noise; above that, power is left in
+    /// the windows.
+    struct ZapBand {
+        double f_lo{0.0};      ///< Hz
+        double f_hi{0.0};      ///< Hz
+        SizeType n_zapped{0};  ///< Zapped bins in the band
+        double power_ratio{0}; ///< In-window over out-of-window power
+    };
+    std::vector<ZapBand> zap_bands;
     /// Longest contiguous run of zero-weight samples.
     SizeType longest_masked_run{0};
     /// Global robust scale of the raw series.
@@ -132,7 +164,8 @@ struct PreprocessReport {
  * @param ts_e Output weighted signal, same length as @p raw.
  * @param ts_v Output weights (statistical information), same length.
  * @param options Method and parameters.
- * @param exec Backend; only the CPU is implemented.
+ * @param exec Backend; GPU runs PreprocessMethod::kRobust without spectral
+ * zapping (kZScore, zap_periodic and birdies run on the CPU).
  * @throws std::invalid_argument on bad sizes or options, non-finite input,
  * a constant series, or a fully masked series.
  */

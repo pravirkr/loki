@@ -216,8 +216,9 @@ ep_sweep_n_workers(int nthreads,
  * @param exec Backend of the sweep the plan is for. On CUDA the threshold
  * schemes are designed with the CUDA DynamicThresholdScheme and memory means
  * device memory only: max_process_memory_gb is capped by the free device
- * memory less a fixed reserve, and host memory is never checked. An active
- * @p rfi_config is rejected (not implemented on CUDA). A plan cache written on
+ * memory less a fixed reserve, and host memory is never checked. On CUDA,
+ * @p rfi_config pulsar masking and harvesting are budgeted in device memory,
+ * while impulsive_veto is rejected (CPU-only). A plan cache written on
  * one backend is accepted on the other: its threshold scheme is statistically
  * equivalent, and load_cache rechecks its peak with the current backend.
  * @tparam FoldType float for time domain, ComplexType for Fourier domain.

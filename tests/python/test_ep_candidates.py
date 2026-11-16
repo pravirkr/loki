@@ -168,6 +168,24 @@ def test_ep_candidates_preserve_runs_and_cluster_the_full_list(product, tmp_path
     assert summary["count"] > 0
 
 
+def test_ep_run_tables_are_compressed(product, tmp_path):
+    """level_stats and snail_scheme are deflated, in the HDF5 1.10 format,
+    in the search's product and in a republication of it."""
+    path, _, _, _ = product
+    output = tmp_path / "republished.h5"
+    libloki.prune.EPFreqSweep.publish_candidates(
+        path, output, candidates=options(), observation=observation()
+    )
+    for file in (path, output):
+        with h5py.File(file) as f:
+            assert f.id.get_create_plist().get_version()[0] == 3
+            runs = f["search/sources/run_path"].asstr()[:]
+            assert len(runs) > 0
+            for run_path in runs:
+                for name in ("level_stats", "snail_scheme"):
+                    assert f[f"{run_path}/{name}"].compression == "gzip"
+
+
 @pytest.mark.parametrize(
     "policy", ["anchored", "unclustered", "no_raw", "capped", "empty"]
 )
@@ -356,30 +374,33 @@ def test_ep_cell_cap_publishes_a_search_too_large_to_group(product, tmp_path):
     with h5py.File(output) as result:
         total = result.attrs["n_detections"]
         snr_min = result["processing"].attrs["snr_min"]
-    # The same budget holds the strongest leaf of each cell.
+    # The same budget holds the strongest leaf of each cell of each run.
     log_width = 2e-3
     opts.cluster = True
     opts.max_per_cell = 1
     opts.cell_log_width = log_width
     libloki.prune.EPFreqSweep.publish_candidates(spool, output, candidates=opts)
-    best: dict[int, float] = {}
+    best: dict[tuple[int, int], float] = {}
     with h5py.File(spool) as handle:
-        for run_path in handle["search/sources/run_path"].asstr()[:]:
+        run_paths = handle["search/sources/run_path"].asstr()[:]
+        for run, run_path in enumerate(run_paths):
             run_scores = handle[f"{run_path}/scores"][:]
             freqs = handle[f"{run_path}/param_sets"][:, -3, 0]  # the freq row
             for cell, score in zip(
                 np.floor(np.log(freqs) / log_width), run_scores, strict=True
             ):
                 if score >= snr_min:
-                    best[int(cell)] = max(best.get(int(cell), score), score)
+                    key = (run, int(cell))
+                    best[key] = max(best.get(key, score), score)
     with h5py.File(output) as result:
         kept = result.attrs["n_detections"]
         assert kept + result.attrs["n_cell_dropped"] == total
         assert result["processing"].attrs["max_per_cell"] == 1
         cells = np.floor(np.log(result["detections/f0"][:]) / log_width)
-        assert kept == len(best) == len(np.unique(cells))
-        for cell, snr in zip(cells, result["detections/snr"][:], strict=True):
-            assert snr == best[int(cell)]
+        keys = list(zip(result["detections/source_region"][:], cells, strict=True))
+        assert kept == len(best) == len(set(keys))
+        for (run, cell), snr in zip(keys, result["detections/snr"][:], strict=True):
+            assert snr == best[(int(run), int(cell))]
         check_graph(result)
     opts.cell_log_width = 0
     with pytest.raises(ValueError, match="cell_log_width"):
@@ -435,9 +456,6 @@ def test_ep_candidate_scope_is_explicit():
         libloki.prune.EPFreqSweep(
             config(False), candidates=options(), poly_basis="chebyshev"
         )
-    rfi = libloki.prune.PruneRFIConfig(harvest_scheme=[5.0], max_harvests=64)
-    with pytest.raises(ValueError, match="RFI"):
-        libloki.prune.EPFreqSweep(config(False), candidates=options(), rfi_config=rfi)
 
 
 def test_disabled_candidates_write_the_earlier_run_diagnostics(tmp_path, series):
@@ -476,3 +494,45 @@ def test_disabled_candidates_write_the_earlier_run_diagnostics(tmp_path, series)
         libloki.prune.EPFreqSweep.publish_candidates(
             products["off"], tmp_path / "x.h5", candidates=disabled
         )
+
+
+def test_ep_reduced_runs_keep_retained_leaves_and_their_spool_rows(product, tmp_path):
+    path, _, _, _ = product
+    reduced, full = tmp_path / "reduced.h5", tmp_path / "full.h5"
+    # The default options of EP reduce each run's leaves.
+    libloki.prune.EPFreqSweep.publish_candidates(path, reduced)
+    off = libloki.configs.CandidateOptions.ep_defaults()
+    off.max_per_cell = 0
+    libloki.prune.EPFreqSweep.publish_candidates(path, full, candidates=off)
+    with h5py.File(path) as spool, h5py.File(reduced) as r, h5py.File(full) as f:
+        assert r["processing"].attrs["max_per_cell"] == 32
+        runs = r["search/sources/run_path"].asstr()[:]
+        region = r["detections/source_region"][:]
+        index = r["detections/source_index"][:]
+        retained = 0
+        for k, run in enumerate(runs):
+            g, a = r[run], r[run].attrs
+            rows = g["leaf_index"][:]
+            assert np.array_equal(rows, np.sort(index[region == k]))
+            assert a["n_leaves_retained"] == len(rows) == len(g["scores"])
+            assert a["n_final_leaves"] == len(spool[f"{run}/scores"])
+            assert (
+                a["n_leaves_above_snr_min"]
+                == a["n_cell_dropped"] + a["n_dominated"] + a["n_leaves_retained"]
+            )
+            for name in ("param_sets", "scores", "scores_ep", "width"):
+                assert np.array_equal(g[name][:], spool[f"{run}/{name}"][:][rows])
+            assert np.array_equal(g["level_stats"][:], spool[f"{run}/level_stats"][:])
+            retained += len(rows)
+        assert retained == r.attrs["n_detections"]
+        assert (
+            r.attrs["n_detections"] + r.attrs["n_cell_dropped"] + r.attrs["n_dominated"]
+            == f.attrs["n_detections"]
+        )
+        # Without the reduction every run is copied whole.
+        for run in runs:
+            assert "leaf_index" not in f[run]
+            assert np.array_equal(f[f"{run}/scores"][:], spool[f"{run}/scores"][:])
+        # The strongest candidate is the same.
+        assert r["candidates/snr"][0] == f["candidates/snr"][0]
+        check_graph(r)

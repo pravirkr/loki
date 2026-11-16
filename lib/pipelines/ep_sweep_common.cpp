@@ -5,7 +5,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <fmt/format.h>
@@ -17,6 +20,8 @@
 #include "loki/search/configs.hpp"
 
 #include "lib/algorithms/ep_memory.hpp"
+#include "lib/io/h5_layout.hpp"
+#include "lib/search/harvested.hpp"
 
 namespace loki::pipelines::detail {
 
@@ -30,7 +35,8 @@ void initialize_ep_results(
     float ref_ducy,
     float total_runtime,
     std::string_view backend) {
-    HighFive::File main_h5(result_file.string(), HighFive::File::Overwrite);
+    HighFive::File main_h5 = io::detail::open_result_file(
+        result_file.string(), HighFive::File::Overwrite);
     main_h5.createAttribute("ep_sweep_version", std::string("1.0.0-cpp"));
     main_h5.createAttribute("backend", std::string(backend));
     main_h5.createAttribute("complete", 0);
@@ -46,6 +52,12 @@ void initialize_ep_results(
     main_h5.createAttribute("poly_basis", std::string(poly_basis));
     main_h5.createAttribute("ref_ducy", ref_ducy);
     main_h5.createAttribute("total_runtime", total_runtime);
+    main_h5.createAttribute("region_growth_factor",
+                            base_cfg.get_region_growth_factor());
+    // Duty-cycle resolution of the grid: eta / nbins turns in every region.
+    main_h5.createAttribute("phase_tolerance",
+                            base_cfg.get_eta() /
+                                static_cast<double>(base_cfg.get_nbins()));
 
     auto main_chunks_group = main_h5.createGroup("chunks");
     const SizeType nchunks = chunk_cfgs.size();
@@ -72,6 +84,19 @@ void initialize_ep_results(
         chunk_group.createDataSet("scoring_widths",
                                   chunk.cfg.get_scoring_widths());
         chunk_group.createDataSet("branching_pattern", chunk.branching_pattern);
+        // The parameter box of the chunk, in param_names order, [min, max]
+        // per parameter. It applies at the pruning's reference segment, so a
+        // leaf reported at the midpoint can lie outside it (outside_prior).
+        std::vector<double> limits;
+        for (const auto& limit : chunk.cfg.get_param_limits()) {
+            limits.push_back(limit.min);
+            limits.push_back(limit.max);
+        }
+        chunk_group
+            .createDataSet("param_limits",
+                           HighFive::DataSpace({limits.size() / 2, 2}),
+                           HighFive::create_datatype<double>())
+            .write_raw(limits.data());
     }
     main_h5.createAttribute("total_pruning_gflops", 0.0);
 }
@@ -85,10 +110,12 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                        float min_pd,
                        std::string_view poly_basis,
                        float ref_ducy,
-                       float total_runtime) {
+                       float total_runtime,
+                       bool copy_rfi_config) {
     initialize_ep_results(result_file, chunk_cfgs, base_cfg, min_pd, poly_basis,
                           ref_ducy, total_runtime, "cpu");
-    HighFive::File main_h5(result_file.string(), HighFive::File::ReadWrite);
+    HighFive::File main_h5 = io::detail::open_result_file(
+        result_file.string(), HighFive::File::ReadWrite);
     double accumulated_flops = 0.0;
     for (SizeType i = 0; i < chunk_cfgs.size(); ++i) {
         const auto& chunk              = chunk_cfgs[i];
@@ -101,6 +128,15 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
         if (std::filesystem::exists(chunk_result_file)) {
             HighFive::File const chunk_h5(chunk_result_file.string(),
                                           HighFive::File::ReadOnly);
+            // The chunk's RFI control, with its own harvest scheme.
+            if (copy_rfi_config && chunk_h5.exist("rfi_config")) {
+                if (H5Ocopy(chunk_h5.getId(), "rfi_config", chunk_group.getId(),
+                            "rfi_config", H5P_DEFAULT, H5P_DEFAULT) < 0) {
+                    throw std::runtime_error(fmt::format(
+                        "EPFreqSweep: failed to copy rfi_config for chunk {}",
+                        i));
+                }
+            }
             if (chunk_h5.exist("runs")) {
                 HighFive::Group const chunk_runs = chunk_h5.getGroup("runs");
                 HighFive::Group const dst_runs =
@@ -126,6 +162,9 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
         }
     }
 
+    if (copy_rfi_config) {
+        search::write_harvested(main_h5);
+    }
     main_h5.getAttribute("total_pruning_gflops").write(accumulated_flops);
     main_h5.getAttribute("complete").write(1);
     return accumulated_flops;
@@ -137,12 +176,39 @@ EPSweepWriter::EPSweepWriter(
     const search::PulsarSearchConfig& cfg,
     float min_pd,
     std::string_view poly_basis,
-    float ref_ducy)
+    float ref_ducy,
+    std::optional<search::detail::LeafReductionSpec> reduction,
+    std::span<const algorithms::PruneRFIConfig> rfi_configs)
     : m_file(result_file),
       m_partial_file(std::filesystem::path(result_file) += ".partial"),
       m_nchunks(chunks.size()) {
+    if (reduction) {
+        for (const auto& chunk : chunks) {
+            auto spec  = *reduction;
+            spec.nbins = static_cast<std::uint32_t>(chunk.cfg.get_nbins());
+            m_reductions.push_back(spec);
+        }
+    }
     initialize_ep_results(m_partial_file, chunks, cfg, min_pd, poly_basis,
                           ref_ducy, 0.0F, "cuda");
+    if (!rfi_configs.empty()) {
+        if (rfi_configs.size() != chunks.size()) {
+            throw std::invalid_argument(
+                "EP writer: one RFI configuration per chunk is required");
+        }
+        m_rfi_active = rfi_configs.front().is_active();
+    }
+    if (m_rfi_active) {
+        // The chunk's RFI control, with its own harvest scheme, as the CPU
+        // sweep's merge copies it.
+        HighFive::File file = io::detail::open_result_file(
+            m_partial_file.string(), HighFive::File::ReadWrite);
+        for (SizeType i = 0; i < chunks.size(); ++i) {
+            auto rfi = file.createGroup(
+                fmt::format("chunks/chunk_{:04d}/rfi_config", i));
+            search::write_rfi_config(rfi, rfi_configs[i]);
+        }
+    }
     m_thread = std::thread([this] { run(); });
 }
 
@@ -154,6 +220,10 @@ EPSweepWriter::~EPSweepWriter() {
     m_ready.notify_all();
     if (m_thread.joinable()) {
         m_thread.join();
+    }
+    if (!m_published) {
+        std::error_code error;
+        std::filesystem::remove(m_partial_file, error);
     }
 }
 
@@ -190,13 +260,24 @@ void EPSweepWriter::run() {
             search::PruneResultWriter writer(
                 m_partial_file, search::PruneResultWriter::Mode::kAppend,
                 fmt::format("chunks/chunk_{:04d}", payload.chunk_id));
-            writer.write_run_results(payload.run_name, payload.snail_scheme,
-                                     {std::span<double>(payload.leaves), {}},
-                                     {std::span<float>(payload.scores), {}},
-                                     {std::span<float>(payload.scores_ep), {}},
-                                     payload.gflops, payload.scores.size(),
-                                     payload.nparams, payload.stats,
-                                     payload.widths);
+            writer.write_run_results(
+                payload.run_name, payload.snail_scheme,
+                {std::span<double>(payload.leaves), {}},
+                {std::span<float>(payload.scores), {}},
+                {std::span<float>(payload.scores_ep), {}}, payload.gflops,
+                payload.scores.size(), payload.nparams, payload.stats,
+                payload.widths,
+                m_reductions.empty() ? nullptr
+                                     : &m_reductions[payload.chunk_id]);
+            std::visit(
+                [&]<typename H>(const H& harvest) {
+                    if constexpr (!std::is_same_v<H, std::monostate>) {
+                        writer.write_run_harvest(payload.run_name, harvest,
+                                                 payload.nparams,
+                                                 payload.n_harvested_total);
+                    }
+                },
+                payload.harvest);
             m_gflops += payload.gflops;
         }
     } catch (...) {
@@ -225,12 +306,17 @@ double EPSweepWriter::finish(float runtime) {
         std::rethrow_exception(m_error);
     }
     {
-        HighFive::File file(m_partial_file.string(), HighFive::File::ReadWrite);
+        HighFive::File file = io::detail::open_result_file(
+            m_partial_file.string(), HighFive::File::ReadWrite);
         file.getAttribute("total_runtime").write(runtime);
         file.getAttribute("total_pruning_gflops").write(m_gflops);
+        if (m_rfi_active) {
+            search::write_harvested(file);
+        }
         file.getAttribute("complete").write(1);
     }
     std::filesystem::rename(m_partial_file, m_file);
+    m_published = true;
     return m_gflops;
 }
 

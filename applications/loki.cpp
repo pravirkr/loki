@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstddef>
@@ -29,6 +30,10 @@
 #include <spdlog/sinks/ansicolor_sink.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
+#if __has_include(<sys/resource.h>)
+#include <sys/resource.h>
+#define LOKI_CLI_HAS_RUSAGE 1
+#endif
 
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/regions.hpp"
@@ -39,11 +44,13 @@
 #include "loki/common/types.hpp"
 #include "loki/io/candidate_file.hpp"
 #include "loki/io/preprocess.hpp"
+#include "loki/io/sift.hpp"
 #include "loki/io/timeseries.hpp"
 #include "loki/pipelines/ep_freq_sweep.hpp"
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/search/provenance.hpp"
+#include "loki/search/refold.hpp"
 #include "loki/simulation/configs.hpp"
 #include "loki/simulation/modulate.hpp"
 #include "loki/simulation/pulse.hpp"
@@ -138,7 +145,8 @@ void configure_output(const OutputOptions& opts,
 
 /// Records how @p result_file was produced: the effective config (after
 /// defaults and command-line overrides, with the sample count and interval
-/// the search read from its input), the command line and the version.
+/// the search read from its input), the command line, the version, and the
+/// raw TOML text where not yet stored.
 template <typename TomlConfig>
 void record_provenance(const std::filesystem::path& result_file,
                        TomlConfig cfg,
@@ -151,24 +159,43 @@ void record_provenance(const std::filesystem::path& result_file,
     cfg.nsamps = nsamps;
     cfg.tsamp  = tsamp;
     loki::search::write_run_provenance(
-        result_file, {
-                         .config_effective = cfg.to_toml_string(),
-                         .command_line     = run_command_line(),
-                         .loki_version     = LOKI_VERSION,
-                     });
-    if (!config_toml.empty()) {
-        HighFive::File file(result_file.string(), HighFive::File::ReadWrite);
-        const std::string text(config_toml);
-        if (!file.hasAttribute("config_toml")) {
-            file.createAttribute("config_toml", text);
-        }
-        if (file.exist("search")) {
-            auto search = file.getGroup("search");
-            if (!search.hasAttribute("config_toml")) {
-                search.createAttribute("config_toml", text);
+        result_file, {.config_effective     = cfg.to_toml_string(),
+                      .command_line         = run_command_line(),
+                      .loki_version         = LOKI_VERSION,
+                      .config_toml          = std::string(config_toml),
+                      .publish_command_line = {}});
+}
+
+/// Runs @p execute, a search that keeps `<spool>` when its post-processing
+/// fails. If it fails after keeping a new spool, records the provenance of
+/// the search there (as record_provenance) so `loki publish` can recover the
+/// configuration, then rethrows the original error.
+template <typename TomlConfig, typename Execute>
+void execute_recording_spool(Execute&& execute,
+                             const std::filesystem::path& spool,
+                             const TomlConfig& cfg,
+                             loki::SizeType nsamps,
+                             double tsamp,
+                             std::string_view config_toml = {}) {
+    std::error_code error;
+    const auto before =
+        std::filesystem::exists(spool, error)
+            ? std::optional(std::filesystem::last_write_time(spool, error))
+            : std::nullopt;
+    try {
+        std::forward<Execute>(execute)();
+    } catch (...) {
+        try {
+            if (std::filesystem::exists(spool, error) &&
+                (!before ||
+                 std::filesystem::last_write_time(spool, error) != *before)) {
+                record_provenance(spool, cfg, nsamps, tsamp, config_toml);
             }
+        } catch (const std::exception& e) {
+            spdlog::warn("could not record the configuration in '{}': {}",
+                         spool.string(), e.what());
         }
-        file.flush();
+        throw;
     }
 }
 
@@ -292,7 +319,82 @@ loki::Exec search_exec(const loki::search::FFATomlConfig& cfg) {
 struct SearchTimeSeries {
     loki::io::TimeSeries ts;
     std::optional<loki::io::PreprocessReport> report;
+    double load_s{};       ///< Wall time to read the series.
+    double preprocess_s{}; ///< Wall time to preprocess it.
 };
+
+using SteadyClock = std::chrono::steady_clock;
+
+double seconds_since(SteadyClock::time_point start) {
+    return std::chrono::duration<double>(SteadyClock::now() - start).count();
+}
+
+/// Peak resident set size of this process in GB (2^30 bytes), the quantity a
+/// batch scheduler's memory limit applies to.
+std::optional<double> peak_rss_gb() {
+#ifdef LOKI_CLI_HAS_RUSAGE
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+#ifdef __APPLE__
+        // ru_maxrss is in bytes on macOS / BSD, KiB on Linux.
+        return static_cast<double>(usage.ru_maxrss) /
+               (1024.0 * 1024.0 * 1024.0);
+#else
+        return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+#endif
+    }
+#endif
+    return std::nullopt;
+}
+
+/// Writes /run_stats (timings, peak RSS, overloads). Never fails the run.
+void record_run_stats(const std::filesystem::path& result_file,
+                      loki::search::RunStats stats) {
+    if (!std::filesystem::exists(result_file)) {
+        return;
+    }
+    stats.peak_rss_gb = peak_rss_gb();
+    try {
+        loki::search::write_run_stats(result_file, stats);
+    } catch (const std::exception& ex) {
+        SPDLOG_WARN("Could not record run statistics in {}: {}",
+                    result_file.string(), ex.what());
+        return;
+    }
+    std::string text;
+    for (const auto& [stage, seconds] : stats.timing_s) {
+        text += fmt::format("{}{} {:.1f} s", text.empty() ? "" : ", ", stage,
+                            seconds);
+    }
+    SPDLOG_INFO("Run statistics: {}{}", text,
+                stats.peak_rss_gb
+                    ? fmt::format(", peak RSS {:.2f} GB", *stats.peak_rss_gb)
+                    : std::string());
+}
+
+/// The zap self-check per band; a noise zap that left a coherent residual
+/// (or overfilled) warns.
+void log_zap_bands(const loki::io::PreprocessReport& rep,
+                   loki::io::ZapMode mode) {
+    // 0.1, or three standard errors of a mean of n Exp(1) powers.
+    constexpr loki::SizeType kMinBins = 64;
+    for (const auto& b : rep.zap_bands) {
+        const double tolerance =
+            std::max(0.1, 3.0 / std::sqrt(static_cast<double>(b.n_zapped)));
+        const bool off = mode == loki::io::ZapMode::kNoise &&
+                         b.n_zapped >= kMinBins &&
+                         std::abs(b.power_ratio - 1.0) > tolerance;
+        if (off) {
+            SPDLOG_WARN("Zap self-check: {:.0f}-{:.0f} Hz, {} bins, zapped / "
+                        "other power = {:.3f} (expected 1)",
+                        b.f_lo, b.f_hi, b.n_zapped, b.power_ratio);
+        } else {
+            SPDLOG_INFO("Zap self-check: {:.0f}-{:.0f} Hz, {} bins, zapped / "
+                        "other power = {:.3f}",
+                        b.f_lo, b.f_hi, b.n_zapped, b.power_ratio);
+        }
+    }
+}
 
 /// Reads the raw timeseries of a search from [input] (or -i) and builds the
 /// folding inputs as [preprocessing] asks, on the search's backend.
@@ -316,9 +418,11 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
     read_opts.preprocess = false;
     read_opts.nthreads   = nthreads;
     SPDLOG_INFO("Loading timeseries from: {}", ts_path.string());
+    const auto load_start = SteadyClock::now();
     SearchTimeSeries out{.ts = loki::io::TimeSeries::read(ts_path, read_opts),
                          .report = std::nullopt};
-    auto& ts = out.ts;
+    out.load_s = seconds_since(load_start);
+    auto& ts   = out.ts;
     SPDLOG_INFO(
         "Loaded timeseries: nsamps = {}, dt = {:.6e} s, tobs = {:.2f} s",
         ts.get_nsamps(), ts.get_dt(), ts.get_tobs());
@@ -329,9 +433,11 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
     const bool robust  = options.method == loki::io::PreprocessMethod::kRobust;
     // GPU searches preprocess on their device; the CPU thread count serves
     // the options the GPU runs on the host (z-score, spectral zap).
-    exec.nthreads   = nthreads;
-    const auto rep  = ts.preprocess(options, exec);
-    const double dt = ts.get_dt();
+    exec.nthreads               = nthreads;
+    const auto preprocess_start = SteadyClock::now();
+    const auto rep              = ts.preprocess(options, exec);
+    out.preprocess_s            = seconds_since(preprocess_start);
+    const double dt             = ts.get_dt();
     if (robust) {
         SPDLOG_INFO(
             "Preprocessing (robust): baseline window = {:.3f} s, variance "
@@ -343,6 +449,7 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
                 static_cast<double>(rep.nsamps),
             rep.n_clipped, rep.n_zapped,
             static_cast<double>(rep.longest_masked_run) * dt);
+        log_zap_bands(rep, options.zap_mode);
     } else {
         SPDLOG_INFO("Preprocessing (zscore): baseline window = {:.3f} s",
                     static_cast<double>(rep.baseline_window) * dt);
@@ -469,8 +576,9 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
             }
         });
     }
-    auto loaded = load_search_timeseries(toml_cfg, exec);
-    auto& ts    = loaded.ts;
+    const auto run_start = SteadyClock::now();
+    auto loaded          = load_search_timeseries(toml_cfg, exec);
+    auto& ts             = loaded.ts;
     if (device_init.joinable()) {
         device_init.join();
     }
@@ -501,15 +609,31 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     if (toml_cfg.observation.barycentric) {
         observation.barycentric = toml_cfg.observation.barycentric;
     }
+    const auto plan_start = SteadyClock::now();
     loki::pipelines::FFAFreqSweep sweep(ffa_cfg, toml_cfg.candidates,
                                         /*show_progress=*/true, exec);
-    sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                  ts.get_ts_v().first(actual_nsamps), outdir_path,
-                  toml_cfg.prefix, config_toml, observation);
+    const double plan_s     = seconds_since(plan_start);
+    const auto search_start = SteadyClock::now();
+    execute_recording_spool(
+        [&] {
+            sweep.execute(ts.get_ts_e().first(actual_nsamps),
+                          ts.get_ts_v().first(actual_nsamps), outdir_path,
+                          toml_cfg.prefix, config_toml, observation);
+        },
+        outdir_path / fmt::format("{}_ffa_spool.h5", toml_cfg.prefix), toml_cfg,
+        actual_nsamps, ts.get_dt());
+    const double search_s = seconds_since(search_start);
 
     const auto result_file =
         outdir_path / fmt::format("{}_ffa_results.h5", toml_cfg.prefix);
     record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt());
+    record_run_stats(result_file,
+                     {.timing_s    = {{"load", loaded.load_s},
+                                      {"preprocess", loaded.preprocess_s},
+                                      {"plan", plan_s},
+                                      {"search_and_postprocess", search_s},
+                                      {"total", seconds_since(run_start)}},
+                      .peak_rss_gb = std::nullopt});
     SPDLOG_INFO("FFA search complete. Inspecting results in {}",
                 result_file.string());
 
@@ -709,6 +833,34 @@ ep_candidate_planning_config(const loki::search::EPTomlConfig& config,
     return cfg;
 }
 
+/// `--pulsar-mask F_LO:F_HI` values as [f_lo, f_hi] windows.
+std::vector<std::array<double, 2>>
+parse_pulsar_mask(const std::vector<std::string>& values) {
+    std::vector<std::array<double, 2>> windows;
+    for (const auto& value : values) {
+        const auto colon = value.find(':');
+        try {
+            if (colon == std::string::npos) {
+                throw std::invalid_argument("missing ':'");
+            }
+            std::size_t used_lo = 0;
+            std::size_t used_hi = 0;
+            const auto lo_text  = value.substr(0, colon);
+            const auto hi_text  = value.substr(colon + 1);
+            const double f_lo   = std::stod(lo_text, &used_lo);
+            const double f_hi   = std::stod(hi_text, &used_hi);
+            if (used_lo != lo_text.size() || used_hi != hi_text.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+            windows.push_back({f_lo, f_hi});
+        } catch (const std::exception&) {
+            throw std::invalid_argument(fmt::format(
+                "--pulsar-mask expects F_LO:F_HI in Hz (got '{}')", value));
+        }
+    }
+    return windows;
+}
+
 /// Plans the EP chunks of @p cfg (or loads them from @p cache_path, writing
 /// the cache when it does not exist) and prints them. No sweep is built.
 void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
@@ -727,7 +879,8 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
     if (cfg.get_use_fourier()) {
         const loki::algorithms::EPRegionPlanner<loki::ComplexType> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            load_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+            load_path, toml_cfg.prune_rfi_config(), n_workers, toml_cfg.n_runs,
+            toml_cfg.ref_segs, exec);
         if (force_replan && cache_path.has_value()) {
             planner.save_cache(*cache_path);
         }
@@ -735,7 +888,8 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
     } else {
         const loki::algorithms::EPRegionPlanner<float> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            load_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+            load_path, toml_cfg.prune_rfi_config(), n_workers, toml_cfg.n_runs,
+            toml_cfg.ref_segs, exec);
         if (force_replan && cache_path.has_value()) {
             planner.save_cache(*cache_path);
         }
@@ -744,16 +898,27 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
 }
 
 /// `search ep --plan-only`: plans the chunks, writes the plan cache and prints
-/// the plan. No timeseries is read, so the sample count comes from the config.
+/// the plan. No samples are read: the sample count and interval come from
+/// [input] nsamps and tsamp (--nsamps, --tsamp) when both are set, else from
+/// the header of the input timeseries.
 int run_plan_ep(loki::search::EPTomlConfig toml_cfg,
                 bool clamp_default_runs = false) {
     check_frequency_range(toml_cfg);
+    toml_cfg.check_rfi_backend();
     const loki::Exec exec = search_exec(toml_cfg);
+    if ((!toml_cfg.nsamps.has_value() || !toml_cfg.tsamp.has_value()) &&
+        !toml_cfg.timeseries_path.empty() &&
+        std::filesystem::exists(toml_cfg.timeseries_path)) {
+        const auto dims = dry_run_dims(toml_cfg);
+        toml_cfg.nsamps = dims.nsamps;
+        toml_cfg.tsamp  = dims.tsamp;
+    }
     if (!toml_cfg.nsamps.has_value() || !toml_cfg.tsamp.has_value()) {
         throw std::invalid_argument(
-            "--plan-only needs the sample count and interval: set [input] "
-            "nsamps and tsamp, or pass --nsamps and --tsamp (the plan depends "
-            "on nsamps)");
+            "--plan-only needs the sample count and interval: pass an input "
+            "timeseries (-i, its header is read), set [input] nsamps and "
+            "tsamp, or pass --nsamps and --tsamp (the plan depends on "
+            "nsamps)");
     }
     const auto cfg =
         toml_cfg.to_ep_search_config(*toml_cfg.nsamps, *toml_cfg.tsamp);
@@ -915,6 +1080,22 @@ void print_ep_summary(const std::filesystem::path& result_file) {
             rows.emplace_back("Top candidate",
                               "none: the pruning wrote no leaves");
         }
+        // Early-harvested sources are not in the candidate tables.
+        if (h5.exist("harvested/snr")) {
+            std::vector<float> h_snr;
+            h5.getDataSet("harvested/snr").read(h_snr);
+            if (!h_snr.empty()) {
+                std::vector<double> h_par(n_params);
+                h5.getDataSet("harvested/param_sets")
+                    .select({0, 0}, {1, n_params})
+                    .read_raw(h_par.data());
+                rows.emplace_back(
+                    "Harvested sources",
+                    fmt::format("{} (strongest: f = {:.6f} Hz, partial S/N "
+                                "{:.1f}); see /harvested",
+                                h_snr.size(), h_par.back(), h_snr.front()));
+            }
+        }
         loki::cli::Console::get().summary("Search Summary", rows);
         SPDLOG_INFO("Saved HDF5 results to: {}", result_file.string());
     } catch (const std::exception& e) {
@@ -941,7 +1122,8 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
         try {
             const loki::algorithms::EPRegionPlanner<FoldType> cached(
                 cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-                path, {}, workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+                path, toml_cfg.prune_rfi_config(), workers, toml_cfg.n_runs,
+                toml_cfg.ref_segs, exec);
             return path;
         } catch (const std::exception& error) {
             SPDLOG_WARN("EP plan cache '{}' is stale, replanning: {}",
@@ -950,7 +1132,8 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
     }
     const loki::algorithms::EPRegionPlanner<FoldType> fresh(
         cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-        std::nullopt, {}, workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+        std::nullopt, toml_cfg.prune_rfi_config(), workers, toml_cfg.n_runs,
+        toml_cfg.ref_segs, exec);
     fresh.save_cache(path);
     return path;
 }
@@ -966,11 +1149,48 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
 }
 
 /// `search ep`: runs the EP sweep over the timeseries and prints a summary.
+/// Stage timings of an EP run. The sweep records its own runtime
+/// (`total_runtime`); the rest of execute() is candidate postprocessing.
+loki::search::RunStats ep_run_stats(const std::filesystem::path& result_file,
+                                    const SearchTimeSeries& loaded,
+                                    double plan_s,
+                                    double execute_s,
+                                    double total_s) {
+    loki::search::RunStats stats;
+    stats.timing_s  = {{"load", loaded.load_s},
+                       {"preprocess", loaded.preprocess_s},
+                       {"plan", plan_s}};
+    double search_s = -1.0;
+    try {
+        if (std::filesystem::exists(result_file)) {
+            const HighFive::File h5(result_file.string(),
+                                    HighFive::File::ReadOnly);
+            if (h5.hasAttribute("total_runtime")) {
+                float runtime = 0.0F;
+                h5.getAttribute("total_runtime").read(runtime);
+                search_s = runtime;
+            }
+        }
+        // NOLINTNEXTLINE(bugprone-empty-catch): /run_stats is optional; fall back to combined timing
+    } catch (const std::exception&) {
+    }
+    if (search_s >= 0.0 && search_s <= execute_s) {
+        stats.timing_s.emplace_back("search", search_s);
+        stats.timing_s.emplace_back("postprocess", execute_s - search_s);
+    } else {
+        stats.timing_s.emplace_back("search_and_postprocess", execute_s);
+    }
+    stats.timing_s.emplace_back("total", total_s);
+    return stats;
+}
+
 int run_search_ep(loki::search::EPTomlConfig toml_cfg,
                   std::string_view config_toml,
                   bool dry_run,
                   bool clamp_default_runs = false) {
     check_frequency_range(toml_cfg);
+    // Before any data is read, in a dry run too.
+    toml_cfg.check_rfi_backend();
     const loki::Exec exec = search_exec(toml_cfg);
     if (dry_run) {
         const auto dims = dry_run_dims(toml_cfg);
@@ -990,6 +1210,7 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
         return 0;
     }
 
+    const auto run_start               = SteadyClock::now();
     auto loaded                        = load_search_timeseries(toml_cfg, exec);
     auto& ts                           = loaded.ts;
     const loki::SizeType actual_nsamps = ts.get_nsamps();
@@ -1014,18 +1235,20 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
                     loki::to_string(exec.backend), exec.device);
     }
 
-    const auto cache = prepare_ep_plan_cache(toml_cfg, ep_cfg, exec);
+    const auto plan_start = SteadyClock::now();
+    const auto cache      = prepare_ep_plan_cache(toml_cfg, ep_cfg, exec);
     const bool common_candidates =
         toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor";
-    auto sweep = common_candidates
-                     ? loki::pipelines::EPFreqSweep(
-                           ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
-                           toml_cfg.poly_basis, toml_cfg.ref_ducy, {}, cache,
-                           toml_cfg.n_runs, toml_cfg.ref_segs, exec)
-                     : loki::pipelines::EPFreqSweep(
-                           ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
-                           toml_cfg.ref_ducy, {}, cache, toml_cfg.n_runs,
-                           toml_cfg.ref_segs, exec);
+    const auto rfi_config = toml_cfg.prune_rfi_config();
+    auto sweep            = common_candidates
+                                ? loki::pipelines::EPFreqSweep(
+                                      ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
+                                      toml_cfg.poly_basis, toml_cfg.ref_ducy, rfi_config,
+                                      cache, toml_cfg.n_runs, toml_cfg.ref_segs, exec)
+                                : loki::pipelines::EPFreqSweep(
+                                      ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
+                                      toml_cfg.ref_ducy, rfi_config, cache,
+                                      toml_cfg.n_runs, toml_cfg.ref_segs, exec);
     if (toml_cfg.candidates.enabled && !common_candidates) {
         SPDLOG_WARN("Common EP candidates currently support polynomial Taylor "
                     "only; writing run diagnostics");
@@ -1040,14 +1263,25 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     if (toml_cfg.observation.barycentric) {
         observation.barycentric = toml_cfg.observation.barycentric;
     }
-    sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                  ts.get_ts_v().first(actual_nsamps), outdir_path,
-                  toml_cfg.prefix, observation);
+    const double plan_s     = seconds_since(plan_start);
+    const auto search_start = SteadyClock::now();
+    execute_recording_spool(
+        [&] {
+            sweep.execute(ts.get_ts_e().first(actual_nsamps),
+                          ts.get_ts_v().first(actual_nsamps), outdir_path,
+                          toml_cfg.prefix, observation);
+        },
+        outdir_path / fmt::format("{}_ep_spool.h5", toml_cfg.prefix), toml_cfg,
+        actual_nsamps, ts.get_dt(), config_toml);
+    const double execute_s = seconds_since(search_start);
 
     const auto result_file =
         outdir_path / fmt::format("{}_ep_results.h5", toml_cfg.prefix);
     record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt(),
                       config_toml);
+    record_run_stats(result_file,
+                     ep_run_stats(result_file, loaded, plan_s, execute_s,
+                                  seconds_since(run_start)));
     print_ep_summary(result_file);
     return 0;
 }
@@ -1209,10 +1443,31 @@ std::string inspect_json(const loki::io::CandidateFileSummary& s,
                                   json_number(row.params[p]));
         }
         rows += fmt::format(
-            "{}\n    {{\"rank\": {}, \"row\": {}, \"snr\": {}, \"params\": "
-            "{{{}}}, \"width\": {}, \"nbins\": {}, \"source\": {}}}",
-            i == 0 ? "" : ",", i + 1, row.row, json_number(row.snr), params,
-            row.width, row.nbins, json_string(row.source));
+            "{}\n    {{\"rank\": {}, \"row\": {}, \"id\": {}, \"snr\": {}, "
+            "\"params\": {{{}}}, \"width\": {}, \"nbins\": {}, "
+            "\"source\": {}}}",
+            i == 0 ? "" : ",", i + 1, row.row, row.id, json_number(row.snr),
+            params, row.width, row.nbins, json_string(row.source));
+    }
+    if (s.n_harvested_sources > 0) {
+        std::string harvested;
+        for (std::size_t i = 0; i < s.harvested.size(); ++i) {
+            const auto& row = s.harvested[i];
+            std::string params;
+            for (std::size_t p = 0; p < row.params.size(); ++p) {
+                params += fmt::format("{}{}: {}", p == 0 ? "" : ", ",
+                                      json_string(s.param_names[p]),
+                                      json_number(row.params[p]));
+            }
+            harvested += fmt::format(
+                "{}\n    {{\"rank\": {}, \"partial_snr\": {}, \"params\": "
+                "{{{}}}, \"source\": {}}}",
+                i == 0 ? "" : ",", i + 1, json_number(row.snr), params,
+                json_string(row.source));
+        }
+        field("n_harvested_sources", fmt::format("{}", s.n_harvested_sources));
+        field("harvested",
+              harvested.empty() ? "[]" : "[" + harvested + "\n  ]");
     }
     field("top_candidates", rows.empty() ? "[]" : "[" + rows + "\n  ]",
           !with_profile);
@@ -1401,6 +1656,29 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
         }
     }
 
+    if (s.n_harvested_sources > 0) {
+        out += "\n" +
+               con.heading(fmt::format(
+                   "Harvested sources ({} of {}; partial S/N at the harvest "
+                   "level)",
+                   s.harvested.size(), s.n_harvested_sources)) +
+               "\n";
+        for (std::size_t i = 0; i < s.harvested.size(); ++i) {
+            const auto& row = s.harvested[i];
+            std::string params;
+            for (std::size_t p = 0; p < row.params.size(); ++p) {
+                params +=
+                    fmt::format("{}{} {}", p == 0 ? "" : ", ",
+                                param_label(s.param_names[p]),
+                                format_param(s.param_names[p], row.params[p]));
+            }
+            out += fmt::format("  {:>3}  {}  {}  {}\n",
+                               con.muted(fmt::format("{}", i + 1)),
+                               con.score(fmt::format("{:6.2f}", row.snr)),
+                               params, con.muted(row.source));
+        }
+    }
+
     if (with_profile) {
         out += "\n" + con.heading("Folded profile (top candidate)") + "\n";
         if (!s.top_profile) {
@@ -1447,6 +1725,928 @@ int run_inspect(const std::filesystem::path& path,
     const auto summary = loki::io::read_candidate_file_summary(path, top_n);
     loki::cli::Console::print(json ? inspect_json(summary, with_profile)
                                    : inspect_text(summary, with_profile));
+    return 0;
+}
+
+/// `loki refold` inputs.
+struct RefoldCli {
+    std::filesystem::path series;
+    std::filesystem::path result;
+    std::vector<std::uint64_t> ids;
+    std::size_t top{0};
+    std::filesystem::path config;
+    std::vector<double> freqs;
+    std::optional<double> fd;
+    std::optional<double> acc;
+    std::optional<double> fdd;
+    std::optional<double> jerk;
+    double snap{0.0};
+    double crackle{0.0};
+    bool circular{false};
+    bool no_preprocess{false};
+    bool json{false};
+    bool profile{false};
+    int threads{0};
+    loki::search::RefoldOptions options;
+};
+
+/// One thing to refold and where it came from.
+struct RefoldItem {
+    std::string label;
+    loki::search::RefoldTarget target;
+    std::optional<loki::io::CandidateRow> candidate;
+};
+
+/// Preprocessing of a refold: the search configuration's (a result file's
+/// config_effective, or -c), else the defaults.
+struct RefoldSetup {
+    bool preprocess{true};
+    loki::io::PreprocessOptions options;
+    double propagator_significance{2.0};
+    std::string source{"defaults"};
+};
+
+/// @p algorithm "ep" or "ffa" reads the configuration as that search's;
+/// empty tries EP, then FFA.
+RefoldSetup refold_setup(const std::optional<std::string>& text,
+                         std::string source,
+                         std::string_view algorithm) {
+    RefoldSetup setup;
+    if (!text || text->empty()) {
+        return setup;
+    }
+    std::string error;
+    if (algorithm != "ffa") {
+        try {
+            const auto cfg   = loki::search::EPTomlConfig::from_string(*text);
+            setup.preprocess = cfg.preprocess;
+            setup.options    = cfg.to_preprocess_options();
+            setup.propagator_significance = cfg.propagator_significance;
+            setup.source                  = std::move(source);
+            return setup;
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    }
+    if (algorithm != "ep") {
+        try {
+            const auto cfg   = loki::search::FFATomlConfig::from_string(*text);
+            setup.preprocess = cfg.preprocess;
+            setup.options    = cfg.to_preprocess_options();
+            setup.source     = std::move(source);
+            return setup;
+        } catch (const std::exception& e) {
+            if (error.empty()) {
+                error = e.what();
+            }
+        }
+    }
+    throw std::invalid_argument(fmt::format(
+        "cannot read the search configuration ({}): {}\nPass the search's "
+        "configuration, updated to this version, with -c",
+        source, error));
+}
+
+/// The target of a candidate row: its leaf with the search's model (EP), or
+/// the Taylor polynomial of its native parameters (FFA).
+loki::search::RefoldTarget candidate_target(const loki::io::CandidateRow& row,
+                                            std::size_t nparams,
+                                            double propagator_significance) {
+    if (!row.leaf.empty()) {
+        return {.leaf                    = row.leaf,
+                .n_params                = nparams,
+                .model                   = loki::search::RefoldModel::kLeaf,
+                .propagator_significance = propagator_significance};
+    }
+    // Below five parameters the leaf model is the Taylor polynomial; a
+    // five-parameter leaf may be an orbit, which its values alone do not say.
+    if (nparams >= 5) {
+        throw std::invalid_argument(fmt::format(
+            "the result file does not keep the leaf of candidate {}, needed "
+            "for the five-parameter phase model; refold its parameters with "
+            "--f ... --circular",
+            row.id));
+    }
+    // Native order [..., jerk, accel, freq]; derivatives from accel up.
+    std::vector<double> derivs(row.params.rbegin() + 1, row.params.rend());
+    return loki::search::refold_taylor_target(row.params.back(), derivs);
+}
+
+std::string
+refold_json(const RefoldCli& cli,
+            loki::SizeType nsamps,
+            double tsamp,
+            double t_ref,
+            const RefoldSetup& setup,
+            const std::vector<RefoldItem>& items,
+            const std::vector<loki::search::RefoldResult>& results) {
+    std::string out = "{\n";
+    out += fmt::format("  \"series\": {},\n", json_string(cli.series.string()));
+    out += fmt::format("  \"result_file\": {},\n",
+                       cli.result.empty() ? "null"
+                                          : json_string(cli.result.string()));
+    out +=
+        fmt::format("  \"nsamps\": {},\n  \"tsamp\": {},\n  \"t_ref\": {},\n",
+                    nsamps, json_number(tsamp), json_number(t_ref));
+    out += fmt::format("  \"preprocessing\": {},\n",
+                       json_string(setup.preprocess ? setup.source : "off"));
+    out += "  \"targets\": [\n";
+    const auto list = [](const auto& values) {
+        std::string text = "[";
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            text += fmt::format("{}{}", i == 0 ? "" : ", ",
+                                json_number(static_cast<double>(values[i])));
+        }
+        return text + "]";
+    };
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto& item = items[i];
+        const auto& r    = results[i];
+        const double f   = r.freq + r.df;
+        const double fd  = r.fdot + r.dfd;
+        out += "    {";
+        out += fmt::format("\"label\": {}, ", json_string(item.label));
+        if (item.candidate) {
+            out += fmt::format(
+                "\"id\": {}, \"search_snr\": {}, \"search_nbins\": {}, "
+                "\"search_width\": {}, \"source\": {}, ",
+                item.candidate->id, json_number(item.candidate->snr),
+                item.candidate->nbins, item.candidate->width,
+                json_string(item.candidate->source));
+        }
+        const double accel = f != 0.0 ? -fd / f * 299792458.0 : 0.0;
+        out += fmt::format(
+            "\"model\": {}, \"nbins\": {}, \"freq\": {}, \"fdot\": {}, "
+            "\"snr_in\": {}, \"width_in\": {}, \"snr\": {}, \"width\": {}, "
+            "\"start_bin\": {}, \"f_best\": {}, \"fdot_best\": {}, "
+            "\"accel_best\": {}, \"split_snr\": {}, \"split_start_bin\": {}",
+            json_string(r.model), r.nbins, json_number(r.freq),
+            json_number(r.fdot), json_number(r.snr_in), r.width_in,
+            json_number(r.snr), r.width, r.start_bin, json_number(f),
+            json_number(fd), json_number(accel), list(r.split_snr),
+            list(r.split_start_bin));
+        if (cli.profile) {
+            out += fmt::format(", \"profile\": {}", list(r.profile));
+        }
+        out += i + 1 == items.size() ? "}\n" : "},\n";
+    }
+    return out + "  ]\n}\n";
+}
+
+std::string
+refold_text(const RefoldCli& cli,
+            loki::SizeType nsamps,
+            loki::SizeType nsamps_file,
+            double tsamp,
+            double t_ref,
+            const RefoldSetup& setup,
+            const std::vector<RefoldItem>& items,
+            const std::vector<loki::search::RefoldResult>& results) {
+    const auto& con = loki::cli::Console::get();
+    std::string out = con.heading(fmt::format("Refold of {}",
+                                              cli.series.filename().string())) +
+                      "\n";
+    out += fmt::format(
+        "  {} of {} samples, tsamp {:.6e} s, T {:.2f} s, t_ref {:.3f} s, "
+        "preprocessing: {}, nsub {}\n",
+        nsamps, nsamps_file, tsamp, static_cast<double>(nsamps) * tsamp, t_ref,
+        setup.preprocess ? setup.source : "off", cli.options.nsub);
+    out += con.muted("  S/N: best boxcar (widths 1..nbins/2) of the refold; a "
+                     "rejection test only (noise also refolds near its "
+                     "search S/N)") +
+           "\n\n";
+    out += con.header(fmt::format(
+               "  {:<24} {:>8} {:>13} {:>7} {:>14} {:>11} {:>9} {:>7} {:>7}  "
+               "{}",
+               "target", "model", "f_in", "S/N_in", "f_best", "fd_best",
+               "acc_best", "S/N", "w/nb", "search S/N w/nb")) +
+           "\n";
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto& item        = items[i];
+        const auto& r           = results[i];
+        const double f          = r.freq + r.df;
+        const double fd         = r.fdot + r.dfd;
+        std::string search_cols = "-";
+        if (item.candidate) {
+            search_cols =
+                fmt::format("{:.2f} {}/{}", item.candidate->snr,
+                            item.candidate->width, item.candidate->nbins);
+        }
+        const auto model   = r.model == "taylor"          ? "taylor"
+                             : r.model == "circular_snap" ? "circ_s"
+                                                          : "circ_c";
+        const double accel = f != 0.0 ? -fd / f * 299792458.0 : 0.0;
+        out += fmt::format(
+            "  {:<24} {:>8} {:13.6f} {:7.2f} {:14.7f} {:11.3e} {:9.3f} {} "
+            "{:>7}  {}\n",
+            item.label, model, r.freq, r.snr_in, f, fd, accel,
+            con.score(fmt::format("{:7.2f}", r.snr)),
+            fmt::format("{}/{}", r.width, r.nbins), search_cols);
+        if (!r.split_snr.empty()) {
+            std::string parts;
+            for (std::size_t j = 0; j < r.split_snr.size(); ++j) {
+                parts += fmt::format(" {:.2f}@{}", r.split_snr[j],
+                                     r.split_start_bin[j]);
+            }
+            out += con.muted(fmt::format(
+                       "    split {} (S/N@start bin; full start bin {}, "
+                       "width {}):{}",
+                       r.split_snr.size(), r.start_bin, r.width, parts)) +
+                   "\n";
+        }
+        if (cli.profile) {
+            std::string prof;
+            for (const float x : r.profile) {
+                prof += fmt::format(" {:5.1f}", x);
+            }
+            out += con.muted("    profile:" + prof) + "\n";
+        }
+    }
+    return out;
+}
+
+int run_refold(RefoldCli cli) {
+    const int nthreads = cli.threads > 0 ? cli.threads : omp_get_max_threads();
+    cli.options.nthreads = nthreads;
+
+    // Targets, and the configuration of the search that found them.
+    std::optional<std::string> config_text;
+    std::string config_source;
+    if (!cli.config.empty()) {
+        std::ifstream in(cli.config);
+        if (!in) {
+            throw std::invalid_argument(
+                fmt::format("cannot read {}", cli.config.string()));
+        }
+        config_text   = std::string(std::istreambuf_iterator<char>(in), {});
+        config_source = cli.config.filename().string();
+    }
+    loki::io::CandidateFileSummary summary;
+    std::vector<loki::io::CandidateRow> rows;
+    if (!cli.result.empty()) {
+        for (const auto id : cli.ids) {
+            rows.push_back(
+                loki::io::read_candidate_by_id(cli.result, id, &summary));
+        }
+        if (cli.top > 0) {
+            summary =
+                loki::io::read_candidate_file_summary(cli.result, cli.top);
+            rows.insert(rows.end(), summary.top.begin(), summary.top.end());
+        }
+        if (cli.ids.empty() && cli.top == 0) {
+            throw std::invalid_argument("--result needs --id or --top");
+        }
+        if (!config_text) {
+            config_text   = summary.config_effective ? summary.config_effective
+                                                     : summary.config_toml;
+            config_source = "the result file's configuration";
+        }
+    } else if (!cli.ids.empty() || cli.top > 0) {
+        throw std::invalid_argument("--id and --top need --result");
+    }
+    auto setup = refold_setup(config_text, config_source,
+                              cli.config.empty() ? summary.algorithm : "");
+    if (cli.no_preprocess) {
+        setup.preprocess = false;
+    }
+
+    std::vector<RefoldItem> items;
+    for (const auto& row : rows) {
+        items.push_back(
+            {.label     = fmt::format("id {}", row.id),
+             .target    = candidate_target(row, summary.param_names.size(),
+                                           setup.propagator_significance),
+             .candidate = row});
+    }
+    for (const double f : cli.freqs) {
+        const double accel =
+            cli.acc ? *cli.acc : -cli.fd.value_or(0.0) * 299792458.0 / f;
+        const double jerk =
+            cli.jerk ? *cli.jerk : -cli.fdd.value_or(0.0) * 299792458.0 / f;
+        const std::array<double, 4> derivs{accel, jerk, cli.snap, cli.crackle};
+        items.push_back(
+            {.label     = fmt::format("f {:.6f}", f),
+             .target    = cli.circular
+                              ? loki::search::refold_circular_target(
+                                    f, derivs, setup.propagator_significance)
+                              : loki::search::refold_taylor_target(f, derivs),
+             .candidate = std::nullopt});
+    }
+    if (items.empty()) {
+        throw std::invalid_argument(
+            "nothing to refold: give --f, or --result with --id or --top");
+    }
+
+    // The series, preprocessed as the search did, over the searched span.
+    loki::io::ReadOptions read_opts;
+    read_opts.preprocess = false;
+    read_opts.nthreads   = nthreads;
+    auto ts              = loki::io::TimeSeries::read(cli.series, read_opts);
+    if (setup.preprocess) {
+        static_cast<void>(
+            ts.preprocess(setup.options, loki::Exec::cpu(nthreads)));
+    }
+    const double tsamp = ts.get_dt();
+    auto nsamps        = ts.get_nsamps();
+    double t_ref       = static_cast<double>(nsamps) * tsamp / 2.0;
+    if (!cli.result.empty()) {
+        if (summary.tsamp > 0.0 &&
+            std::abs(summary.tsamp - tsamp) > 1e-9 * tsamp) {
+            throw std::invalid_argument(fmt::format(
+                "the series has tsamp {} s but the result file {} s", tsamp,
+                summary.tsamp));
+        }
+        if (summary.nsamps > nsamps) {
+            throw std::invalid_argument(fmt::format(
+                "the result file searched {} samples but the series has {}",
+                summary.nsamps, nsamps));
+        }
+        if (summary.nsamps > 0) {
+            nsamps = summary.nsamps;
+        }
+        t_ref = summary.reference_time;
+    }
+
+    std::vector<loki::search::RefoldResult> results;
+    results.reserve(items.size());
+    const auto e = std::span<const float>(ts.get_ts_e()).first(nsamps);
+    const auto v = std::span<const float>(ts.get_ts_v()).first(nsamps);
+    for (const auto& item : items) {
+        results.push_back(
+            loki::search::refold(e, v, tsamp, t_ref, item.target, cli.options));
+    }
+    loki::cli::Console::print(
+        cli.json ? refold_json(cli, nsamps, tsamp, t_ref, setup, items, results)
+                 : refold_text(cli, nsamps, ts.get_nsamps(), tsamp, t_ref,
+                               setup, items, results));
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// loki publish
+// ---------------------------------------------------------------------------
+
+struct PublishCli {
+    std::filesystem::path file;
+    std::filesystem::path output;
+    std::filesystem::path config;
+    std::filesystem::path input;
+    bool keep_spool{false};
+    bool force{false}; ///< Replace an existing output.
+    // Candidate options; unset keeps the search's.
+    std::optional<double> memory_gb;
+    std::optional<bool> cluster;
+    std::optional<std::uint64_t> max_candidates;
+    std::optional<std::uint64_t> max_per_cell;
+    std::optional<bool> retain_detections;
+    std::optional<std::string> tempdir;
+    std::optional<double> snr_min;
+    // Observation metadata overrides.
+    std::optional<double> dm;
+    std::optional<double> start_mjd;
+    std::optional<bool> barycentric;
+};
+
+/// What a search left to publish: a spool kept after a failed
+/// post-processing, or the raw file of a `--no-candidates` search.
+struct PublishSource {
+    std::string algorithm; ///< "ffa" or "ep".
+    bool spool{false};     ///< A `*_spool.h5`: removed once published.
+    std::uint64_t nsamps{};
+    double tsamp{};
+    std::optional<std::string> config_effective;
+    std::optional<std::string> config_toml;
+    std::optional<std::string> command_line;
+    /// The options a search that reduced its EP runs used (its first
+    /// reduced run's `reduced_*` attributes; publish must match them).
+    std::optional<loki::search::CandidateOptions> reduced;
+    std::optional<double> reduced_snr_min;
+};
+
+PublishSource read_publish_source(const std::filesystem::path& path) {
+    const HighFive::File file(path.string(), HighFive::File::ReadOnly);
+    if (file.hasAttribute("schema_version")) {
+        throw std::invalid_argument(fmt::format(
+            "'{}' is already a published result file", path.string()));
+    }
+    PublishSource src;
+    if (file.hasAttribute("ffa_version")) {
+        src.algorithm = "ffa";
+    } else if (file.hasAttribute("ep_sweep_version")) {
+        src.algorithm = "ep";
+    } else {
+        throw std::invalid_argument(fmt::format(
+            "'{}' is not a loki FFA or EP search spool", path.string()));
+    }
+    const auto name = path.filename().string();
+    src.spool       = name.ends_with("_spool.h5");
+    const auto text = [&](const char* key) -> std::optional<std::string> {
+        if (!file.hasAttribute(key)) {
+            return std::nullopt;
+        }
+        auto value = file.getAttribute(key).read<std::string>();
+        return value.empty() ? std::nullopt : std::optional(std::move(value));
+    };
+    src.config_effective = text("config_effective");
+    src.config_toml      = text("config_toml");
+    src.command_line     = text("command_line");
+    file.getAttribute("nsamps").read(src.nsamps);
+    file.getAttribute("tsamp").read(src.tsamp);
+    if (src.algorithm == "ep") {
+        if (const auto basis = text("poly_basis");
+            basis && *basis != "taylor") {
+            throw std::invalid_argument(fmt::format(
+                "'{}' is a {} search; candidates support the Taylor basis "
+                "only",
+                path.string(), *basis));
+        }
+        if (!file.exist("chunks")) {
+            return src;
+        }
+        const auto chunks = file.getGroup("chunks");
+        for (const auto& chunk : chunks.listObjectNames()) {
+            const auto group = chunks.getGroup(chunk);
+            if (!group.exist("runs")) {
+                continue;
+            }
+            const auto runs = group.getGroup("runs");
+            for (const auto& run_name : runs.listObjectNames()) {
+                const auto run = runs.getGroup(run_name);
+                if (!run.hasAttribute("reduced_max_per_cell")) {
+                    continue;
+                }
+                const auto f64 = [&](const char* key) {
+                    return run.getAttribute(key).read<double>();
+                };
+                loki::search::CandidateOptions options;
+                options.max_per_cell = run.getAttribute("reduced_max_per_cell")
+                                           .read<std::uint64_t>();
+                options.cell_bins    = f64("reduced_cell_bins");
+                options.cell_log_width  = f64("reduced_cell_log_width");
+                options.dominance_kappa = f64("reduced_dominance_kappa");
+                options.radius          = f64("reduced_radius");
+                options.phase_radius    = f64("reduced_phase_radius");
+                src.reduced             = options;
+                src.reduced_snr_min     = f64("reduced_snr_min");
+                return src;
+            }
+        }
+    }
+    return src;
+}
+
+/// The product of @p cli: `-o`, else the spool's name with `_results.h5`.
+std::filesystem::path publish_output(const PublishCli& cli,
+                                     const PublishSource& src) {
+    auto output = cli.output;
+    if (output.empty()) {
+        const auto name          = cli.file.filename().string();
+        const std::string suffix = fmt::format("_{}_spool.h5", src.algorithm);
+        if (!name.ends_with(suffix)) {
+            throw std::invalid_argument(fmt::format(
+                "pass the result file to write with -o ('{}' is not a "
+                "'*{}')",
+                cli.file.string(), suffix));
+        }
+        output = cli.file.parent_path() /
+                 (name.substr(0, name.size() - suffix.size()) +
+                  fmt::format("_{}_results.h5", src.algorithm));
+    }
+    if (std::filesystem::exists(output)) {
+        std::error_code error;
+        if (std::filesystem::equivalent(output, cli.file, error)) {
+            throw std::invalid_argument("the output is the file to publish");
+        }
+        if (!cli.force) {
+            throw std::invalid_argument(fmt::format(
+                "'{}' already exists; replace it with --force or choose "
+                "another path with -o",
+                output.string()));
+        }
+    }
+    return output;
+}
+
+/// The observation metadata of the searched series, as the search wrote it:
+/// the series header, then the configuration's [input] overrides, then
+/// @p cli's. @p found tells whether the series was found.
+template <typename TomlConfig>
+loki::io::ObservationMetadata publish_observation(const PublishCli& cli,
+                                                  const PublishSource& src,
+                                                  const TomlConfig& cfg,
+                                                  bool& found) {
+    loki::io::ObservationMetadata observation;
+    const std::filesystem::path series =
+        cli.input.empty() ? std::filesystem::path(cfg.timeseries_path)
+                          : cli.input;
+    if (!series.empty() && std::filesystem::exists(series)) {
+        const auto info = loki::io::TimeSeries::read_info(series);
+        if (std::abs(info.dt - src.tsamp) > 1e-9 * src.tsamp ||
+            info.nsamps < src.nsamps) {
+            throw std::invalid_argument(fmt::format(
+                "'{}' ({} samples of {} s) is not the searched series ({} "
+                "samples of {} s); pass that with -i",
+                series.string(), info.nsamps, info.dt, src.nsamps, src.tsamp));
+        }
+        observation = info.observation;
+        found       = true;
+    } else {
+        found = false;
+        SPDLOG_WARN("The searched series{} was not found: the result will "
+                    "lack its observation metadata (source, DM, start MJD); "
+                    "pass it with -i",
+                    series.empty() ? ""
+                                   : fmt::format(" '{}'", series.string()));
+    }
+    const auto set = [](auto& field, const auto& value) {
+        if (value) {
+            field = value;
+        }
+    };
+    set(observation.dm, cfg.observation.dm);
+    set(observation.start_mjd, cfg.observation.start_mjd);
+    set(observation.barycentric, cfg.observation.barycentric);
+    set(observation.dm, cli.dm);
+    set(observation.start_mjd, cli.start_mjd);
+    set(observation.barycentric, cli.barycentric);
+    return observation;
+}
+
+template <typename TomlConfig>
+int publish_as(const PublishCli& cli, const PublishSource& src) {
+    constexpr bool kEp = std::is_same_v<TomlConfig, loki::search::EPTomlConfig>;
+    // The search's configuration: -c, else the one the file stores.
+    std::optional<std::string> text;
+    std::string source;
+    if (!cli.config.empty()) {
+        text   = read_text_file(cli.config);
+        source = cli.config.string();
+    } else if (src.config_effective) {
+        text   = src.config_effective;
+        source = "the stored effective configuration";
+    } else if (src.config_toml) {
+        text   = src.config_toml;
+        source = "the stored configuration";
+    }
+    TomlConfig cfg;
+    if (text) {
+        try {
+            cfg = TomlConfig::from_string(*text);
+        } catch (const std::exception& e) {
+            throw std::invalid_argument(fmt::format(
+                "cannot read the search configuration ({}): {}\nPass the "
+                "search's configuration, updated to this version, with -c",
+                source, e.what()));
+        }
+        SPDLOG_INFO("Candidate options from {}", source);
+    } else {
+        SPDLOG_WARN("'{}' stores no configuration: publishing with the "
+                    "default candidate options (pass the search's with -c)",
+                    cli.file.string());
+    }
+
+    auto options                  = cfg.candidates;
+    options.enabled               = true;
+    std::optional<double> snr_min = cli.snr_min;
+    if (src.reduced && !cli.max_per_cell) {
+        // The search reduced its runs: publish exactly as it did.
+        options.max_per_cell    = src.reduced->max_per_cell;
+        options.cell_bins       = src.reduced->cell_bins;
+        options.cell_log_width  = src.reduced->cell_log_width;
+        options.dominance_kappa = src.reduced->dominance_kappa;
+        options.radius          = src.reduced->radius;
+        options.phase_radius    = src.reduced->phase_radius;
+        if (!snr_min) {
+            snr_min = src.reduced_snr_min;
+        }
+    }
+    if (cli.memory_gb) {
+        options.memory_gb = *cli.memory_gb;
+    }
+    if (cli.cluster) {
+        options.cluster = *cli.cluster;
+    }
+    if (cli.max_candidates) {
+        options.max_candidates = *cli.max_candidates;
+    }
+    if (cli.max_per_cell) {
+        options.max_per_cell = *cli.max_per_cell;
+    }
+    if (cli.retain_detections) {
+        options.retain_detections = *cli.retain_detections;
+    }
+    if (cli.tempdir) {
+        options.temporary_directory = *cli.tempdir;
+    }
+    if (!kEp && cli.snr_min) {
+        throw std::invalid_argument(
+            "--snr-min applies to EP files; an FFA spool keeps the "
+            "search's detections");
+    }
+    const auto output      = publish_output(cli, src);
+    bool series_found      = false;
+    const auto observation = publish_observation(cli, src, cfg, series_found);
+
+    const auto start = SteadyClock::now();
+    if constexpr (kEp) {
+        loki::pipelines::EPFreqSweep::publish_candidates(
+            cli.file, output, options, observation, snr_min);
+    } else {
+        loki::pipelines::FFAFreqSweep::publish_candidates(cli.file, output,
+                                                          options, observation);
+    }
+    const double publish_s = seconds_since(start);
+
+    // Provenance: the search's command line and configuration (with the
+    // options this publish used), and the command that published it.
+    std::string effective;
+    if (text) {
+        cfg.candidates = options;
+        if (snr_min) {
+            cfg.snr_min = *snr_min;
+        }
+        cfg.nsamps = src.nsamps;
+        cfg.tsamp  = src.tsamp;
+        effective  = cfg.to_toml_string();
+    }
+    loki::search::write_run_provenance(
+        output, {.config_effective     = effective,
+                 .command_line         = src.command_line.value_or(""),
+                 .loki_version         = LOKI_VERSION,
+                 .config_toml          = src.config_toml.value_or(""),
+                 .publish_command_line = run_command_line()});
+
+    // Read the product back before the spool goes.
+    const auto summary = loki::io::read_candidate_file_summary(output, 0);
+    if (!summary.complete || summary.schema_version.empty()) {
+        throw std::runtime_error(fmt::format(
+            "the published '{}' did not read back complete; '{}' is kept",
+            output.string(), cli.file.string()));
+    }
+    SPDLOG_INFO("Published {} candidates from '{}' to '{}' in {:.1f} s",
+                summary.n_rows, cli.file.string(), output.string(), publish_s);
+    if (kEp) {
+        print_ep_summary(output);
+    }
+    // A product published without the search's configuration or series
+    // cannot be completed later: keep the spool to publish again.
+    if (src.spool && !cli.keep_spool && (!text || !series_found)) {
+        SPDLOG_WARN("Kept the spool '{}': the result was published without "
+                    "the search's {}; publish again with {} --force for a "
+                    "complete result",
+                    cli.file.string(), text ? "series" : "configuration",
+                    text ? "-i" : "-c");
+    } else if (src.spool && !cli.keep_spool) {
+        std::filesystem::remove(cli.file);
+        SPDLOG_INFO("Removed the spool '{}' (--keep-spool keeps it)",
+                    cli.file.string());
+    }
+    return 0;
+}
+
+int run_publish(const PublishCli& cli) {
+    const auto src = read_publish_source(cli.file);
+    return src.algorithm == "ep"
+               ? publish_as<loki::search::EPTomlConfig>(cli, src)
+               : publish_as<loki::search::FFATomlConfig>(cli, src);
+}
+
+// ---------------------------------------------------------------------------
+// loki sift
+// ---------------------------------------------------------------------------
+
+struct SiftCli {
+    std::vector<std::string> patterns;
+    loki::io::SiftOptions options;
+    std::size_t top{50};
+    std::filesystem::path csv;
+    bool json{false};
+    bool members{false};
+};
+
+/// Whether @p name matches @p pattern ('*' any run, '?' one character).
+bool wildcard_match(std::string_view pattern, std::string_view name) {
+    std::size_t p     = 0;
+    std::size_t n     = 0;
+    std::size_t star  = std::string_view::npos;
+    std::size_t match = 0;
+    while (n < name.size()) {
+        if (p < pattern.size() &&
+            (pattern[p] == '?' || pattern[p] == name[n])) {
+            ++p;
+            ++n;
+        } else if (p < pattern.size() && pattern[p] == '*') {
+            star  = p++;
+            match = n;
+        } else if (star != std::string_view::npos) {
+            p = star + 1;
+            n = ++match;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '*') {
+        ++p;
+    }
+    return p == pattern.size();
+}
+
+/// The files of @p patterns: a path as given, or a quoted pattern with '*'
+/// or '?' in its file name (not in its directories), sorted.
+std::vector<std::filesystem::path>
+expand_patterns(const std::vector<std::string>& patterns) {
+    std::vector<std::filesystem::path> files;
+    for (const auto& pattern : patterns) {
+        const std::filesystem::path path(pattern);
+        const auto name = path.filename().string();
+        if (name.find_first_of("*?") == std::string::npos) {
+            files.push_back(path);
+            continue;
+        }
+        const auto dir = path.parent_path().empty() ? std::filesystem::path(".")
+                                                    : path.parent_path();
+        std::vector<std::filesystem::path> matched;
+        if (std::filesystem::is_directory(dir)) {
+            for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+                if (entry.is_regular_file() &&
+                    wildcard_match(name, entry.path().filename().string())) {
+                    matched.push_back(path.parent_path() /
+                                      entry.path().filename());
+                }
+            }
+        }
+        if (matched.empty()) {
+            throw std::invalid_argument(
+                fmt::format("no file matches '{}'", pattern));
+        }
+        std::ranges::sort(matched);
+        files.insert(files.end(), matched.begin(), matched.end());
+    }
+    return files;
+}
+
+std::string sift_harmonic(const loki::io::SiftGroup& g) {
+    return g.harmonic_of < 0
+               ? std::string()
+               : fmt::format("{}/{} of #{}", g.harmonic_numerator,
+                             g.harmonic_denominator, g.harmonic_of);
+}
+
+std::string sift_segments(const loki::io::SiftGroup& g) {
+    std::string text;
+    for (const auto segment : g.segments) {
+        if (!text.empty()) {
+            text += ' ';
+        }
+        text += std::to_string(segment);
+    }
+    return text;
+}
+
+std::string sift_json(const SiftCli& cli, const loki::io::SiftResult& r) {
+    std::string out = "{\n  \"files\": [";
+    for (std::size_t i = 0; i < r.files.size(); ++i) {
+        const auto& f = r.files[i];
+        out += fmt::format(
+            "{}\n    {{\"path\": {}, \"dm\": {}, \"start_mjd\": {}, "
+            "\"segment\": {}}}",
+            i == 0 ? "" : ",", json_string(f.path.string()),
+            json_optional(f.dm), json_optional(f.start_mjd), f.segment);
+    }
+    out += fmt::format("\n  ],\n  \"n_candidates\": {},\n  \"n_segments\": "
+                       "{},\n  \"groups\": [",
+                       r.n_candidates, r.n_segments);
+    for (std::size_t i = 0; i < r.groups.size(); ++i) {
+        const auto& g = r.groups[i];
+        const auto& b = g.members.front();
+        std::string curve;
+        for (const auto& [dm, snr] : g.dm_curve) {
+            curve += fmt::format("{}[{}, {}]", curve.empty() ? "" : ", ",
+                                 json_number(dm), json_number(snr));
+        }
+        std::string segments;
+        for (const auto s : g.segments) {
+            if (!segments.empty()) {
+                segments += ", ";
+            }
+            segments += std::to_string(s);
+        }
+        out += fmt::format(
+            "{}\n    {{\"index\": {}, \"snr\": {}, \"freq\": {}, \"fdot\": {}, "
+            "\"duty_cycle\": {}, \"file\": {}, \"id\": {}, \"dm\": {}, "
+            "\"n_members\": {}, \"segments\": [{}], \"dm_curve\": [{}], "
+            "\"edge_ratio\": {}, \"extrapolation_bins\": {}, "
+            "\"harmonic_of\": {}, \"harmonic_numerator\": {}, "
+            "\"harmonic_denominator\": {}, \"harmonic_offset_bins\": {}",
+            i == 0 ? "" : ",", i, json_number(b.snr), json_number(b.freq),
+            json_number(b.fdot), json_number(b.duty_cycle), b.file, b.id,
+            json_optional(r.files[b.file].dm), g.members.size(), segments,
+            curve, json_optional(g.edge_ratio),
+            json_optional(g.extrapolation_bins), g.harmonic_of,
+            g.harmonic_numerator, g.harmonic_denominator,
+            json_optional(g.harmonic_offset_bins));
+        if (cli.members) {
+            out += ", \"members\": [";
+            for (std::size_t m = 0; m < g.members.size(); ++m) {
+                const auto& x = g.members[m];
+                out += fmt::format(
+                    "{}{{\"file\": {}, \"id\": {}, \"snr\": {}, \"freq\": {}, "
+                    "\"fdot\": {}}}",
+                    m == 0 ? "" : ", ", x.file, x.id, json_number(x.snr),
+                    json_number(x.freq), json_number(x.fdot));
+            }
+            out += "]";
+        }
+        out += "}";
+    }
+    out += "\n  ]\n}\n";
+    return out;
+}
+
+void write_sift_csv(const std::filesystem::path& path,
+                    const loki::io::SiftResult& r) {
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error(
+            fmt::format("cannot write '{}'", path.string()));
+    }
+    out << "index,snr,freq,fdot,duty_cycle,dm,segment,file,id,n_members,"
+           "n_segments,segments,dm_lo,dm_hi,edge_ratio,extrapolation_bins,"
+           "harmonic_of,harmonic_numerator,harmonic_denominator,"
+           "harmonic_offset_bins,dm_curve\n";
+    const auto opt = [](const std::optional<double>& v) {
+        return v ? fmt::format("{:.17g}", *v) : std::string();
+    };
+    for (std::size_t i = 0; i < r.groups.size(); ++i) {
+        const auto& g = r.groups[i];
+        const auto& b = g.members.front();
+        std::string curve;
+        for (const auto& [dm, snr] : g.dm_curve) {
+            curve +=
+                fmt::format("{}{:g}:{:.2f}", curve.empty() ? "" : " ", dm, snr);
+        }
+        out << fmt::format(
+            "{},{:.9g},{:.17g},{:.17g},{:.6g},{},{},\"{}\",{},{},{},{},{},{},"
+            "{},{},{},{},{},{},{}\n",
+            i, b.snr, b.freq, b.fdot, b.duty_cycle, opt(r.files[b.file].dm),
+            r.files[b.file].segment, r.files[b.file].path.string(), b.id,
+            g.members.size(), g.segments.size(), sift_segments(g),
+            g.dm_curve.empty() ? ""
+                               : fmt::format("{:g}", g.dm_curve.front().first),
+            g.dm_curve.empty() ? ""
+                               : fmt::format("{:g}", g.dm_curve.back().first),
+            opt(g.edge_ratio), opt(g.extrapolation_bins), g.harmonic_of,
+            g.harmonic_numerator, g.harmonic_denominator,
+            opt(g.harmonic_offset_bins), curve);
+    }
+}
+
+std::string sift_text(const SiftCli& cli, const loki::io::SiftResult& r) {
+    std::string out = fmt::format(
+        "{} candidates (S/N >= {:g}) from {} files in {} segments: {} groups\n",
+        r.n_candidates, cli.options.snr_min, r.files.size(), r.n_segments,
+        r.groups.size());
+    out +=
+        fmt::format("{:>4} {:>7} {:>14} {:>10} {:>12} {:>8} {:>15} {:>5} "
+                    "{:>5} {:>6} {:>7}  {}\n",
+                    "#", "S/N", "f (Hz)", "P (ms)", "fdot (Hz/s)", "DM",
+                    "DM range", "segs", "duty", "edge", "extrap", "harmonic");
+    for (std::size_t i = 0; i < std::min(cli.top, r.groups.size()); ++i) {
+        const auto& g  = r.groups[i];
+        const auto& b  = g.members.front();
+        const auto& dm = r.files[b.file].dm;
+        out += fmt::format(
+            "{:>4} {:>7.2f} {:>14.8f} {:>10.5f} {:>12.4e} {:>8} {:>15} {:>5} "
+            "{:>5.3f} {:>6} {:>7}  {}\n",
+            i, b.snr, b.freq, 1e3 / b.freq, b.fdot,
+            dm ? fmt::format("{:.2f}", *dm) : "-",
+            g.dm_curve.empty()
+                ? "-"
+                : fmt::format("{:.2f}-{:.2f}", g.dm_curve.front().first,
+                              g.dm_curve.back().first),
+            g.segments.size(), b.duty_cycle,
+            g.edge_ratio ? fmt::format("{:.2f}", *g.edge_ratio) : "-",
+            g.extrapolation_bins ? fmt::format("{:.1f}", *g.extrapolation_bins)
+                                 : "-",
+            sift_harmonic(g));
+    }
+    return out;
+}
+
+int run_sift(const SiftCli& cli) {
+    const auto files  = expand_patterns(cli.patterns);
+    const auto start  = SteadyClock::now();
+    const auto result = loki::io::sift(files, cli.options);
+    if (!cli.csv.empty()) {
+        write_sift_csv(cli.csv, result);
+    }
+    if (cli.json) {
+        std::cout << sift_json(cli, result);
+    } else {
+        std::cout << sift_text(cli, result);
+    }
+    SPDLOG_INFO("Sifted {} files in {:.1f} s", files.size(),
+                seconds_since(start));
     return 0;
 }
 
@@ -1654,20 +2854,36 @@ int main(int argc, char** argv) {
     grp_candidates->add_option(
         "--harmonic-denominator-max",
         ffa_cfg.candidates.harmonic_denominator_max,
-        "Maximum rational harmonic denominator (default: 100)");
+        "Largest numerator and denominator of a harmonic ratio (default: 16)");
     grp_candidates->add_option("--harmonic-phase-distance",
                                ffa_cfg.candidates.harmonic_phase_distance,
                                "Harmonic track tolerance in pulse widths");
-    grp_candidates->add_option("--harmonic-snr-distance",
-                               ffa_cfg.candidates.harmonic_snr_distance,
-                               "Harmonic S/N agreement tolerance");
+    grp_candidates->add_option(
+        "--harmonic-snr-distance", ffa_cfg.candidates.harmonic_snr_distance,
+        "How far a harmonic's S/N may exceed its parent's");
+    grp_candidates->add_option(
+        "--harmonic-doppler-tolerance",
+        ffa_cfg.candidates.harmonic_doppler_tolerance,
+        "Fractional frequency within which a bright parent takes a harmonic "
+        "without a track test (bright binaries, e.g. 3e-4); 0 disables "
+        "(default: 0)");
+    grp_candidates->add_option("--harmonic-doppler-min-snr",
+                               ffa_cfg.candidates.harmonic_doppler_min_snr,
+                               "Minimum parent S/N for that (default: 20)");
     grp_candidates->add_option(
         "--max-per-cell", ffa_cfg.candidates.max_per_cell,
-        "Strongest trials kept per frequency cell before grouping; zero "
+        "Strongest trials kept per frequency cell of each run or region "
+        "before grouping; zero "
         "keeps all");
+    grp_candidates->add_option("--cell-bins", ffa_cfg.candidates.cell_bins,
+                               "Frequency cell width in Fourier bins (1/tobs)");
     grp_candidates->add_option("--cell-log-width",
                                ffa_cfg.candidates.cell_log_width,
                                "Frequency cell width in ln(frequency)");
+    grp_candidates->add_option(
+        "--dominance-kappa", ffa_cfg.candidates.dominance_kappa,
+        "Absorb trials a stronger trial of the region explains; zero "
+        "disables");
     grp_candidates->add_option("--max-candidates",
                                ffa_cfg.candidates.max_candidates,
                                "Maximum folding candidates; zero is unlimited");
@@ -1736,8 +2952,9 @@ int main(int argc, char** argv) {
         "--memory-gb", ffa_cfg.max_process_memory_gb,
         "Memory cap in GB of 2^30 bytes (as Slurm's --mem=16G): total "
         "process RSS on CPU, device memory on CUDA");
-    grp_perf->add_option("--octave-scale", ffa_cfg.octave_scale,
-                         "Octave scaling factor (default: 2.0)");
+    grp_perf->add_option("--region-growth-factor", ffa_cfg.region_growth_factor,
+                         "Period growth factor between search regions "
+                         "(default: 1.5)");
     grp_perf->add_option("--nbins-max", ffa_cfg.nbins_max,
                          "Maximum allowed folding bins (default: 1024)");
     grp_perf->add_option("--nbins-min-lossy-bf", ffa_cfg.nbins_min_lossy_bf,
@@ -1780,6 +2997,11 @@ int main(int argc, char** argv) {
     std::string ep_plan_cache_path;
     std::string ep_backend_name;
     std::vector<SizeType> ep_ref_segs;
+    std::optional<bool> ep_harvest;
+    std::optional<bool> ep_impulsive_veto;
+    std::optional<float> ep_harvest_min_snr;
+    std::optional<float> ep_harvest_offset;
+    std::vector<std::string> ep_pulsar_mask;
 
     std::string ep_preproc_method;
     auto* ep_grp_io = ep->add_option_group("Input/Output Options");
@@ -1813,10 +3035,11 @@ int main(int argc, char** argv) {
                           "zscore: width of the short series used by "
                           "--fast-median");
     ep_grp_io->add_option("--nsamps", ep_cfg.nsamps,
-                          "Sample count, for --plan-only (a search reads it "
-                          "from the timeseries)");
+                          "Sample count, for --plan-only without an input "
+                          "(otherwise read from the input's header)");
     ep_grp_io->add_option("--tsamp", ep_cfg.tsamp,
-                          "Sample interval in seconds, for --plan-only");
+                          "Sample interval in seconds, for --plan-only "
+                          "without an input");
     ep_grp_io->add_flag("--no-plan-cache", ep_no_plan_cache,
                         "Disable automatic EP plan caching");
     ep_grp_io->add_option("--plan-cache", ep_plan_cache_path,
@@ -1869,20 +3092,36 @@ int main(int argc, char** argv) {
     ep_grp_candidates->add_option(
         "--harmonic-denominator-max",
         ep_cfg.candidates.harmonic_denominator_max,
-        "Maximum rational harmonic denominator (default: 100)");
+        "Largest numerator and denominator of a harmonic ratio (default: 16)");
     ep_grp_candidates->add_option("--harmonic-phase-distance",
                                   ep_cfg.candidates.harmonic_phase_distance,
                                   "Harmonic track tolerance in pulse widths");
-    ep_grp_candidates->add_option("--harmonic-snr-distance",
-                                  ep_cfg.candidates.harmonic_snr_distance,
-                                  "Harmonic S/N agreement tolerance");
+    ep_grp_candidates->add_option(
+        "--harmonic-snr-distance", ep_cfg.candidates.harmonic_snr_distance,
+        "How far a harmonic's S/N may exceed its parent's");
+    ep_grp_candidates->add_option(
+        "--harmonic-doppler-tolerance",
+        ep_cfg.candidates.harmonic_doppler_tolerance,
+        "Fractional frequency within which a bright parent takes a harmonic "
+        "without a track test (bright binaries, e.g. 3e-4); 0 disables "
+        "(default: 0)");
+    ep_grp_candidates->add_option("--harmonic-doppler-min-snr",
+                                  ep_cfg.candidates.harmonic_doppler_min_snr,
+                                  "Minimum parent S/N for that (default: 20)");
     ep_grp_candidates->add_option(
         "--max-per-cell", ep_cfg.candidates.max_per_cell,
-        "Strongest trials kept per frequency cell before grouping; zero "
+        "Strongest trials kept per frequency cell of each run or region "
+        "before grouping; zero "
         "keeps all");
+    ep_grp_candidates->add_option(
+        "--cell-bins", ep_cfg.candidates.cell_bins,
+        "Frequency cell width in Fourier bins (1/tobs)");
     ep_grp_candidates->add_option("--cell-log-width",
                                   ep_cfg.candidates.cell_log_width,
                                   "Frequency cell width in ln(frequency)");
+    ep_grp_candidates->add_option(
+        "--dominance-kappa", ep_cfg.candidates.dominance_kappa,
+        "Absorb trials a stronger trial of the run explains; zero disables");
     ep_grp_candidates->add_option(
         "--max-candidates", ep_cfg.candidates.max_candidates,
         "Maximum folding candidates; zero is unlimited");
@@ -1955,6 +3194,28 @@ int main(int argc, char** argv) {
         "Fraction of the stage's survivors and batch a full world tree keeps "
         "when a batch overflows it, in (0, 1] (default: 0.5)");
 
+    auto* ep_grp_rfi = ep->add_option_group(
+        "RFI control (sets [ep.rfi], see the config template; the "
+        "impulsive veto is CPU only)");
+    ep_grp_rfi
+        ->add_option("--pulsar-mask", ep_pulsar_mask,
+                     "Frequency window F_LO:F_HI in Hz masked at every "
+                     "acceleration; repeat for more (replaces "
+                     "ep.rfi.pulsar_mask)")
+        ->take_all();
+    ep_grp_rfi->add_flag("--harvest,!--no-harvest", ep_harvest,
+                         "Early harvesting of leaves far above the pruning "
+                         "threshold (ep.rfi.harvest)");
+    ep_grp_rfi->add_option("--harvest-min-snr", ep_harvest_min_snr,
+                           "Lowest harvest threshold (ep.rfi.harvest_min_snr, "
+                           "default: 40)");
+    ep_grp_rfi->add_option("--harvest-offset", ep_harvest_offset,
+                           "Harvest threshold above the pruning threshold "
+                           "(ep.rfi.harvest_offset, default: 10)");
+    ep_grp_rfi->add_flag("--impulsive-veto,!--no-impulsive-veto",
+                         ep_impulsive_veto,
+                         "Impulsive-segment veto (ep.rfi.impulsive_veto)");
+
     auto* ep_grp_perf = ep->add_option_group("Performance & Limits");
     ep_grp_perf->add_option(
         "--threads", ep_cfg.nthreads,
@@ -1963,8 +3224,10 @@ int main(int argc, char** argv) {
         "--memory-gb", ep_cfg.max_process_memory_gb,
         "Memory cap in GB of 2^30 bytes (as Slurm's --mem=16G): total "
         "process RSS on CPU, device memory on CUDA");
-    ep_grp_perf->add_option("--octave-scale", ep_cfg.octave_scale,
-                            "Octave scaling factor (default: 2.0)");
+    ep_grp_perf->add_option("--region-growth-factor",
+                            ep_cfg.region_growth_factor,
+                            "Period growth factor between search regions "
+                            "(default: 1.5)");
     ep_grp_perf->add_option("--nbins-max", ep_cfg.nbins_max,
                             "Maximum allowed folding bins (default: 1024)");
     ep_grp_perf->add_option(
@@ -1992,7 +3255,7 @@ int main(int argc, char** argv) {
                  "data");
     ep->add_flag("--plan-only", ep_plan_only,
                  "Plan the chunks, write the plan cache and print the plan; "
-                 "reads no data");
+                 "reads no samples");
 
     // =========================================================================
     // Subcommand: inspect
@@ -2015,9 +3278,192 @@ int main(int argc, char** argv) {
     inspect->add_flag("--json", inspect_json,
                       "Write the summary as JSON to stdout");
 
+    // =========================================================================
+    // Subcommand: refold
+    // =========================================================================
+    auto* refold = app.add_subcommand(
+        "refold",
+        "Refold a series at a candidate's parameters and scan a local f "
+        "(and fdot) grid: S/N with the search's preprocessing and phase "
+        "model. A rejection test; noise also refolds near its search S/N");
+    RefoldCli refold_cli;
+    refold
+        ->add_option("series", refold_cli.series,
+                     "The searched timeseries (.tim or .dat)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    auto* grp_refold_target = refold->add_option_group("Target");
+    grp_refold_target
+        ->add_option("--result", refold_cli.result,
+                     "Result file of the search: candidates by --id or "
+                     "--top, its configuration's preprocessing, searched "
+                     "span and reference time")
+        ->check(CLI::ExistingFile);
+    grp_refold_target->add_option(
+        "--id", refold_cli.ids,
+        "Candidate id(s) in --result (EP: run << 32 | leaf)");
+    grp_refold_target->add_option("--top", refold_cli.top,
+                                  "The strongest N candidates of --result");
+    grp_refold_target->add_option("--f", refold_cli.freqs,
+                                  "Frequency (Hz) at the series midpoint; "
+                                  "several share the derivatives below");
+    auto* opt_refold_fd = grp_refold_target->add_option(
+        "--fd", refold_cli.fd, "Frequency derivative (Hz/s)");
+    grp_refold_target
+        ->add_option("--acc", refold_cli.acc, "Acceleration (m/s^2)")
+        ->excludes(opt_refold_fd);
+    auto* opt_refold_fdd = grp_refold_target->add_option(
+        "--fdd", refold_cli.fdd, "Second frequency derivative (Hz/s^2)");
+    grp_refold_target->add_option("--jerk", refold_cli.jerk, "Jerk (m/s^3)")
+        ->excludes(opt_refold_fdd);
+    grp_refold_target->add_option("--snap", refold_cli.snap, "Snap (m/s^4)");
+    grp_refold_target->add_option("--crackle", refold_cli.crackle,
+                                  "Crackle (m/s^5)");
+    grp_refold_target->add_flag(
+        "--circular", refold_cli.circular,
+        "Fold --f targets as the five-parameter search does: a circular "
+        "orbit when snap and accel (else crackle and jerk) imply one");
+    auto* grp_refold_grid = refold->add_option_group("Grid and scoring");
+    grp_refold_grid->add_option(
+        "--nbins", refold_cli.options.nbins,
+        "Phase bins (default: min(64, max(8, samples per period)))");
+    grp_refold_grid->add_option("--nsub", refold_cli.options.nsub,
+                                "Subintegrations (default: 128)");
+    grp_refold_grid->add_option(
+        "--df-steps", refold_cli.options.df_steps,
+        "+- frequency steps (default: cover +- --df-span-t / T)");
+    grp_refold_grid->add_option("--df-span-t", refold_cli.options.df_span_t,
+                                "+- frequency span in units of 1/T "
+                                "(default: 3)");
+    grp_refold_grid->add_option(
+        "--df-step-bins", refold_cli.options.df_step_bins,
+        "Frequency step in units of 1/(nbins T) (default: 0.25)");
+    grp_refold_grid->add_option("--fd-steps", refold_cli.options.fd_steps,
+                                "+- fdot steps (default: 0, no fdot scan)");
+    grp_refold_grid->add_option("--fd-span", refold_cli.options.fd_span,
+                                "+- fdot span (Hz/s)");
+    grp_refold_grid->add_option(
+        "--split", refold_cli.options.split,
+        "Also score the best point in N contiguous time parts");
+    auto* grp_refold_io = refold->add_option_group("Input and output");
+    grp_refold_io
+        ->add_option("-c,--config", refold_cli.config,
+                     "Search configuration whose [preprocessing] to apply "
+                     "(default: the result file's, else the defaults)")
+        ->check(CLI::ExistingFile);
+    grp_refold_io->add_flag("--no-preprocess", refold_cli.no_preprocess,
+                            "Fold the series as read");
+    grp_refold_io->add_option("-t,--threads", refold_cli.threads,
+                              "CPU threads (default: all)");
+    grp_refold_io->add_flag("--profile", refold_cli.profile,
+                            "Print the best profile (signal / sqrt(var))");
+    grp_refold_io->add_flag("--json", refold_cli.json,
+                            "Write the results as JSON to stdout");
+
+    // =========================================================================
+    // Subcommand: publish
+    // =========================================================================
+    auto* publish = app.add_subcommand(
+        "publish", "Publish the candidates of a kept search spool (or of a "
+                   "--no-candidates search) without searching again");
+    PublishCli publish_cli;
+    publish
+        ->add_option("file", publish_cli.file,
+                     "The *_ffa_spool.h5 or *_ep_spool.h5 a failed "
+                     "post-processing kept, or a --no-candidates result")
+        ->required()
+        ->check(CLI::ExistingFile);
+    auto* grp_publish_io = publish->add_option_group("Input and output");
+    grp_publish_io->add_option(
+        "-o,--output", publish_cli.output,
+        "Result file to write (default: the spool's name with _results.h5)");
+    grp_publish_io
+        ->add_option("-c,--config", publish_cli.config,
+                     "The search's configuration (default: the one the file "
+                     "stores, else the defaults)")
+        ->check(CLI::ExistingFile);
+    grp_publish_io->add_option(
+        "-i,--input", publish_cli.input,
+        "The searched series, for its observation metadata (default: the "
+        "configuration's)");
+    grp_publish_io->add_flag("--keep-spool", publish_cli.keep_spool,
+                             "Keep the spool after publishing it");
+    grp_publish_io->add_flag("--force", publish_cli.force,
+                             "Replace an existing result file (atomically, "
+                             "once the new one is written)");
+    grp_publish_io->add_option("--dm", publish_cli.dm,
+                               "Override dispersion measure (pc cm^-3)");
+    grp_publish_io->add_option("--start-mjd", publish_cli.start_mjd,
+                               "Override MJD of the first input sample");
+    grp_publish_io->add_option(
+        "--barycentric", publish_cli.barycentric,
+        "Override timing frame: true (barycentric) or false (topocentric)");
+    auto* grp_publish_cand = publish->add_option_group(
+        "Candidate processing (default: the search's)");
+    grp_publish_cand->add_option("--memory-gb,--candidate-memory-gb",
+                                 publish_cli.memory_gb,
+                                 "Host memory budget for candidate processing");
+    grp_publish_cand->add_option("--candidate-tempdir", publish_cli.tempdir,
+                                 "Directory for bounded external sorting");
+    grp_publish_cand->add_flag_function(
+        "--cluster,!--no-cluster",
+        [&publish_cli](std::int64_t count) { publish_cli.cluster = count > 0; },
+        "Enable/disable phase-track clustering");
+    grp_publish_cand->add_flag_function(
+        "--retain-detections,!--no-retain-detections",
+        [&publish_cli](std::int64_t count) {
+            publish_cli.retain_detections = count > 0;
+        },
+        "Keep raw detections and membership");
+    grp_publish_cand->add_option(
+        "--max-candidates", publish_cli.max_candidates,
+        "Maximum folding candidates; zero is unlimited");
+    grp_publish_cand->add_option(
+        "--max-per-cell", publish_cli.max_per_cell,
+        "Strongest trials kept per frequency cell (default: as the search; "
+        "an EP search that reduced its runs needs the same)");
+    grp_publish_cand->add_option(
+        "--snr-min", publish_cli.snr_min,
+        "EP: candidate S/N minimum (default: the search's)");
+
+    // =========================================================================
+    // Subcommand: sift
+    // =========================================================================
+    auto* sift = app.add_subcommand(
+        "sift",
+        "Group the candidates of many result files (DM trials x segments) by "
+        "frequency: S/N against DM, segments, harmonic relations");
+    SiftCli sift_cli;
+    sift->add_option("files", sift_cli.patterns,
+                     "Published result files; a quoted pattern such as "
+                     "'results/*.h5' is expanded")
+        ->required();
+    sift->add_option("--snr-min", sift_cli.options.snr_min,
+                     "Ignore candidates below this S/N (default: 7)");
+    sift->add_option("--tol", sift_cli.options.tolerance,
+                     "Group frequencies within this fraction (default: 2e-4)");
+    sift->add_option("--min-segs", sift_cli.options.min_segments,
+                     "Drop groups seen in fewer segments (default: 1)");
+    sift->add_option("--harmonic-order", sift_cli.options.harmonic_order_max,
+                     "Largest p, q of harmonic relations between groups; 0 "
+                     "disables (default: 16)");
+    sift->add_option("--harmonic-bins", sift_cli.options.harmonic_bins,
+                     "Harmonic relations must agree to within this many "
+                     "frequency bins in a file with both (default: 2)");
+    sift->add_option("-n,--top", sift_cli.top, "Groups to list (default: 50)");
+    sift->add_option("--csv", sift_cli.csv, "Also write every group as CSV");
+    sift->add_flag("--json", sift_cli.json,
+                   "Write every group as JSON to stdout");
+    sift->add_flag("--members", sift_cli.members,
+                   "With --json: list each group's members (file, id) for "
+                   "loki refold");
+
     simulate->fallthrough();
     search->fallthrough();
     inspect->fallthrough();
+    refold->fallthrough();
+    publish->fallthrough();
+    sift->fallthrough();
     ffa->fallthrough();
     ep->fallthrough();
 
@@ -2053,6 +3499,30 @@ int main(int argc, char** argv) {
     if (!ep_ref_segs.empty()) {
         ep_cfg.ref_segs = ep_ref_segs;
     }
+    if (!ep_pulsar_mask.empty() || ep_harvest || ep_impulsive_veto ||
+        ep_harvest_min_snr || ep_harvest_offset) {
+        auto& rfi = ep_cfg.rfi ? *ep_cfg.rfi : ep_cfg.rfi.emplace();
+        if (!ep_pulsar_mask.empty()) {
+            try {
+                rfi.pulsar_mask = parse_pulsar_mask(ep_pulsar_mask);
+            } catch (const std::exception& ex) {
+                loki::cli::Console::get().error(ex.what());
+                return 1;
+            }
+        }
+        if (ep_harvest) {
+            rfi.harvest = *ep_harvest;
+        }
+        if (ep_harvest_min_snr) {
+            rfi.harvest_min_snr = *ep_harvest_min_snr;
+        }
+        if (ep_harvest_offset) {
+            rfi.harvest_offset = *ep_harvest_offset;
+        }
+        if (ep_impulsive_veto) {
+            rfi.impulsive_veto = *ep_impulsive_veto;
+        }
+    }
 
     // Ctrl-C, or SIGTERM (e.g. Slurm's scancel), stops the run at its next
     // checkpoint and unwinds cleanly; a second Ctrl-C kills it at once.
@@ -2082,6 +3552,18 @@ int main(int argc, char** argv) {
         if (inspect->parsed()) {
             return run_inspect(inspect_path, inspect_top, inspect_json,
                                inspect_profile);
+        }
+
+        if (refold->parsed()) {
+            return run_refold(std::move(refold_cli));
+        }
+
+        if (publish->parsed()) {
+            return run_publish(publish_cli);
+        }
+
+        if (sift->parsed()) {
+            return run_sift(sift_cli);
         }
 
         if (search->parsed() && ffa->parsed()) {

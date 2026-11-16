@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -14,6 +16,7 @@
 #include "loki/io/observation.hpp"
 #include "loki/search/candidates.hpp"
 
+#include "lib/detail/utils.hpp"
 #include "lib/search/candidate_processing.hpp"
 #include "lib/search/cands.hpp"
 
@@ -326,7 +329,7 @@ TEST_CASE("A cell cap keeps the same trials in any arrival order",
         c.id             = i;
     }
     const auto kept = [&](const std::vector<loki::search::Candidate>& in) {
-        loki::search::detail::CellCap cap(options);
+        loki::search::detail::CellCap cap(options, 10);
         for (const auto& c : in) {
             cap.add(c);
         }
@@ -348,6 +351,164 @@ TEST_CASE("A cell cap keeps the same trials in any arrival order",
     }
 }
 
+TEST_CASE("Cell cap cells belong to one source region", "[candidates]") {
+    loki::search::CandidateOptions options;
+    options.max_per_cell = 2;
+    options.cell_bins    = 4; // 0.4 Hz cells over tobs = 10 s
+    std::vector<loki::search::Candidate> trials;
+    // Two regions see the same source near 100 Hz; the strong region would
+    // fill a shared cell with its own trials.
+    for (std::uint32_t region = 0; region < 2; ++region) {
+        for (std::uint32_t k = 0; k < 5; ++k) {
+            loki::search::Candidate c;
+            c.derivatives[0] = 100.0 + 0.01 * k;
+            c.parameters[0]  = c.derivatives[0];
+            c.snr           = static_cast<float>(region == 0 ? 50 - k : 10 - k);
+            c.width         = 1;
+            c.nbins         = 10;
+            c.source_region = region;
+            c.source_index  = k;
+            c.id            = (static_cast<std::uint64_t>(region) << 32U) | k;
+            trials.push_back(c);
+        }
+    }
+    loki::search::detail::CellCap cap(options, 10);
+    for (const auto& c : trials) {
+        cap.add(c);
+    }
+    auto kept = cap.take();
+    std::ranges::sort(kept, loki::search::detail::candidate_brighter);
+    std::vector<float> snr;
+    for (const auto& c : kept) {
+        snr.push_back(c.snr);
+    }
+    REQUIRE(snr == std::vector<float>{50, 49, 10, 9});
+    REQUIRE(cap.dropped() == 6);
+    // A cell of 4 bins is 0.4 Hz wide, [100, 100.4) Hz here: a weak trial at
+    // 100.39 Hz is dropped from the full cell, one at 100.41 Hz is not.
+    for (const double f : {100.39, 100.41}) {
+        CAPTURE(f);
+        loki::search::Candidate edge = trials[0];
+        edge.derivatives[0]          = f;
+        edge.parameters[0]           = f;
+        edge.snr                     = 1;
+        edge.id                      = 99;
+        cap.add(trials[0]);
+        cap.add(trials[1]);
+        cap.add(edge);
+        REQUIRE(cap.take().size() == (f < 100.4 ? 2U : 3U));
+    }
+    // cell_bins needs the observation length, and exactly one width is set.
+    REQUIRE_THROWS_AS(loki::search::detail::CellCap(options, 0),
+                      std::invalid_argument);
+    options.cell_log_width = 1e-3;
+    REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);
+}
+
+namespace {
+loki::search::Candidate
+trial(double f, double fdot, float snr, std::uint32_t region, std::uint32_t k) {
+    loki::search::Candidate c;
+    c.derivatives[0] = f;
+    c.derivatives[1] = fdot;
+    c.parameters[0]  = f;
+    c.snr            = snr;
+    c.width          = 1;
+    c.nbins          = 20; // duty cycle 0.05
+    c.source_region  = region;
+    c.source_index   = k;
+    c.id             = (static_cast<std::uint64_t>(region) << 32U) | k;
+    return c;
+}
+std::vector<float> snrs(const std::vector<loki::search::Candidate>& trials) {
+    std::vector<float> out;
+    for (const auto& c : trials) {
+        out.push_back(c.snr);
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("Dominance absorbs trials a stronger trial of the run explains",
+          "[candidates]") {
+    loki::search::CandidateOptions options;
+    options.max_per_cell    = 32;
+    options.cell_bins       = 64;
+    options.dominance_kappa = 1.5;
+    const double tobs       = 100;
+    const loki::search::detail::DominanceReducer reducer(tobs, options);
+    // A bright pulse at 50 Hz (S/N 100) and, in the same run:
+    // - its own track at S/N 90: within the suppression radius;
+    // - a track 10 cycles away (0.1 Hz): the pulse gives it about 1.2 % of
+    //   its S/N, so S/N 1.5 is explained and S/N 10 is a second source;
+    // - a track 0.02 cycles away in a later run: never compared.
+    std::vector<loki::search::Candidate> trials{
+        trial(50.0, 0, 100, 0, 0),       trial(50.0, 0, 90, 0, 1),
+        trial(50.1, 0, 1.5F, 0, 2),      trial(50.1 + 1e-6, 0, 10, 0, 3),
+        trial(50.0 + 2e-4, 0, 20, 1, 0),
+    };
+    std::mt19937_64 rng(3);
+    std::vector<float> reference;
+    for (int shuffle = 0; shuffle < 4; ++shuffle) {
+        auto in = trials;
+        std::ranges::shuffle(in, rng);
+        REQUIRE(reducer.reduce(in) == 2);
+        // Region, then detection order.
+        REQUIRE(snrs(in) == std::vector<float>{100, 10, 20});
+    }
+    // A weaker trial is never absorbed by one it outshines by more than
+    // kappa, even on the same track.
+    std::vector<loki::search::Candidate> twins{trial(50, 0, 10, 0, 0),
+                                               trial(50, 0, 6, 0, 1)};
+    options.dominance_kappa = 0.5;
+    REQUIRE(
+        loki::search::detail::DominanceReducer(tobs, options).reduce(twins) ==
+        0);
+    // Tracks further apart in frequency than two cells are not compared.
+    options.dominance_kappa = 1.5;
+    options.cell_bins       = 1; // reach 0.02 Hz: 50.1 Hz is out of reach
+    std::vector<loki::search::Candidate> far{trial(50.0, 0, 100, 0, 0),
+                                             trial(50.1, 0, 1.5F, 0, 1)};
+    REQUIRE(loki::search::detail::DominanceReducer(tobs, options).reduce(far) ==
+            0);
+    // Dominance runs only within the cell cap: without it, kappa is valid
+    // but has no effect.
+    options.max_per_cell = 0;
+    REQUIRE_NOTHROW(options.validate());
+    REQUIRE_THROWS_AS(loki::search::detail::DominanceReducer(tobs, options),
+                      std::invalid_argument);
+}
+
+TEST_CASE("Dominance publishes one detection per explained group",
+          "[candidates][hdf5]") {
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
+    // Frequencies 10, 11, 12 and 13 Hz in turn, S/N 6 to 125.
+    spool(raw, 120);
+    loki::search::CandidateOptions options;
+    options.max_per_cell    = 2;
+    options.cell_log_width  = 1e-3; // one frequency per cell
+    options.dominance_kappa = 1.5;
+    const auto out          = dir / "out.h5";
+    loki::io::detail::write_candidate_results(raw, out, {}, options);
+    const HighFive::File file(out.string(), HighFive::File::ReadOnly);
+    std::uint64_t kept      = 0;
+    std::uint64_t dropped   = 0;
+    std::uint64_t dominated = 0;
+    file.getAttribute("n_detections").read(kept);
+    file.getAttribute("n_cell_dropped").read(dropped);
+    file.getAttribute("n_dominated").read(dominated);
+    // Each cell keeps two trials of the same track; the weaker is absorbed.
+    REQUIRE(dropped == 112);
+    REQUIRE(dominated == 4);
+    REQUIRE(kept == 4);
+    REQUIRE(column<float>(file, "detections/snr") ==
+            std::vector<float>{125, 124, 123, 122});
+    double kappa = 0;
+    file.getGroup("processing").getAttribute("dominance_kappa").read(kappa);
+    REQUIRE(kappa == 1.5);
+}
+
 TEST_CASE("A cell cap is bounded by the candidate memory budget",
           "[candidates][hdf5]") {
     const loki::test::TempDir dir("loki-candidate-results");
@@ -355,12 +516,155 @@ TEST_CASE("A cell cap is bounded by the candidate memory budget",
     spool(raw, 120);
     loki::search::CandidateOptions options;
     options.max_per_cell   = 120;
-    options.cell_log_width = 1;
+    options.cell_log_width = 1; // one cell holds every trial
     options.memory_gb      = 0.0001;
-    REQUIRE_THROWS_WITH(
-        loki::io::detail::write_candidate_results(raw, dir / "o.h5", {},
-                                                  options),
-        Catch::Matchers::ContainsSubstring("cell index exceeds"));
+    // 120 trials do not fit the budget: the cell keeps 60, its strongest.
+    const auto out = dir / "o.h5";
+    loki::io::detail::write_candidate_results(raw, out, {}, options);
+    {
+        const HighFive::File file(out.string(), HighFive::File::ReadOnly);
+        const auto snr = column<float>(file, "detections/snr");
+        REQUIRE(snr.size() == 60);
+        REQUIRE(snr.front() == 125);
+        REQUIRE(snr.back() == 66);
+    }
     options.cell_log_width = 0;
     REQUIRE_THROWS_AS(options.validate(), std::invalid_argument);
+}
+
+TEST_CASE("Over the memory budget, every cell keeps fewer trials in any order",
+          "[candidates]") {
+    loki::search::CandidateOptions options;
+    options.max_per_cell = 64;
+    options.cell_bins    = 1; // 0.1 Hz cells over tobs = 10 s
+    options.memory_gb    = 0.0001;
+    std::mt19937_64 rng(11);
+    std::uniform_real_distribution<double> freq(10, 11); // ten cells
+    std::uniform_int_distribution<int> snr(7, 40);
+    std::vector<loki::search::Candidate> trials(2000);
+    for (std::size_t i = 0; i < trials.size(); ++i) {
+        auto& c          = trials[i];
+        c.derivatives[0] = freq(rng);
+        c.parameters[0]  = c.derivatives[0];
+        c.snr            = static_cast<float>(snr(rng));
+        c.width          = 1;
+        c.nbins          = 10;
+        c.id             = i;
+    }
+    std::uint64_t used = 0;
+    const auto kept    = [&](const std::vector<loki::search::Candidate>& in) {
+        loki::search::detail::CellCap cap(options, 10);
+        for (const auto& c : in) {
+            cap.add(c);
+        }
+        used     = cap.max_per_cell_used();
+        auto out = cap.take();
+        REQUIRE(cap.max_per_cell_used() == options.max_per_cell); // reset
+        std::vector<std::uint64_t> ids;
+        for (const auto& c : out) {
+            ids.push_back(c.id);
+        }
+        std::ranges::sort(ids);
+        return ids;
+    };
+    const auto reference = kept(trials);
+    // Ten cells of 64 do not fit about 96 trials: the keep is halved to 8.
+    REQUIRE(used == 8);
+    REQUIRE(reference.size() == 80);
+    for (int shuffle = 0; shuffle < 5; ++shuffle) {
+        std::ranges::shuffle(trials, rng);
+        REQUIRE(kept(trials) == reference);
+        REQUIRE(used == 8);
+    }
+    // The same as a cap of 8 from the start.
+    options.max_per_cell = 8;
+    options.memory_gb    = 1;
+    REQUIRE(kept(trials) == reference);
+    // With one trial per cell still over budget, the cap gives up.
+    options.max_per_cell = 64;
+    options.memory_gb    = 0.0001;
+    std::uniform_real_distribution<double> wide(10, 100); // 900 cells
+    for (auto& c : trials) {
+        c.derivatives[0] = wide(rng);
+        c.parameters[0]  = c.derivatives[0];
+    }
+    loki::search::detail::CellCap cap(options, 10);
+    REQUIRE_THROWS_WITH(
+        [&] {
+            for (const auto& c : trials) {
+                cap.add(c);
+            }
+        }(),
+        Catch::Matchers::ContainsSubstring("one trial each"));
+}
+
+TEST_CASE("CellCap halving at budget boundary does not double-halve full cell",
+          "[candidates]") {
+    constexpr std::size_t kBytesPerTrial = 3 * sizeof(loki::search::Candidate);
+    constexpr std::size_t kBytesPerCell =
+        sizeof(std::vector<loki::search::Candidate>) + 128;
+
+    loki::search::CandidateOptions options;
+    options.cell_bins   = 4; // 0.4 Hz cells over tobs = 10 s
+    options.memory_gb   = 0.0001;
+    const double budget = options.memory_gb * loki::utils::kBytesPerGB / 2.0;
+    const auto n_fit    = static_cast<std::size_t>(
+        std::floor((budget - (2.0 * static_cast<double>(kBytesPerCell))) /
+                   static_cast<double>(kBytesPerTrial)));
+    REQUIRE(n_fit >= 4);
+    const std::size_t half_cap = std::bit_floor(n_fit - 1);
+    const std::size_t c0_count = n_fit - half_cap;
+    REQUIRE(c0_count >= 1);
+    REQUIRE(c0_count <= half_cap);
+    options.max_per_cell = 2 * half_cap;
+
+    auto make_trial = [](double f, float snr, std::uint64_t id) {
+        loki::search::Candidate c;
+        c.derivatives[0] = f;
+        c.parameters[0]  = f;
+        c.snr            = snr;
+        c.width          = 1;
+        c.nbins          = 10;
+        c.id             = id;
+        return c;
+    };
+
+    std::vector<loki::search::Candidate> cell0;
+    for (std::size_t k = 0; k < c0_count; ++k) {
+        cell0.push_back(make_trial(100.0 + (0.0001 * static_cast<double>(k)),
+                                   static_cast<float>(500 - k), k));
+    }
+    std::vector<loki::search::Candidate> cell1;
+    for (std::size_t k = 0; k < half_cap + 1; ++k) {
+        cell1.push_back(make_trial(100.5 + (0.0001 * static_cast<double>(k)),
+                                   static_cast<float>(1000 - k), 10000 + k));
+    }
+
+    const auto run_order = [&](const std::vector<loki::search::Candidate>& in) {
+        loki::search::detail::CellCap cap(options, 10);
+        for (const auto& c : in) {
+            cap.add(c);
+        }
+        REQUIRE(cap.max_per_cell_used() == half_cap);
+        auto out = cap.take();
+        std::vector<std::uint64_t> ids;
+        for (const auto& c : out) {
+            ids.push_back(c.id);
+        }
+        std::ranges::sort(ids);
+        return ids;
+    };
+
+    std::vector<loki::search::Candidate> order_a;
+    order_a.insert(order_a.end(), cell0.begin(), cell0.end());
+    order_a.insert(order_a.end(), cell1.begin(), cell1.end());
+
+    std::vector<loki::search::Candidate> order_b;
+    order_b.insert(order_b.end(), cell1.begin(), cell1.end());
+    order_b.insert(order_b.end(), cell0.begin(), cell0.end());
+
+    const auto ids_a = run_order(order_a);
+    const auto ids_b = run_order(order_b);
+    REQUIRE(ids_a.size() == n_fit);
+    REQUIRE(ids_a == ids_b);
 }

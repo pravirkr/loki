@@ -24,20 +24,47 @@ struct CandidateOptions {
     bool retain_detections{true};
     bool flag_harmonics{false};
     bool remove_harmonics{false};
-    std::uint32_t harmonic_denominator_max{100};
+    /// Largest numerator and denominator of a harmonic ratio p/q.
+    std::uint32_t harmonic_denominator_max{16};
+    /// Scaled phase tracks of a harmonic and its parent agree within this
+    /// many pulse widths (of the faster one).
     double harmonic_phase_distance{1.0};
+    /// A harmonic's S/N exceeds its parent's by at most this.
     double harmonic_snr_distance{3.0};
+    /// A parent of at least harmonic_doppler_min_snr also takes a child
+    /// whose frequency is within this fraction of p/q times its own, with no
+    /// track test: a binary's harmonics stay in ratio while its orbit curves
+    /// their tracks beyond the search's order. Zero (the default) disables
+    /// it; 3e-4 covers 90 km/s. Enable it only with few bright parents: each
+    /// covers about 2% of the frequencies of a 5-720 Hz search.
+    double harmonic_doppler_tolerance{0.0};
+    double harmonic_doppler_min_snr{20.0};
     /// Keep at most this many of the strongest trials in each frequency
-    /// cell, before grouping. Zero keeps every trial.
+    /// cell of each source (EP run or FFA region), before grouping. Zero
+    /// keeps every trial.
     std::uint64_t max_per_cell{0};
+    /// Width of a frequency cell in Fourier bins of the observation: a trial
+    /// at frequency f is in cell floor(f * tobs / cell_bins). Exactly one of
+    /// cell_bins and cell_log_width is required with max_per_cell.
+    double cell_bins{0};
     /// Width of a frequency cell in natural-log frequency: a trial at
-    /// frequency f is in cell floor(ln(f) / cell_log_width). Required with
-    /// max_per_cell.
+    /// frequency f is in cell floor(ln(f) / cell_log_width).
     double cell_log_width{0};
+    /// Within each run's capped cells, absorb a trial that a stronger kept
+    /// trial of the same run explains: one whose phase track stays within the
+    /// suppression radius of it, or whose S/N is at most dominance_kappa
+    /// times what the stronger trial's pulse would give along its track.
+    /// Zero disables it. It runs only within the cell cap: with max_per_cell
+    /// zero it has no effect.
+    double dominance_kappa{0};
     std::uint64_t max_candidates{0}; ///< Zero means unlimited.
     double memory_gb{1.0};           ///< Additional host memory, GB (2^30).
     std::filesystem::path temporary_directory;
     void validate() const;
+    /// Defaults of EP searches: their final leaves are reduced per run, with
+    /// max_per_cell 32 in cells of 64 Fourier bins and dominance_kappa 1.5.
+    /// max_per_cell = 0 keeps every leaf.
+    [[nodiscard]] static CandidateOptions ep_defaults();
 };
 
 /// Normalized Taylor trial at the midpoint of the searched interval.
@@ -48,6 +75,9 @@ struct Candidate {
     std::array<double, 6> parameters{};
     std::array<double, 6> parameter_errors{};
     bool has_parameter_errors{false};
+    /// EP: a parameter other than frequency lies outside its chunk's
+    /// configured limits at the reported epoch (the observation midpoint).
+    bool outside_prior{false};
     std::uint64_t id{};
     std::uint32_t source_region{};
     std::uint32_t source_index{};

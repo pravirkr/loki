@@ -16,6 +16,8 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/search/candidate_processing.hpp"
+
 namespace loki::pipelines::detail {
 
 // make_ep_freq_sweep_cpu is defined in lib/cpu/, make_ep_freq_sweep_gpu in
@@ -32,6 +34,11 @@ public:
                          std::span<const float> ts_v,
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix) = 0;
+
+    /// Reduce each run's final leaves before writing them (candidate sweeps
+    /// with max_per_cell). The spec's nbins is set per chunk.
+    virtual void set_leaf_reduction(
+        std::optional<search::detail::LeafReductionSpec> spec) = 0;
 
     EPFreqSweepEngine(const EPFreqSweepEngine&)            = delete;
     EPFreqSweepEngine& operator=(const EPFreqSweepEngine&) = delete;
@@ -50,9 +57,8 @@ std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_cpu(
     std::optional<SizeType> n_runs,
     const std::optional<std::vector<SizeType>>& ref_segs);
 
-/// GPU engine. Pulsar masking, harvesting and the impulsive veto
-/// (PruneRFIConfig) are not implemented on the GPU: the facade rejects an
-/// active config, so none is passed here.
+/// GPU engine. Pulsar masking and harvesting run on the GPU; the impulsive veto
+/// is CPU-only and rejected by the facade.
 std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_gpu(
     const search::PulsarSearchConfig& cfg,
     float min_pd,
@@ -61,6 +67,7 @@ std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_gpu(
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
     const std::optional<std::vector<SizeType>>& ref_segs,
-    int device_id);
+    int device_id,
+    const algorithms::PruneRFIConfig& rfi_config);
 
 } // namespace loki::pipelines::detail

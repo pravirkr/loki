@@ -32,6 +32,10 @@ struct ParamRange {
 /// One row of the candidate table.
 struct CandidateRow {
     std::uint64_t row{}; ///< Row in the table read (raw EP: leaf of the run).
+    /// Detection identity: the table's `id` (EP: run << 32 | leaf; raw EP
+    /// runs numbered in name order of chunks and runs, as the candidate
+    /// products number them).
+    std::uint64_t id{};
     /// Native parameters in the order of `CandidateFileSummary::param_names`
     /// (frequency last, in Hz; accel in m/s^2; jerk in m/s^3).
     std::vector<double> params;
@@ -41,6 +45,10 @@ struct CandidateRow {
     /// Where the row came from: "region <i>" (FFA), "chunk <c> run <r>" (EP),
     /// or empty when the file does not say.
     std::string source;
+    /// EP: the leaf as its run stores it, (n_params + 2) rows of (value,
+    /// error), for psr_utils::leaf_phase; empty when the file does not keep
+    /// it (FFA).
+    std::vector<double> leaf;
 };
 
 struct CandidateFileSummary {
@@ -59,6 +67,9 @@ struct CandidateFileSummary {
     std::uint64_t nsamps{};  ///< Samples searched.
     double tsamp{};          ///< Seconds.
     double tobs{};           ///< Seconds.
+    /// Time the reported parameters refer to, from the first searched
+    /// sample (the middle of the searched span).
+    double reference_time{};
     std::optional<double> dm;
     std::optional<double> snr_min;
     std::vector<std::string> param_names;
@@ -80,6 +91,12 @@ struct CandidateFileSummary {
     /// table, signal over the root of its variance), when the file stores
     /// one. Current searches do not.
     std::optional<std::vector<float>> top_profile;
+    /// Sources removed by early harvest (EP with [ep.rfi], table
+    /// `/harvested`): how many, and the strongest @p top_n. Their `snr` is a
+    /// partial S/N at the harvest level and `params` are at the record's
+    /// t_ref; `source` names the level and the number of runs.
+    std::uint64_t n_harvested_sources{};
+    std::vector<CandidateRow> harvested;
 };
 
 /// Reads the metadata and the @p top_n best rows of @p path. Throws
@@ -88,5 +105,13 @@ struct CandidateFileSummary {
 [[nodiscard]] CandidateFileSummary
 read_candidate_file_summary(const std::filesystem::path& path,
                             std::size_t top_n = 10);
+
+/// Reads the row with detection identity @p id of @p path, with its leaf
+/// (EP) and the file's metadata in @p summary (its `top` is left empty).
+/// Throws std::invalid_argument when no row has that identity.
+[[nodiscard]] CandidateRow
+read_candidate_by_id(const std::filesystem::path& path,
+                     std::uint64_t id,
+                     CandidateFileSummary* summary = nullptr);
 
 } // namespace loki::io

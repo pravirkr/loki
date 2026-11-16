@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
 
+#include "lib/search/candidate_processing.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms::detail {
@@ -31,14 +33,14 @@ namespace loki::algorithms::detail {
  * engine: the planner must size workspaces with exactly the value the engine
  * validates against. `max_children` is the worst per-frequency child count
  * from the plan of the exact band being searched; it is not monotone in band
- * width. The floor of 32 covers plans whose worst leaf is smaller than that.
+ * width. It bounds every parent of the tree, so it is the ceiling itself:
+ * a parameter that branched past it is rejected by both backends.
  *
  * @param max_children Worst leaf from BranchingForecast::max_children.
- * @return max(max_children, 32).
+ * @return max(max_children, 1).
  */
 [[nodiscard]] inline SizeType compute_branch_max(SizeType max_children) {
-    constexpr SizeType kMinBranchMax = 32U;
-    return std::max(max_children, kMinBranchMax);
+    return std::max(max_children, SizeType{1});
 }
 
 /**
@@ -77,6 +79,15 @@ public:
                          std::span<const float> ts_v,
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix) = 0;
+
+    /// Reduce each run's final leaves before writing them. Only the CPU
+    /// engine of a candidate sweep supports it.
+    virtual void
+    set_leaf_reduction(std::optional<search::detail::LeafReductionSpec> spec) {
+        if (spec) {
+            throw std::logic_error("EP engine cannot reduce final leaves");
+        }
+    }
 
     EPMultiPassEngine(const EPMultiPassEngine&)            = delete;
     EPMultiPassEngine& operator=(const EPMultiPassEngine&) = delete;

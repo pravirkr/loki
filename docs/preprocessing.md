@@ -88,9 +88,40 @@ so a CUDA search does not spend its single host core on it.
      (divided by `ln 2`, so it follows Exp(1)).
    - Flagged bins are those above the Gaussian-equivalent `zap_sigma`,
      plus the `birdies`.
-   - A flagged bin's amplitude is scaled down to the local noise level, and
-     its phase is kept.
+   - `zap_mode` sets how a flagged bin is replaced:
+     - `"noise"` (default): complex Gaussian noise of the local mean power.
+       The mean leaves the birdie windows out, so a bright window never
+       raises the fill. The noise comes from a stream per bin, seeded by a
+       hash of the input series (or `zap_seed`). Reruns on the same data
+       give the same output for any thread count.
+     - `"phase_kept"`: a bin above the local mean is scaled down to it and
+       keeps its phase. A strong line leaves a coherent residual at the
+       noise level, which folding can still pick up.
+     - `"zero"`: the bin is set to zero.
+   - Masked samples are zero in `z`, and they put part of a removed line
+     back into the valid samples (about the masked fraction). With masked
+     samples, `"noise"` and `"zero"` therefore remove the flagged bins three
+     times, re-zeroing the masked samples in between, and only then fill.
+     The fill level comes from that cleaned spectrum. Zeroing the masked
+     samples after the fill removes part of the fill too: between the
+     fraction f of masked samples (long gaps) and 2f - f^2 (gaps short
+     against 1 / window width). The fill is raised by the amount that the
+     spectrum of the mask predicts for each window. Each pass costs one
+     more FFT pair.
    - The cleaned series goes back through stage 2.
+   - Self-check: after the output stage the output is transformed again. Per
+     band (edges 0, 10, 20, 50, 100, ... Hz), the report gives the mean
+     whitened power of the flagged bins (birdie windows and threshold bins)
+     over that of the other bins. On noise, `"noise"` leaves about 1,
+     `"zero"` about 0 and `"phase_kept"` about 1 - 1/e = 0.63. The CLI logs every band, and warns when a noise zap
+     with at least 64 bins in a band is off by more than
+     max(0.1, 3 / sqrt(bins)).
+     On real data the lowest band (0-10 Hz) can read a few percent low with
+     a correct fill. There the unflagged bins also carry red noise and weak
+     lines the zap leaves alone, which raise their mean above the noise
+     level that the fill follows. On one such series the band read 0.92,
+     while the zapped bins sat at 1.01 of their whitened neighbourhood and
+     the unflagged bins averaged 1.05 (1.11 at 1-3 Hz).
 5. **Output.**
    - Samples with `|T - mu| > clip_sigma * sigma` are zeroed.
    - Masked samples are zeroed.
@@ -118,6 +149,8 @@ so a CUDA search does not spend its single host core on it.
 | `zap_sigma` | `8.0` | robust: zap threshold, as a Gaussian-equivalent significance |
 | `zap_whiten_bins` | `1001` | robust: running-median width of the spectrum, in bins |
 | `birdies` | `[]` | robust: `[[freq_hz, width_hz], ...]`, always zapped |
+| `zap_mode` | `"noise"` | robust: replacement of zapped bins: `"noise"`, `"phase_kept"` or `"zero"` |
+| `zap_seed` | unset | robust: seed of the `"noise"` fill; unset hashes the input series |
 
 Moved keys are rejected with a hint. The old `[input]` keys `preprocess`,
 `filter_window`, `fast_median` and `fast_median_min_points` must now be
@@ -140,6 +173,8 @@ robust|zscore`, `--filter-window`, `--fast-median/--no-fast-median` and
   - Leave `zap_periodic` off when searching for bright pulsars. Their
     harmonics are strong, narrow lines and can exceed `zap_sigma`.
   - Prefer `birdies` for known mains and instrumental lines.
+  - Keep `zap_mode = "noise"`. With `"phase_kept"`, a pulsar-like RFI line
+    in a birdie window can still be folded to a detection.
 - **Masking scales.**
   - `block_scales` should bracket the RFI durations you expect.
   - Scales shorter than 8 samples, or with fewer than 8 blocks in the
@@ -151,7 +186,8 @@ robust|zscore`, `--filter-window`, `--fast-median/--no-fast-median` and
     `block_sigma` if the report's masked fraction is high.
 - **Report.**
   - The CLI logs the effective windows, the masked percentage, the clipped
-    sample count, the zapped bins and the longest masked run.
+    sample count, the zapped bins and the longest masked run, plus the zap
+    self-check per band (`PreprocessReport::zap_bands`).
   - `io::PreprocessReport` also holds the per-block baseline, sigma and
     valid fraction.
 

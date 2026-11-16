@@ -287,7 +287,7 @@ TEST_CASE("A real multi-chunk sweep is unaffected by accumulator capacity",
             kNsamps, kTsamp, /*nbins=*/64, /*eta=*/1.0, limits,
             /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/true,
             /*nthreads=*/1, /*max_process_memory_gb=*/4.0,
-            /*octave_scale=*/2.0, /*nbins_max=*/256,
+            /*region_growth_factor=*/2.0, /*nbins_max=*/256,
             /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/std::nullopt,
             /*nsegments=*/std::nullopt, /*snr_min=*/1.0,
             max_passing_candidates);
@@ -385,7 +385,7 @@ TEST_CASE("Non-power-of-2 accelerated FFAFreqSweep shifts candidates to true "
         kNsamps, kTsamp, /*nbins=*/32, /*eta=*/1.0, limits,
         /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/false,
         /*nthreads=*/2, /*max_process_memory_gb=*/4.0,
-        /*octave_scale=*/2.0, /*nbins_max=*/128,
+        /*region_growth_factor=*/2.0, /*nbins_max=*/128,
         /*nbins_min_lossy_bf=*/32, kBsegBrute, /*nsegments=*/std::nullopt,
         /*snr_min=*/8.0, /*max_passing_candidates=*/100000);
 

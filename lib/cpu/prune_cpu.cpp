@@ -104,6 +104,12 @@ public:
         return get_workspace().get_memory_usage_gib();
     }
 
+    /// Reduce each run's final leaves before writing them; null keeps all.
+    void set_leaf_reduction(
+        const search::detail::LeafReductionSpec* reduction) noexcept {
+        m_reduction = reduction;
+    }
+
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
                  std::span<const SizeType> ascend_levels,
@@ -199,6 +205,7 @@ private:
 
     search::PulsarSearchConfig m_cfg;
     plans::FFAPlan<FoldType> m_ffa_plan;
+    const search::detail::LeafReductionSpec* m_reduction{nullptr};
     std::vector<float> m_threshold_scheme;
     SizeType m_max_sugg;
     SizeType m_batch_size;
@@ -315,6 +322,9 @@ private:
         std::ofstream log(log_file, std::ios::app);
         log << pstats_cur.get_summary();
         log.close();
+        if (world_tree.get_size() == 0) {
+            m_prune_complete = true;
+        }
     }
 
     void ascend_survivors_batched(std::span<const FoldType> ffa_fold) {
@@ -398,7 +408,7 @@ private:
         auto& world_tree    = ws.world_tree;
         const auto n_leaves = world_tree.get_size();
         std::vector<std::uint32_t> widths;
-        if (m_poly_basis == "taylor" && !m_rfi->is_active()) {
+        if (m_poly_basis == "taylor") {
             widths.resize(n_leaves);
             const auto folds = world_tree.get_folds_circular_view();
             const auto nfirst =
@@ -436,7 +446,7 @@ private:
         result_writer.write_run_results(
             run_name, m_snail_scheme.get_data(), leaves_view, scores_view,
             scores_ep_view, total_pruning_gflops, n_leaves, m_cfg.get_nparams(),
-            m_pstats, widths);
+            m_pstats, widths, m_reduction);
         if (m_rfi->has_harvest()) {
             result_writer.write_run_harvest(
                 run_name, m_harvest, m_cfg.get_nparams(), m_n_harvested_total);
@@ -964,9 +974,13 @@ private:
             std::abs(m_leaf_scratch[((n_params - 1) * kParamStride) + 1]);
         const auto t_ref = coord_cur.first;
 
-        const auto window = make_harvest_window(
-            f, a, df, da, t_ref, get_tobs_scheme(), m_rfi->harvest_mask_ntiles);
-        m_mask.add_window(window, m_rfi->n_harmonics);
+        const auto a_lim = m_cfg.get_param_limits()[n_params - 2];
+        const auto a_max = std::max(std::abs(a_lim.min), std::abs(a_lim.max));
+        const auto window =
+            make_harvest_window(f, a, df, da, t_ref, get_tobs_scheme(),
+                                m_rfi->harvest_mask_ntiles, a_max);
+        m_mask.add_window(window, m_rfi->n_harmonics,
+                          m_rfi->fractional_harmonics);
         ++m_n_harvested_total;
 
         if (m_harvest.size() < m_rfi->max_harvests) {
@@ -1184,6 +1198,11 @@ public:
     EPMultiPassCpuEngine(EPMultiPassCpuEngine&&)                 = delete;
     EPMultiPassCpuEngine& operator=(EPMultiPassCpuEngine&&)      = delete;
 
+    void set_leaf_reduction(
+        std::optional<search::detail::LeafReductionSpec> spec) override {
+        m_reduction = std::move(spec);
+    }
+
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
@@ -1284,6 +1303,7 @@ private:
     SizeType m_batch_size;
     std::string m_poly_basis;
     bool m_show_progress;
+    std::optional<search::detail::LeafReductionSpec> m_reduction;
     PruneRFIConfig m_rfi_config;
 
     plans::FFAPlan<FoldType> m_ffa_plan;
@@ -1305,6 +1325,9 @@ private:
     // onto the (accel, freq) grid that resolve() snaps to.
     void setup_rfi_control(SizeType nsegments) {
         m_rfi_config.validate(nsegments);
+        // Harvest thresholds follow this search's own threshold scheme.
+        m_rfi_config = m_rfi_config.expand_harvest(m_threshold_scheme);
+        m_rfi_config.validate(nsegments);
         const auto n_params = m_cfg.get_nparams();
         error_check::check_greater_equal(
             n_params, SizeType{2},
@@ -1315,13 +1338,15 @@ private:
             search::GridMask(limits[n_params - 2], counts[n_params - 2],
                              limits[n_params - 1], counts[n_params - 1]);
         m_mask_base.add_windows(m_rfi_config.pulsar_mask,
-                                m_rfi_config.n_harmonics);
+                                m_rfi_config.n_harmonics,
+                                m_rfi_config.fractional_harmonics);
         if (m_rfi_config.is_active()) {
             spdlog::info(
-                "EPMultiPass: RFI control: {} mask window(s) ({} harmonics) "
+                "EPMultiPass: RFI control: {} mask window(s) ({} harmonics{}) "
                 "-> {} of {} grid cells masked; harvesting {}; impulsive "
                 "veto {}",
                 m_rfi_config.pulsar_mask.size(), m_rfi_config.n_harmonics,
+                m_rfi_config.fractional_harmonics ? ", fractional" : "",
                 m_mask_base.count(), m_mask_base.get_n_cells(),
                 m_rfi_config.has_harvest() ? "on" : "off",
                 m_rfi_config.impulsive_veto ? "on" : "off");
@@ -1337,6 +1362,7 @@ private:
         auto prune = PruneImpl<FoldType>(
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
+        prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
@@ -1388,6 +1414,7 @@ private:
                 auto prune            = PruneImpl<FoldType>(
                     ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
                     m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
+                prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,

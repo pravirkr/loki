@@ -135,6 +135,20 @@ TEST_CASE("GridMask: 2D window and clipping", "[prune_mask]") {
     }
 }
 
+TEST_CASE("GridMask: is_masked_at looks up the cell of a physical point",
+          "[prune_mask]") {
+    auto mask = make_mask();
+    CHECK_FALSE(mask.is_masked_at(0.0, 150.0));
+    const ParamWindow w{
+        .f_lo = 195.0, .f_hi = 250.0, .a_lo = 80.0, .a_hi = 500.0};
+    mask.add_window(w);
+    CHECK(mask.is_masked_at(90.0, 197.0));
+    CHECK_FALSE(mask.is_masked_at(-90.0, 197.0));
+    // Outside the grid: the nearest edge cell, which the window covers.
+    CHECK(mask.is_masked_at(1.0e4, 1.0e4));
+    CHECK_FALSE(mask.is_masked_at(-1.0e4, -1.0e4));
+}
+
 TEST_CASE("GridMask: disjoint windows are ignored", "[prune_mask]") {
     auto mask = make_mask();
     mask.add_window(ParamWindow{.f_lo = 10.0, .f_hi = 50.0});
@@ -215,6 +229,52 @@ TEST_CASE("GridMask: harmonics expand the window", "[prune_mask]") {
     mask2.add_window(ParamWindow{.f_lo = 300.0, .f_hi = 302.0}, 2);
     REQUIRE(mask2.count() ==
             brute_count({ParamWindow{.f_lo = 150.0, .f_hi = 151.0}}));
+}
+
+TEST_CASE("GridMask: fractional harmonics mask every reduced ratio",
+          "[prune_mask]") {
+    // 80-81 Hz with n_harmonics 4: ratios p/q in {1/4 .. 4} except 1, reduced
+    // (2/4, 4/2 and 2/2 appear once as 1/2, 2 and 1).
+    const ParamWindow w{.f_lo = 80.0, .f_hi = 81.0, .a_lo = -5.0, .a_hi = 5.0};
+    std::vector<ParamWindow> expected{w};
+    for (const auto& [p, q] : std::vector<std::pair<double, double>>{{1, 2},
+                                                                     {1, 3},
+                                                                     {1, 4},
+                                                                     {2, 1},
+                                                                     {2, 3},
+                                                                     {3, 1},
+                                                                     {3, 2},
+                                                                     {3, 4},
+                                                                     {4, 1},
+                                                                     {4, 3}}) {
+        expected.push_back(ParamWindow{.f_lo = (w.f_lo * p) / q,
+                                       .f_hi = (w.f_hi * p) / q,
+                                       .a_lo = w.a_lo,
+                                       .a_hi = w.a_hi});
+    }
+    auto mask = make_mask();
+    mask.add_window(w, 4, true);
+    for (SizeType ia = 0; ia < kNAccel; ++ia) {
+        for (SizeType ifreq = 0; ifreq < kNFreq; ++ifreq) {
+            REQUIRE(mask.is_masked((ia * kNFreq) + ifreq) ==
+                    cell_in_windows(ia, ifreq, expected));
+        }
+    }
+    // A superset of the integer harmonics, which stay bit-identical.
+    auto integer = make_mask();
+    integer.add_window(w, 4);
+    for (SizeType i = 0; i < integer.get_n_cells(); ++i) {
+        if (integer.is_masked(i)) {
+            REQUIRE(mask.is_masked(i));
+        }
+    }
+    REQUIRE(mask.count() > integer.count());
+    // Without harmonics the flag changes nothing.
+    auto plain      = make_mask();
+    auto plain_frac = make_mask();
+    plain.add_window(w, 0);
+    plain_frac.add_window(w, 0, true);
+    REQUIRE(plain.count() == plain_frac.count());
 }
 
 TEST_CASE("GridMask: is_masked matches brute force on random windows",
@@ -388,6 +448,12 @@ TEST_CASE("PruneRFIConfig::validate", "[prune_mask]") {
     REQUIRE_THROWS(cfg.validate(16));
     cfg.impulsive_min_level = 4;
     REQUIRE_NOTHROW(cfg.validate(16));
+
+    cfg.fractional_harmonics = true;
+    cfg.n_harmonics          = 32;
+    REQUIRE_NOTHROW(cfg.validate(16));
+    cfg.n_harmonics = 33;
+    REQUIRE_THROWS(cfg.validate(16));
 }
 
 TEST_CASE("make_birdie_window is a narrow zero-acceleration band",
@@ -415,7 +481,8 @@ TEST_CASE("make_harvest_window pads by tiles plus Doppler reach",
     const double ntiles = 4.0;
     const auto w     = make_harvest_window(f, a, df, da, t_ref, tobs, ntiles);
     const auto reach = std::max(t_ref, tobs - t_ref);
-    const auto sweep = f * a * reach * loki::utils::kInvCval;
+    // The sweep uses the largest acceleration the window admits.
+    const auto sweep = f * (a + (ntiles * da)) * reach * loki::utils::kInvCval;
     const auto f_pad = (ntiles * df) + sweep;
     using Catch::Matchers::WithinRel;
     REQUIRE_THAT(w.f_lo, WithinRel(f - f_pad, 1e-12));
@@ -423,6 +490,18 @@ TEST_CASE("make_harvest_window pads by tiles plus Doppler reach",
     REQUIRE_THAT(w.a_lo, WithinRel(a - (ntiles * da), 1e-12));
     REQUIRE_THAT(w.a_hi, WithinRel(a + (ntiles * da), 1e-12));
     REQUIRE_THROWS(make_harvest_window(f, a, df, da, t_ref, tobs, 0.0));
+    REQUIRE_THROWS(make_harvest_window(f, a, df, da, t_ref, tobs, ntiles, -1));
+
+    // Harvested before the acceleration is resolved (a = 0): the window
+    // still covers the drift at a = ntiles * da, capped by a_max.
+    const auto w0 = make_harvest_window(f, 0.0, df, da, t_ref, tobs, ntiles);
+    const auto sweep0 = f * (ntiles * da) * reach * loki::utils::kInvCval;
+    REQUIRE_THAT(w0.f_hi, WithinRel(f + (ntiles * df) + sweep0, 1e-12));
+    const auto capped =
+        make_harvest_window(f, 0.0, df, da, t_ref, tobs, ntiles, 2.0);
+    const auto sweep2 = f * 2.0 * reach * loki::utils::kInvCval;
+    REQUIRE_THAT(capped.f_hi, WithinRel(f + (ntiles * df) + sweep2, 1e-12));
+    REQUIRE_THAT(capped.a_hi, WithinRel(ntiles * da, 1e-12));
 }
 
 TEST_CASE("is_impulsive_segment matches the share-of-power contract",

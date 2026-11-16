@@ -107,9 +107,13 @@ SizeType blocks_per_window(SizeType window, SizeType block) {
 }
 
 SizeType min_valid(double min_good, SizeType len) {
+    if (len == 0) {
+        return 1;
+    }
     const auto need =
         static_cast<SizeType>(std::ceil(min_good * static_cast<double>(len)));
-    return std::max<SizeType>({need, 3, 1});
+    const SizeType floor = std::min<SizeType>(len, 3);
+    return std::max(need, floor);
 }
 
 double median_of(std::vector<double> v) {
@@ -364,6 +368,9 @@ run_robust(RobustStages& s, double tsamp, const PreprocessOptions& o) {
     }
     if (rep.n_masked + rep.n_clipped == n) {
         throw std::invalid_argument("preprocess: every sample is masked");
+    }
+    if (rep.n_zapped > 0) {
+        rep.zap_bands = s.zap_check(tsamp, o);
     }
     rep.longest_masked_run = longest_zero_run(s.ts_v());
     rep.global_scale       = std::sqrt(st.median_var);

@@ -15,17 +15,23 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
+#include "loki/common/interrupt.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/candidates.hpp"
 
 #include "lib/detail/utils.hpp"
+#include "lib/io/h5_layout.hpp"
 #include "lib/search/candidate_processing.hpp"
+#include "lib/search/harvested.hpp"
 
 namespace loki::io::detail {
 namespace {
@@ -54,6 +60,68 @@ struct ScratchDirectory {
     }
 };
 
+/// Interrupt checkpoints and periodic progress for postprocessing, which can
+/// run for minutes on a bright source. tick() is one atomic load plus, every
+/// 4096 calls, a clock read; it logs at most every kInterval.
+class PostProgress {
+public:
+    void phase(std::string name, std::uint64_t total) {
+        m_phase = std::move(name);
+        m_total = total;
+        m_done  = 0;
+    }
+    void tick(std::uint64_t done_increment = 1) {
+        loki::check_interrupt();
+        m_done += done_increment;
+        maybe_log();
+    }
+    /// One record rewritten by a sort merge (counted separately).
+    void tick_merge() {
+        loki::check_interrupt();
+        ++m_merged;
+        maybe_log();
+    }
+    /// Forces the next tick() to consider logging (after a slow step).
+    void poke() { m_calls = 4095; }
+
+private:
+    void maybe_log() {
+        if (++m_calls % 4096 != 0) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - m_last < kInterval) {
+            return;
+        }
+        m_last = now;
+        const double elapsed =
+            std::chrono::duration<double>(now - m_started).count();
+        const auto merged = m_merged == 0
+                                ? std::string()
+                                : fmt::format(", {} records merged", m_merged);
+        if (m_total != 0) {
+            spdlog::info("Candidate postprocessing: {} {}/{} ({:.0f}%){}, "
+                         "{:.0f} s elapsed",
+                         m_phase, m_done, m_total,
+                         100.0 * static_cast<double>(m_done) /
+                             static_cast<double>(m_total),
+                         merged, elapsed);
+        } else {
+            spdlog::info("Candidate postprocessing: {}{}, {:.0f} s elapsed",
+                         m_phase, merged, elapsed);
+        }
+    }
+    static constexpr std::chrono::seconds kInterval{30};
+    std::chrono::steady_clock::time_point m_started{
+        std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point m_last{m_started};
+    std::string m_phase;
+    std::uint64_t m_total{};
+    std::uint64_t m_done{};
+    std::uint64_t m_merged{};
+    std::uint64_t m_calls{};
+};
+
 void copy_object(const HighFive::File& source,
                  const std::string& name,
                  const HighFive::Group& target,
@@ -67,8 +135,8 @@ void copy_object(const HighFive::File& source,
 
 // The source is a group, not a file: HDF5 1.10 cannot count the attributes
 // of a file ID (H5Aget_num_attrs), so pass the root group "/" instead.
-template <typename Target>
-void copy_attributes(const HighFive::Group& source,
+template <typename Source, typename Target>
+void copy_attributes(const Source& source,
                      const Target& target,
                      bool skip_selection_counts = false) {
     for (const auto& name : source.listAttributeNames()) {
@@ -98,6 +166,188 @@ void copy_attributes(const HighFive::Group& source,
         H5Aclose(dst);
         if (wr < 0) {
             throw std::runtime_error("cannot copy search attribute");
+        }
+    }
+}
+
+struct EPSource {
+    std::string path;
+    std::uint64_t chunk;
+};
+
+/// What the per-run reduction did to one EP run.
+struct RunReduction {
+    std::uint64_t final_leaves{};  ///< Rows of the run in the spool.
+    std::uint64_t above_snr_min{}; ///< Rows read as trials.
+    std::uint64_t cell_dropped{};
+    std::uint64_t dominated{};
+    float max_cell_dropped_snr{};
+    std::uint64_t max_per_cell_used{};   ///< Below max_per_cell: memory bound.
+    std::vector<std::uint32_t> retained; ///< Spool rows kept, ascending.
+};
+
+/// Final-leaf datasets of an EP run: one row per leaf.
+constexpr std::array kLeafDatasets{"param_sets", "scores", "scores_ep",
+                                   "width"};
+
+/// Writes the leaves @p leaves (ascending) of the spool run @p src_path into
+/// @p dst, reading runs of consecutive rows at once. A run the search
+/// already reduced stores its leaves' indices in `leaf_index`.
+void copy_leaf_rows(const HighFive::File& raw,
+                    const std::string& src_path,
+                    HighFive::Group& dst,
+                    std::span<const std::uint32_t> leaves) {
+    const auto src = raw.getGroup(src_path);
+    std::vector<std::uint32_t> rows(leaves.begin(), leaves.end());
+    if (src.exist("leaf_index")) {
+        std::vector<std::uint32_t> spool_leaves;
+        src.getDataSet("leaf_index").read(spool_leaves);
+        for (auto& row : rows) {
+            const auto it = std::ranges::lower_bound(spool_leaves, row);
+            if (it == spool_leaves.end() || *it != row) {
+                throw std::logic_error("retained leaf missing from the spool");
+            }
+            row = static_cast<std::uint32_t>(it - spool_leaves.begin());
+        }
+    }
+    for (const auto* name : kLeafDatasets) {
+        const auto in    = src.getDataSet(name);
+        const auto type  = in.getDataType();
+        auto dims        = in.getDimensions();
+        std::size_t cols = 1;
+        for (std::size_t d = 1; d < dims.size(); ++d) {
+            cols *= dims[d];
+        }
+        const std::size_t row_bytes = cols * type.getSize();
+        std::vector<unsigned char> buffer(rows.size() * row_bytes);
+        for (std::size_t i = 0; i < rows.size();) {
+            std::size_t j = i + 1;
+            while (j < rows.size() && rows[j] == rows[j - 1] + 1) {
+                ++j;
+            }
+            std::vector<std::size_t> offset(dims.size(), 0);
+            std::vector<std::size_t> count(dims);
+            offset[0] = rows[i];
+            count[0]  = j - i;
+            in.select(offset, count)
+                .read_raw(buffer.data() + i * row_bytes, type);
+            i = j;
+        }
+        dims[0]  = rows.size();
+        auto out = dst.createDataSet(name, HighFive::DataSpace(dims), type);
+        copy_attributes(in, out);
+        if (!rows.empty()) {
+            out.write_raw(buffer.data(), type);
+        }
+    }
+    dst.createDataSet("leaf_index",
+                      std::vector<std::uint32_t>(leaves.begin(), leaves.end()))
+        .createAttribute("description",
+                         std::string("leaf of each row among the run's final "
+                                     "leaves; detections' source_index"));
+}
+
+/// Copies the spool's `chunks` tree one run at a time, with a checkpoint
+/// between runs: a single H5Ocopy of a multi-GB tree cannot be interrupted.
+/// The copied groups, datasets and attributes are those of one H5Ocopy.
+/// With @p reductions (one per source), a run keeps only its retained
+/// leaves, with their spool rows in `leaf_index` and the reduction's counts
+/// as attributes; its other objects are copied whole.
+void copy_ep_chunks(const HighFive::File& raw,
+                    HighFive::File& result,
+                    PostProgress& progress,
+                    std::span<const EPSource> sources,
+                    std::span<const RunReduction> reductions,
+                    const search::CandidateOptions& options,
+                    double snr_min) {
+    std::unordered_map<std::string, std::size_t> ordinal;
+    for (std::size_t i = 0; i < reductions.size(); ++i) {
+        ordinal.emplace(sources[i].path, i);
+    }
+    const auto src_chunks  = raw.getGroup("chunks");
+    auto dst_chunks        = result.createGroup("chunks");
+    const auto chunk_names = src_chunks.listObjectNames();
+    std::uint64_t n_runs   = 0;
+    for (const auto& chunk_name : chunk_names) {
+        const auto chunk = src_chunks.getGroup(chunk_name);
+        if (chunk.exist("runs")) {
+            n_runs += chunk.getGroup("runs").getNumberObjects();
+        }
+    }
+    copy_attributes(src_chunks, dst_chunks);
+    progress.phase("copying run diagnostics", n_runs);
+    for (const auto& chunk_name : chunk_names) {
+        const auto chunk_path = "chunks/" + chunk_name;
+        const auto src_chunk  = raw.getGroup(chunk_path);
+        auto dst_chunk        = dst_chunks.createGroup(chunk_name);
+        copy_attributes(src_chunk, dst_chunk);
+        for (const auto& name : src_chunk.listObjectNames()) {
+            if (name != "runs" ||
+                src_chunk.getObjectType(name) != HighFive::ObjectType::Group) {
+                copy_object(raw, chunk_path + "/" + name, dst_chunk, name);
+                continue;
+            }
+            const auto src_runs = src_chunk.getGroup("runs");
+            auto dst_runs       = dst_chunk.createGroup("runs");
+            copy_attributes(src_runs, dst_runs);
+            for (const auto& run : src_runs.listObjectNames()) {
+                // A run can be hundreds of MB: consider logging every run.
+                progress.poke();
+                progress.tick();
+                const auto run_path = chunk_path + "/runs/" + run;
+                const auto found    = ordinal.find(run_path);
+                if (found == ordinal.end()) {
+                    copy_object(raw, run_path, dst_runs, run);
+                    continue;
+                }
+                const auto& reduction = reductions[found->second];
+                const auto src_run    = raw.getGroup(run_path);
+                auto dst_run          = dst_runs.createGroup(run);
+                for (const auto& object : src_run.listObjectNames()) {
+                    if (object != "leaf_index" &&
+                        std::ranges::find(kLeafDatasets, object) ==
+                            kLeafDatasets.end()) {
+                        copy_object(raw, run_path + "/" + object, dst_run,
+                                    object);
+                    }
+                }
+                copy_leaf_rows(raw, run_path, dst_run, reduction.retained);
+                dst_run.createAttribute("n_final_leaves",
+                                        reduction.final_leaves);
+                dst_run.createAttribute("n_leaves_above_snr_min",
+                                        reduction.above_snr_min);
+                dst_run.createAttribute("n_cell_dropped",
+                                        reduction.cell_dropped);
+                dst_run.createAttribute("n_dominated", reduction.dominated);
+                dst_run.createAttribute(
+                    "n_leaves_retained",
+                    static_cast<std::uint64_t>(reduction.retained.size()));
+                dst_run.createAttribute("max_cell_dropped_snr",
+                                        reduction.max_cell_dropped_snr);
+                dst_run.createAttribute("max_per_cell_used",
+                                        reduction.max_per_cell_used);
+                // The options of the reduction: republishing this product
+                // needs them, as for a spool the search reduced.
+                dst_run.createAttribute("reduced_max_per_cell",
+                                        options.max_per_cell);
+                dst_run.createAttribute("reduced_cell_bins", options.cell_bins);
+                dst_run.createAttribute("reduced_cell_log_width",
+                                        options.cell_log_width);
+                dst_run.createAttribute("reduced_dominance_kappa",
+                                        options.dominance_kappa);
+                dst_run.createAttribute("reduced_radius", options.radius);
+                dst_run.createAttribute("reduced_phase_radius",
+                                        options.phase_radius);
+                dst_run.createAttribute("reduced_snr_min", snr_min);
+                dst_run.createAttribute(
+                    "reduced_at",
+                    src_run.hasAttribute("reduced_at")
+                        ? src_run.getAttribute("reduced_at").read<std::string>()
+                        : std::string("publication"));
+                // A reduced spool's counts are already folded into these;
+                // its other attributes are copied as they are.
+                copy_attributes(src_run, dst_run);
+            }
         }
     }
 }
@@ -167,11 +417,6 @@ std::vector<Candidate> read_candidates(const HighFive::File& file,
     return records;
 }
 
-struct EPSource {
-    std::string path;
-    std::uint64_t chunk;
-};
-
 std::vector<EPSource> ep_sources(const HighFive::File& file,
                                  const search::CandidateOptions& options) {
     std::string basis;
@@ -197,10 +442,6 @@ std::vector<EPSource> ep_sources(const HighFive::File& file,
         for (const auto& run : runs) {
             const auto run_path = path + "/runs/" + run;
             const auto group    = file.getGroup(run_path);
-            if (group.exist("harvest")) {
-                throw std::invalid_argument(
-                    "EP candidate publication requires RFI disabled");
-            }
             bytes += 2 * (sizeof(EPSource) + run_path.size() + 1);
             if (static_cast<double>(bytes) >
                 options.memory_gb * utils::kBytesPerGB / 8) {
@@ -246,6 +487,23 @@ std::vector<Candidate> read_ep_candidates(const HighFive::File& file,
     std::uint32_t nbins   = 0;
     const auto chunk_path = source.path.substr(0, source.path.find("/runs/"));
     file.getGroup(chunk_path).getAttribute("nbins").read(nbins);
+    // A run the search already reduced keeps only some leaves; leaf_index
+    // gives each row's leaf, the identity of its detection.
+    std::vector<std::uint32_t> leaf_index;
+    if (run.exist("leaf_index") && count != 0) {
+        leaf_index.resize(count);
+        run.getDataSet("leaf_index").select({start}, {count}).read(leaf_index);
+    }
+    // The chunk's parameter box, when the spool records it.
+    std::vector<double> limits;
+    if (file.getGroup(chunk_path).exist("param_limits")) {
+        const auto ds = file.getGroup(chunk_path).getDataSet("param_limits");
+        if (ds.getDimensions() == std::vector<std::size_t>{nparams, 2}) {
+            limits.resize(2 * nparams);
+            ds.read_raw(limits.data());
+        }
+    }
+    const std::size_t stride = (nparams + 2) * 2;
     std::vector<Candidate> records;
     records.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
@@ -255,32 +513,30 @@ std::vector<Candidate> read_ep_candidates(const HighFive::File& file,
         if (scores[i] < snr_min) {
             continue;
         }
-        if (start + i > std::numeric_limits<std::uint32_t>::max()) {
+        const std::size_t leaf = leaf_index.empty() ? start + i : leaf_index[i];
+        if (leaf > std::numeric_limits<std::uint32_t>::max()) {
             throw std::overflow_error(
                 "EP leaf index exceeds detection identity capacity");
         }
-        Candidate c;
-        c.id = (static_cast<std::uint64_t>(run_id) << 32U) | (start + i);
-        c.source_region = run_id;
-        c.source_index  = static_cast<std::uint32_t>(start + i);
-        c.width         = widths[i];
-        c.nbins         = nbins;
-        c.snr           = scores[i];
-        for (std::size_t k = 0; k < nparams; ++k) {
-            c.parameters[k] = leaves[i * (nparams + 2) * 2 + 2 * k];
+        auto c = search::detail::ep_leaf_candidate(
+            std::span<const double>(leaves).subspan(i * stride, stride),
+            nparams, scores[i], widths[i], nbins, run_id,
+            static_cast<std::uint32_t>(leaf));
+        // Frequency (the last parameter) is not part of the prior box.
+        for (std::size_t k = 0; !limits.empty() && k + 1 < nparams; ++k) {
+            if (c.parameters[k] < limits[2 * k] ||
+                c.parameters[k] > limits[(2 * k) + 1]) {
+                c.outside_prior = true;
+            }
         }
-        c.derivatives[0] = c.parameters[nparams - 1];
-        for (std::size_t k = 1; k < nparams; ++k) {
-            c.derivatives[k] = -c.derivatives[0] *
-                               c.parameters[nparams - 1 - k] * utils::kInvCval;
-        }
-        c.validate();
         records.push_back(c);
     }
     return records;
 }
 
 static_assert(std::is_trivially_copyable_v<Candidate>);
+// docs/candidates.md and docs/memory.md quote the sort record size.
+static_assert(sizeof(Candidate) == 184);
 void write_record(std::ostream& out, const Candidate& c) {
     out.write(reinterpret_cast<const char*>(&c), sizeof(c));
     if (!out) {
@@ -301,7 +557,8 @@ bool read_record(std::istream& in, Candidate& c) {
 
 // Bounded fan-in; caller stores only a logarithmic number of pending runs.
 void merge_runs(std::span<const std::filesystem::path> inputs,
-                const std::filesystem::path& output) {
+                const std::filesystem::path& output,
+                PostProgress& progress) {
     struct Item {
         Candidate record;
         std::size_t source;
@@ -324,6 +581,7 @@ void merge_runs(std::span<const std::filesystem::path> inputs,
         throw std::runtime_error("cannot create candidate merge run");
     }
     while (!heap.empty()) {
+        progress.tick_merge();
         const auto item = heap.top();
         heap.pop();
         write_record(out, item.record);
@@ -340,8 +598,9 @@ void merge_runs(std::span<const std::filesystem::path> inputs,
 
 class ExternalSort {
 public:
-    explicit ExternalSort(std::filesystem::path directory)
-        : m_directory(std::move(directory)) {}
+    ExternalSort(std::filesystem::path directory, PostProgress& progress)
+        : m_directory(std::move(directory)),
+          m_progress(&progress) {}
     void add(std::vector<Candidate>& records) {
         std::ranges::sort(records, search::detail::candidate_brighter);
         auto path = next_path();
@@ -371,7 +630,7 @@ public:
             }
             const auto merged = next_path();
             const std::array inputs{m_levels[level], path};
-            merge_runs(inputs, merged);
+            merge_runs(inputs, merged, *m_progress);
             for (const auto& input : inputs) {
                 std::filesystem::remove(input);
             }
@@ -391,7 +650,7 @@ public:
             } else {
                 const auto merged = next_path();
                 const std::array inputs{result, path};
-                merge_runs(inputs, merged);
+                merge_runs(inputs, merged, *m_progress);
                 for (const auto& input : inputs) {
                     std::filesystem::remove(input);
                 }
@@ -406,6 +665,7 @@ private:
         return m_directory / (std::to_string(m_serial++) + ".run");
     }
     std::filesystem::path m_directory;
+    PostProgress* m_progress;
     std::uint64_t m_serial{};
     std::vector<std::filesystem::path> m_levels;
 };
@@ -439,6 +699,7 @@ public:
         create<std::uint32_t>("harmonic_denominator");
         create<std::uint8_t>("selected");
         create<std::uint8_t>("has_parameter_errors");
+        create<std::uint8_t>("outside_prior");
         HighFive::DataSetCreateProps props;
         props.add(HighFive::Chunking({batch_size, nparams}));
         props.add(HighFive::Shuffle());
@@ -514,6 +775,9 @@ public:
         column<std::uint8_t>("has_parameter_errors", [](const auto& c) {
             return c.representative.has_parameter_errors ? 1 : 0;
         });
+        column<std::uint8_t>("outside_prior", [](const auto& c) {
+            return c.representative.outside_prior ? 1 : 0;
+        });
         append_column("cluster_id", m_ids);
         std::vector<double> params;
         params.reserve(m_batch.size() * m_nparams);
@@ -574,6 +838,42 @@ private:
     std::vector<CandidateCluster> m_batch;
     std::vector<std::uint64_t> m_ids;
 };
+/// A run the search reduced keeps only some leaves: publication must use the
+/// options it was reduced with, and its snr_min, to give the same product.
+void check_reduced_run(const HighFive::Group& run,
+                       const search::CandidateOptions& options,
+                       double snr_min) {
+    if (!run.hasAttribute("reduced_max_per_cell")) {
+        return;
+    }
+    const auto u64 = [&](const char* name) {
+        return run.getAttribute(name).read<std::uint64_t>();
+    };
+    const auto f64 = [&](const char* name) {
+        return run.getAttribute(name).read<double>();
+    };
+    const bool same =
+        u64("reduced_max_per_cell") == options.max_per_cell &&
+        f64("reduced_cell_bins") == options.cell_bins &&
+        f64("reduced_cell_log_width") == options.cell_log_width &&
+        f64("reduced_dominance_kappa") == options.dominance_kappa &&
+        f64("reduced_radius") == options.radius &&
+        f64("reduced_phase_radius") == options.phase_radius &&
+        f64("reduced_snr_min") == snr_min;
+    if (!same) {
+        throw std::invalid_argument(fmt::format(
+            "the search reduced its final leaves with max_per_cell = {}, "
+            "cell_bins = {}, cell_log_width = {}, dominance_kappa = {}, "
+            "radius = {}, phase_radius = {} and snr_min = {}; publish with the "
+            "same options, or search again with max_per_cell = 0 to keep "
+            "every leaf",
+            u64("reduced_max_per_cell"), f64("reduced_cell_bins"),
+            f64("reduced_cell_log_width"), f64("reduced_dominance_kappa"),
+            f64("reduced_radius"), f64("reduced_phase_radius"),
+            f64("reduced_snr_min")));
+    }
+}
+
 void publish_candidate_results(const std::filesystem::path& spool,
                                const std::filesystem::path& output,
                                const ObservationMetadata& observation,
@@ -583,6 +883,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
     options.validate();
     observation.validate();
     const auto started = std::chrono::steady_clock::now();
+    PostProgress progress;
     ScratchDirectory scratch(options.temporary_directory.empty()
                                  ? (output.parent_path().empty()
                                         ? std::filesystem::path(".")
@@ -633,12 +934,58 @@ void publish_candidate_results(const std::filesystem::path& spool,
                65536,
                static_cast<std::size_t>(options.memory_gb * utils::kBytesPerGB /
                                         (32 * sizeof(Candidate)))));
-    ExternalSort sort(scratch.path);
+    ExternalSort sort(scratch.path, progress);
     // With a cell cap, only the trials it keeps are sorted and grouped.
     std::optional<search::detail::CellCap> cap;
     if (options.max_per_cell != 0) {
-        cap.emplace(options, 2 * source_bytes);
+        cap.emplace(options, tobs, 2 * source_bytes);
     }
+    std::optional<search::detail::DominanceReducer> dominance;
+    if (cap && options.dominance_kappa > 0) {
+        dominance.emplace(tobs, options);
+    }
+    std::uint64_t dominated = 0;
+    // Trials a search that reduced its runs dropped before the spool.
+    std::uint64_t spool_cell_dropped = 0;
+    std::uint64_t spool_dominated    = 0;
+    // Per-run accounting of a reduced EP spool; the result keeps only the
+    // retained leaves of each run.
+    std::vector<RunReduction> reductions(ep && cap ? sources.size() : 0);
+    // Cells belong to one source, so an EP run's kept trials can be reduced
+    // and sorted as soon as it is read: the cap then holds one run at a time.
+    const auto drain = [&](RunReduction* run) {
+        if (!cap) {
+            return;
+        }
+        const float max_cell_dropped = cap->max_dropped_snr();
+        const auto used              = cap->max_per_cell_used();
+        if (used < options.max_per_cell) {
+            spdlog::warn("Candidate cells kept {} trials each instead of {} "
+                         "to fit candidate memory_gb",
+                         used, options.max_per_cell);
+        }
+        auto kept                    = cap->take();
+        const std::uint64_t absorbed = dominance ? dominance->reduce(kept) : 0;
+        dominated += absorbed;
+        if (run != nullptr) {
+            run->dominated            = absorbed;
+            run->max_cell_dropped_snr = max_cell_dropped;
+            run->max_per_cell_used    = used;
+            run->retained.reserve(kept.size());
+            for (const auto& c : kept) {
+                run->retained.push_back(c.source_index);
+            }
+            std::ranges::sort(run->retained);
+        }
+        nrows += kept.size();
+        for (std::size_t start = 0; start < kept.size(); start += batch) {
+            std::vector<Candidate> records(
+                kept.begin() + static_cast<std::ptrdiff_t>(start),
+                kept.begin() + static_cast<std::ptrdiff_t>(
+                                   std::min(start + batch, kept.size())));
+            sort.add(records);
+        }
+    };
     const auto keep = [&](std::vector<Candidate>& records) {
         if (cap) {
             for (const auto& c : records) {
@@ -650,38 +997,71 @@ void publish_candidate_results(const std::filesystem::path& spool,
         }
     };
     if (ep) {
+        progress.phase("reading and sorting runs", sources.size());
+        for (const auto& source : sources) {
+            check_reduced_run(raw.getGroup(source.path), options, snr_min);
+        }
         for (std::size_t run_id = 0; run_id < sources.size(); ++run_id) {
+            progress.poke();
+            progress.tick();
             const auto count = raw.getGroup(sources[run_id].path)
                                    .getDataSet("scores")
                                    .getDimensions()[0];
             for (std::size_t start = 0; start < count; start += batch) {
+                loki::check_interrupt();
                 auto records = read_ep_candidates(
                     raw, sources[run_id], static_cast<std::uint32_t>(run_id),
                     start, std::min(batch, count - start), nparams, snr_min);
+                if (!reductions.empty()) {
+                    reductions[run_id].above_snr_min += records.size();
+                }
                 keep(records);
+            }
+            if (!reductions.empty()) {
+                auto& run        = reductions[run_id];
+                run.final_leaves = count;
+                run.cell_dropped = run.above_snr_min - cap->kept();
+            }
+            drain(reductions.empty() ? nullptr : &reductions[run_id]);
+            // A run the search reduced: add the search's counts.
+            const auto group = raw.getGroup(sources[run_id].path);
+            if (!reductions.empty() && group.hasAttribute("n_final_leaves")) {
+                auto& run      = reductions[run_id];
+                const auto get = [&](const char* name) {
+                    return group.getAttribute(name).read<std::uint64_t>();
+                };
+                run.final_leaves  = get("n_final_leaves");
+                run.above_snr_min = get("n_leaves_above_snr_min");
+                run.cell_dropped += get("n_cell_dropped");
+                run.dominated += get("n_dominated");
+                spool_cell_dropped += get("n_cell_dropped");
+                spool_dominated += get("n_dominated");
+                run.max_cell_dropped_snr = std::max(
+                    run.max_cell_dropped_snr,
+                    group.getAttribute("max_cell_dropped_snr").read<float>());
+                if (group.hasAttribute("max_per_cell_used")) {
+                    run.max_per_cell_used = std::min(run.max_per_cell_used,
+                                                     get("max_per_cell_used"));
+                }
             }
         }
     } else {
         const auto count = raw.getDataSet("snr").getDimensions()[0];
+        progress.phase("reading and sorting detections", count);
         for (std::size_t start = 0; start < count; start += batch) {
+            progress.poke();
+            progress.tick(std::min(batch, count - start));
             auto records = read_candidates(
                 raw, start, std::min(batch, count - start), nparams);
             keep(records);
         }
     }
-    const std::uint64_t cell_dropped = cap ? cap->dropped() : 0;
-    if (cap) {
-        auto kept = cap->take();
-        cap.reset();
-        nrows = kept.size();
-        for (std::size_t start = 0; start < kept.size(); start += batch) {
-            std::vector<Candidate> records(
-                kept.begin() + static_cast<std::ptrdiff_t>(start),
-                kept.begin() + static_cast<std::ptrdiff_t>(
-                                   std::min(start + batch, kept.size())));
-            sort.add(records);
-        }
-    }
+    drain(nullptr);
+    const std::uint64_t cell_dropped =
+        (cap ? cap->dropped() : 0) + spool_cell_dropped;
+    dominated += spool_dominated;
+    cap.reset();
+    progress.phase("merging sorted runs", 0);
     const auto sorted = sort.finish();
     // The atomic publication file must live beside the destination, even if
     // scratch sorting is explicitly placed on another filesystem.
@@ -693,7 +1073,8 @@ void publish_candidate_results(const std::filesystem::path& spool,
     std::uint64_t selected      = 0;
     try {
         {
-            HighFive::File result(publish.string(), HighFive::File::Excl);
+            HighFive::File result = io::detail::open_result_file(
+                publish.string(), HighFive::File::Excl);
             result.createAttribute("schema_version", std::string("1.0"));
             result.createAttribute("producer", std::string("loki"));
             result.createAttribute("producer_version",
@@ -712,6 +1093,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
             result.createAttribute("n_detections",
                                    static_cast<std::uint64_t>(nrows));
             result.createAttribute("n_cell_dropped", cell_dropped);
+            result.createAttribute("n_dominated", dominated);
             auto config = result.createGroup("processing");
             config.createAttribute("cluster", options.cluster);
             config.createAttribute("grouping", options.grouping);
@@ -728,8 +1110,14 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                    options.harmonic_phase_distance);
             config.createAttribute("harmonic_snr_distance",
                                    options.harmonic_snr_distance);
+            config.createAttribute("harmonic_doppler_tolerance",
+                                   options.harmonic_doppler_tolerance);
+            config.createAttribute("harmonic_doppler_min_snr",
+                                   options.harmonic_doppler_min_snr);
             config.createAttribute("max_per_cell", options.max_per_cell);
+            config.createAttribute("cell_bins", options.cell_bins);
             config.createAttribute("cell_log_width", options.cell_log_width);
+            config.createAttribute("dominance_kappa", options.dominance_kappa);
             config.createAttribute("max_candidates", options.max_candidates);
             config.createAttribute("memory_gb", options.memory_gb);
             config.createAttribute("temporary_directory",
@@ -768,8 +1156,10 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 copy_object(raw, "timer_stats", search_group, "timer_stats");
             }
             if (ep) {
-                copy_object(raw, "chunks", result.getGroup("/"), "chunks");
+                copy_ep_chunks(raw, result, progress, sources, reductions,
+                               options, snr_min);
                 copy_attributes(raw.getGroup("/"), result, true);
+                search::write_harvested(result);
                 config.createAttribute("snr_min", snr_min);
                 config.createAttribute(
                     "width_policy",
@@ -805,10 +1195,14 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                    batch);
             const bool singleton_stream =
                 !options.cluster && !options.flag_harmonics;
+            progress.phase(singleton_stream ? "writing detections"
+                                            : "clustering detections",
+                           nrows);
             if (!sorted.empty()) {
                 std::ifstream in(sorted, std::ios::binary);
                 Candidate c;
                 while (read_record(in, c)) {
+                    progress.tick();
                     std::uint64_t id = 0;
                     if (singleton_stream) {
                         id = cluster_count++;
@@ -834,6 +1228,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 result.unlink("_discarded");
             }
             if (!singleton_stream) {
+                progress.phase("finishing clusters", 0);
                 processor.finish();
                 // Transitive append IDs are provisional: a later bridge can
                 // join earlier groups. Remap only after the graph is complete,
@@ -841,9 +1236,12 @@ void publish_candidate_results(const std::filesystem::path& spool,
                 if (options.retain_detections && options.cluster &&
                     options.grouping == "transitive") {
                     auto dataset = result.getDataSet("detections/cluster_id");
+                    progress.phase("remapping cluster ids", nrows);
                     for (std::size_t start = 0; start < nrows; start += batch) {
                         const auto count = std::min(batch, nrows - start);
-                        auto ids         = read_rows<std::uint64_t>(
+                        progress.poke();
+                        progress.tick(count);
+                        auto ids = read_rows<std::uint64_t>(
                             result, "detections/cluster_id", start, count);
                         for (auto& id : ids) {
                             id = processor.cluster_id(id);

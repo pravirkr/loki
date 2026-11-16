@@ -37,6 +37,7 @@
 
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
+#include "lib/io/h5_layout.hpp"
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
@@ -249,10 +250,16 @@ double PruneStats::lb_leaves_phys() const noexcept {
     return round_dp(std::log2(static_cast<double>(n_leaves_phy)), 2);
 }
 double PruneStats::branch_frac() const noexcept {
+    if (n_branches == 0) {
+        return 0.0;
+    }
     return round_dp(
         static_cast<double>(n_leaves) / static_cast<double>(n_branches), 2);
 }
 double PruneStats::phys_frac() const noexcept {
+    if (n_leaves == 0) {
+        return 0.0;
+    }
     return round_dp(
         static_cast<double>(n_leaves_phy) / static_cast<double>(n_leaves), 2);
 }
@@ -553,7 +560,8 @@ HighFive::File FFAResultWriter::open_file() const {
         open_mode = HighFive::File::Create;
     }
 
-    HighFive::File file(m_open_path.string(), open_mode);
+    HighFive::File file =
+        io::detail::open_result_file(m_open_path.string(), open_mode);
     if (!file.isValid()) {
         throw std::runtime_error("Failed to create valid HDF5 file");
     }
@@ -653,7 +661,7 @@ FFAResultMetadata::FFAResultMetadata(const search::FFASearchConfig& cfg,
       wtsp(cfg.get_wtsp()),
       nbins_min(cfg.get_nbins()),
       nbins_max(cfg.get_nbins_max()),
-      octave_scale(cfg.get_octave_scale()),
+      region_growth_factor(cfg.get_region_growth_factor()),
       eta(cfg.get_eta()),
       use_fourier(cfg.get_use_fourier()),
       bseg_brute(cfg.get_bseg_brute()),
@@ -680,8 +688,15 @@ void FFAResultWriter::write_metadata(const FFAResultMetadata& metadata) {
     h5_file().createAttribute("wtsp", metadata.wtsp);
     h5_file().createAttribute("nbins_min", metadata.nbins_min);
     h5_file().createAttribute("nbins_max", metadata.nbins_max);
-    h5_file().createAttribute("octave_scale", metadata.octave_scale);
+    h5_file().createAttribute("region_growth_factor",
+                              metadata.region_growth_factor);
     h5_file().createAttribute("eta", metadata.eta);
+    // Duty-cycle resolution of the grid: eta / nbins turns in every region.
+    h5_file().createAttribute("phase_tolerance",
+                              metadata.nbins_min > 0
+                                  ? metadata.eta /
+                                        static_cast<double>(metadata.nbins_min)
+                                  : 0.0);
     h5_file().createAttribute("use_fourier", metadata.use_fourier);
     if (metadata.bseg_brute.has_value()) {
         h5_file().createAttribute("bseg_brute", *metadata.bseg_brute);
@@ -817,6 +832,39 @@ PruneResultWriter::PruneResultWriter(std::filesystem::path filename,
       m_mode(mode),
       m_group_path(std::move(group_path)) {}
 
+void write_rfi_config(HighFive::Group& rfi,
+                      const algorithms::PruneRFIConfig& rfi_config) {
+    const auto n_windows = rfi_config.pulsar_mask.size();
+    std::vector<double> windows_flat(n_windows * 4);
+    for (SizeType i = 0; i < n_windows; ++i) {
+        const auto& w             = rfi_config.pulsar_mask[i];
+        windows_flat[(i * 4) + 0] = w.f_lo;
+        windows_flat[(i * 4) + 1] = w.f_hi;
+        windows_flat[(i * 4) + 2] = w.a_lo;
+        windows_flat[(i * 4) + 3] = w.a_hi;
+    }
+    auto mask_ds =
+        rfi.createDataSet("pulsar_mask", HighFive::DataSpace({n_windows, 4UL}),
+                          HighFive::create_datatype<double>());
+    if (n_windows > 0) {
+        mask_ds.write_raw(windows_flat.data(),
+                          HighFive::create_datatype<double>());
+    }
+    create_1d_dataset<float>(rfi, "harvest_scheme", rfi_config.harvest_scheme);
+    rfi.createAttribute("n_harmonics", rfi_config.n_harmonics);
+    rfi.createAttribute("fractional_harmonics",
+                        static_cast<uint8_t>(rfi_config.fractional_harmonics));
+    rfi.createAttribute("harvest_mask_ntiles", rfi_config.harvest_mask_ntiles);
+    rfi.createAttribute("max_harvests", rfi_config.max_harvests);
+    rfi.createAttribute("harvest_store_folds",
+                        static_cast<uint8_t>(rfi_config.harvest_store_folds));
+    rfi.createAttribute("impulsive_veto",
+                        static_cast<uint8_t>(rfi_config.impulsive_veto));
+    rfi.createAttribute("impulsive_kappa", rfi_config.impulsive_kappa);
+    rfi.createAttribute("impulsive_min_level", rfi_config.impulsive_min_level);
+    rfi.createAttribute("impulsive_min_snr", rfi_config.impulsive_min_snr);
+}
+
 void PruneResultWriter::write_metadata(
     const std::vector<std::string>& param_names,
     SizeType nsegments,
@@ -837,34 +885,8 @@ void PruneResultWriter::write_metadata(
     file.createDataSet("threshold_scheme", threshold_scheme);
 
     // RFI-control configuration
-    HighFive::Group rfi  = file.createGroup("rfi_config");
-    const auto n_windows = rfi_config.pulsar_mask.size();
-    std::vector<double> windows_flat(n_windows * 4);
-    for (SizeType i = 0; i < n_windows; ++i) {
-        const auto& w             = rfi_config.pulsar_mask[i];
-        windows_flat[(i * 4) + 0] = w.f_lo;
-        windows_flat[(i * 4) + 1] = w.f_hi;
-        windows_flat[(i * 4) + 2] = w.a_lo;
-        windows_flat[(i * 4) + 3] = w.a_hi;
-    }
-    auto mask_ds =
-        rfi.createDataSet("pulsar_mask", HighFive::DataSpace({n_windows, 4UL}),
-                          HighFive::create_datatype<double>());
-    if (n_windows > 0) {
-        mask_ds.write_raw(windows_flat.data(),
-                          HighFive::create_datatype<double>());
-    }
-    create_1d_dataset<float>(rfi, "harvest_scheme", rfi_config.harvest_scheme);
-    rfi.createAttribute("n_harmonics", rfi_config.n_harmonics);
-    rfi.createAttribute("harvest_mask_ntiles", rfi_config.harvest_mask_ntiles);
-    rfi.createAttribute("max_harvests", rfi_config.max_harvests);
-    rfi.createAttribute("harvest_store_folds",
-                        static_cast<uint8_t>(rfi_config.harvest_store_folds));
-    rfi.createAttribute("impulsive_veto",
-                        static_cast<uint8_t>(rfi_config.impulsive_veto));
-    rfi.createAttribute("impulsive_kappa", rfi_config.impulsive_kappa);
-    rfi.createAttribute("impulsive_min_level", rfi_config.impulsive_min_level);
-    rfi.createAttribute("impulsive_min_snr", rfi_config.impulsive_min_snr);
+    auto rfi = file.createGroup("rfi_config");
+    write_rfi_config(rfi, rfi_config);
 }
 
 template <SupportedFoldType FoldType>
@@ -962,7 +984,53 @@ void PruneResultWriter::write_run_results(
     SizeType n_leaves,
     SizeType n_params,
     const PruneStatsCollection& pstats,
-    std::span<const std::uint32_t> widths) {
+    std::span<const std::uint32_t> widths,
+    const detail::LeafReductionSpec* reduction) {
+    // With a reduction, only the retained leaves are written: compacted
+    // copies replace the views, and leaf_index maps rows back to leaves.
+    std::optional<detail::RunLeafReduction> reduced;
+    std::vector<double> kept_leaves;
+    std::vector<float> kept_scores;
+    std::vector<float> kept_scores_ep;
+    std::vector<std::uint32_t> kept_widths;
+    if (reduction != nullptr) {
+        const auto stride = (n_params + 2) * 2;
+        const auto n1     = leaves_view.first.size() / stride;
+        const auto leaf   = [&](std::size_t i) -> std::span<const double> {
+            return i < n1
+                       ? leaves_view.first.subspan(i * stride, stride)
+                       : leaves_view.second.subspan((i - n1) * stride, stride);
+        };
+        const auto pick = [](const memory::CircularView<float>& v,
+                             std::size_t i) {
+            return i < v.first.size() ? v.first[i]
+                                      : v.second[i - v.first.size()];
+        };
+        error_check::check_equal(
+            leaves_view.first.size() / stride +
+                leaves_view.second.size() / stride,
+            n_leaves, "write_run_results: circular view size mismatch");
+        reduced = detail::reduce_run_leaves(
+            *reduction, n_leaves, n_params, leaf,
+            [&](std::size_t i) { return pick(scores_view, i); }, widths);
+        const auto n = reduced->retained.size();
+        kept_leaves.reserve(n * stride);
+        kept_scores.reserve(n);
+        kept_scores_ep.reserve(n);
+        kept_widths.reserve(n);
+        for (const auto i : reduced->retained) {
+            const auto row = leaf(i);
+            kept_leaves.insert(kept_leaves.end(), row.begin(), row.end());
+            kept_scores.push_back(pick(scores_view, i));
+            kept_scores_ep.push_back(pick(scores_ep_view, i));
+            kept_widths.push_back(widths[i]);
+        }
+        leaves_view    = {std::span<double>(kept_leaves), {}};
+        scores_view    = {std::span<float>(kept_scores), {}};
+        scores_ep_view = {std::span<float>(kept_scores_ep), {}};
+        widths         = kept_widths;
+        n_leaves       = n;
+    }
     const std::scoped_lock lock(m_hdf5_mutex);
 
     HighFive::File file        = open_file();
@@ -1038,17 +1106,49 @@ void PruneResultWriter::write_run_results(
     offset_s += scores_ep_view.first.size();
     write_chunk_scores_ep(scores_ep_view.second, offset_s);
 
-    run_group.createDataSet("snail_scheme", snail_scheme);
+    run_group.createDataSet(
+        "snail_scheme", snail_scheme,
+        io::detail::small_table_props({snail_scheme.size()}));
     if (!widths.empty() || n_leaves == 0) {
         error_check::check_equal(widths.size(), n_leaves,
                                  "write_run_results: width count mismatch");
         run_group.createDataSet("width", widths);
     }
     if (!level_stats.empty()) {
-        run_group.createDataSet("level_stats", level_stats);
+        run_group.createDataSet(
+            "level_stats", level_stats,
+            io::detail::small_table_props({level_stats.size()}));
     }
     if (!timer_stats.empty()) {
         run_group.createDataSet("timer_stats", timer_stats);
+    }
+    if (reduced) {
+        run_group.createDataSet("leaf_index", reduced->retained)
+            .createAttribute("description",
+                             std::string("leaf of each row among the run's "
+                                         "final leaves"));
+        run_group.createAttribute("n_final_leaves", reduced->final_leaves);
+        run_group.createAttribute("n_leaves_above_snr_min",
+                                  reduced->above_snr_min);
+        run_group.createAttribute("n_cell_dropped", reduced->cell_dropped);
+        run_group.createAttribute("n_dominated", reduced->dominated);
+        run_group.createAttribute(
+            "n_leaves_retained",
+            static_cast<std::uint64_t>(reduced->retained.size()));
+        run_group.createAttribute("max_cell_dropped_snr",
+                                  reduced->max_cell_dropped_snr);
+        run_group.createAttribute("max_per_cell_used",
+                                  reduced->max_per_cell_used);
+        // The options the search reduced with: publication must use them.
+        const auto& o = reduction->options;
+        run_group.createAttribute("reduced_max_per_cell", o.max_per_cell);
+        run_group.createAttribute("reduced_cell_bins", o.cell_bins);
+        run_group.createAttribute("reduced_cell_log_width", o.cell_log_width);
+        run_group.createAttribute("reduced_dominance_kappa", o.dominance_kappa);
+        run_group.createAttribute("reduced_radius", o.radius);
+        run_group.createAttribute("reduced_phase_radius", o.phase_radius);
+        run_group.createAttribute("reduced_snr_min", reduction->snr_min);
+        run_group.createAttribute("reduced_at", std::string("search"));
     }
 }
 
@@ -1062,7 +1162,8 @@ HighFive::File PruneResultWriter::open_file() const {
         open_mode = HighFive::File::Create;
     }
 
-    HighFive::File file(m_filepath.string(), open_mode);
+    HighFive::File file =
+        io::detail::open_result_file(m_filepath.string(), open_mode);
     if (!file.isValid()) {
         throw std::runtime_error("Failed to create valid HDF5 file");
     }
@@ -1141,7 +1242,8 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
     const auto open_mode = std::filesystem::exists(result_file)
                                ? HighFive::File::ReadWrite
                                : HighFive::File::Create;
-    HighFive::File main_h5(result_file.string(), open_mode);
+    HighFive::File main_h5 =
+        io::detail::open_result_file(result_file.string(), open_mode);
     const HighFive::Group main_runs_group = main_h5.exist("runs")
                                                 ? main_h5.getGroup("runs")
                                                 : main_h5.createGroup("runs");

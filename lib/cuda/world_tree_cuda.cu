@@ -64,6 +64,22 @@ struct ScoreAboveThresholdFunctor {
     }
 };
 
+struct DirectKeepPredicate {
+    const uint8_t* __restrict__ flags;
+
+    __host__ __device__ bool operator()(uint32_t logical_idx) const {
+        return flags[logical_idx] != 0U;
+    }
+};
+
+struct DirectDropPredicate {
+    const uint8_t* __restrict__ flags;
+
+    __host__ __device__ bool operator()(uint32_t logical_idx) const {
+        return flags[logical_idx] == 0U;
+    }
+};
+
 // Warp-per-row kernel (for most workloads)
 // Multi-warp per-row kernel (for large workloads)
 template <SizeType WarpsPerRow, SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -655,6 +671,31 @@ void WorldTreeCUDA<FoldTypeCUDA>::add_initial(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::add_initial_scattered(
+    cuda::std::span<const double> leaves_batch,
+    cuda::std::span<const FoldTypeCUDA> folds_batch,
+    cuda::std::span<const float> scores_batch,
+    cuda::std::span<const uint32_t> indices_batch,
+    SizeType n_keep,
+    cudaStream_t stream) {
+    error_check::check_less_equal(
+        n_keep, m_capacity, "WorldTreeCUDA: Suggestions too large to add.");
+    error_check::check_greater_equal(
+        indices_batch.size(), n_keep,
+        "add_initial_scattered: indices_batch smaller than n_keep");
+    reset();
+    if (n_keep > 0) {
+        scatter_to_circular_copy_cuda(
+            leaves_batch.data(), folds_batch.data(), scores_batch.data(),
+            indices_batch.data(), thrust::raw_pointer_cast(m_leaves.data()),
+            thrust::raw_pointer_cast(m_folds.data()),
+            thrust::raw_pointer_cast(m_scores.data()), 0, m_capacity, n_keep,
+            m_leaves_stride, m_folds_stride, stream);
+    }
+    m_size = n_keep;
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 typename WorldTreeCUDA<FoldTypeCUDA>::DirectWrite
 WorldTreeCUDA<FoldTypeCUDA>::get_direct_write() noexcept {
     return {.leaves     = thrust::raw_pointer_cast(m_leaves.data()),
@@ -670,6 +711,65 @@ void WorldTreeCUDA<FoldTypeCUDA>::commit_direct_write(SizeType n) {
         "WorldTreeCUDA: direct write larger than the free space");
     m_write_head = get_circular_index(n, m_write_head, m_capacity);
     m_size += n;
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::commit_direct_write_filtered(
+    SizeType n,
+    cuda::std::span<const uint8_t> keep_flags,
+    cudaStream_t stream) {
+    error_check::check(
+        m_is_updating,
+        "WorldTreeCUDA: commit_direct_write_filtered only during updates");
+    error_check::check_less_equal(
+        n, calculate_space_left(),
+        "WorldTreeCUDA: direct write larger than the free space");
+    if (n == 0) {
+        return 0;
+    }
+    error_check::check_greater_equal(
+        keep_flags.size(), n,
+        "WorldTreeCUDA: keep_flags smaller than direct write count");
+
+    auto begin = thrust::make_counting_iterator<uint32_t>(0);
+    auto end   = begin + static_cast<uint32_t>(n);
+    const DirectKeepPredicate keep_pred{.flags = keep_flags.data()};
+    const auto kept = static_cast<SizeType>(
+        thrust::count_if(thrust::cuda::par.on(stream), begin, end, keep_pred));
+    if (kept == 0) {
+        return 0;
+    }
+    if (kept == n) {
+        commit_direct_write(n);
+        return n;
+    }
+
+    uint32_t* __restrict__ d_holes =
+        thrust::raw_pointer_cast(m_scratch_indices_1.data());
+    uint32_t* __restrict__ d_survivors =
+        thrust::raw_pointer_cast(m_scratch_indices_2.data());
+    const DirectDropPredicate drop_pred{.flags = keep_flags.data()};
+    // Extract holes in [0, kept) and stranded survivors in [kept, n) cleanly
+    // so parallel moves never collide on circular indices.
+    auto holes_end        = thrust::copy_if(thrust::cuda::par.on(stream), begin,
+                                            begin + static_cast<uint32_t>(kept),
+                                            d_holes, drop_pred);
+    const auto swap_count = static_cast<uint32_t>(holes_end - d_holes);
+    if (swap_count > 0) {
+        thrust::copy_if(thrust::cuda::par.on(stream),
+                        begin + static_cast<uint32_t>(kept), end, d_survivors,
+                        keep_pred);
+        fused_move_pairs_cuda<FoldTypeCUDA>(
+            d_holes, d_survivors, thrust::raw_pointer_cast(m_leaves.data()),
+            thrust::raw_pointer_cast(m_folds.data()),
+            thrust::raw_pointer_cast(m_scores.data()),
+            static_cast<uint32_t>(m_write_head), m_capacity, swap_count,
+            m_leaves_stride, m_folds_stride, stream);
+    }
+
+    m_write_head = get_circular_index(kept, m_write_head, m_capacity);
+    m_size += kept;
+    return kept;
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

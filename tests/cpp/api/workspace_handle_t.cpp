@@ -61,7 +61,7 @@ PulsarSearchConfig make_cfg(bool use_fourier) {
             use_fourier,
             /*nthreads=*/1,
             /*max_process_memory_gb=*/4.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/32,
             /*bseg_brute=*/128};
@@ -129,7 +129,7 @@ PulsarSearchConfig make_ep_cfg(bool use_fourier, int nthreads) {
             use_fourier,
             nthreads,
             /*max_process_memory_gb=*/8.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
@@ -148,7 +148,7 @@ EPWorkspace<FoldType> make_ep_workspace(const PulsarSearchConfig& cfg,
                                         Exec exec) {
     const loki::plans::FFAPlan<FoldType> plan(cfg);
     const auto forecast   = plan.forecast_branching("taylor");
-    const auto branch_max = std::max(forecast.max_children, SizeType{32});
+    const auto branch_max = std::max(forecast.max_children, SizeType{1});
     const SizeType nbins  = std::is_same_v<FoldType, ComplexType>
                                 ? cfg.get_nbins_f()
                                 : cfg.get_nbins();

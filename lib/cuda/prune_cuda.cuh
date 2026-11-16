@@ -7,6 +7,7 @@
  */
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -15,6 +16,7 @@
 
 #include <cuda_runtime.h>
 
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -83,6 +85,9 @@ public:
     /// Shared-pipeline form: runs on the sweep's buffers (see
     /// EPCudaSharedPipeline). @p max_sugg is this chunk's, for the result file;
     /// the workspace capacity is @p pipeline.ws_max_sugg. Use execute_device().
+    /// @p rfi_config: the chunk's RFI control (pulsar mask and early harvest;
+    /// the impulsive veto is CPU only), with its harvest scheme expanded from
+    /// @p threshold_scheme or harvest_defaults.
     EPMultiPassCudaCore(
         const EPCudaSharedPipeline<FoldTypeCUDA>& pipeline,
         search::PulsarSearchConfig cfg,
@@ -93,7 +98,8 @@ public:
         SizeType max_sugg                             = 1U << 20U,
         SizeType batch_size                           = 4096U,
         std::string_view poly_basis                   = "taylor",
-        int device_id                                 = 0);
+        int device_id                                 = 0,
+        PruneRFIConfig rfi_config                     = {});
 
     ~EPMultiPassCudaCore();
     EPMultiPassCudaCore(EPMultiPassCudaCore&&) noexcept;

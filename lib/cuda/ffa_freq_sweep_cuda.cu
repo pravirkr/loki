@@ -27,6 +27,7 @@
 #include "lib/cuda/ffa_cuda.cuh"
 #include "lib/cuda/ffa_score_cuda.cuh"
 #include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/interrupt_cuda.cuh"
 #include "lib/cuda/score_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/detail/error_check.hpp"
@@ -139,21 +140,29 @@ public:
                      m_region_planner.get_nregions(), m_cands.get_capacity());
     }
 
-    ~FFAFreqSweepCudaEngine() final {
+    ~FFAFreqSweepCudaEngine() noexcept final {
+        (void)cudaSetDevice(m_device_id);
+        if (m_copy_stream != nullptr) {
+            (void)cudaStreamSynchronize(m_copy_stream);
+        }
+        if (m_stream != nullptr) {
+            (void)cudaStreamSynchronize(m_stream);
+        }
         for (auto& slot : m_slots) {
             if (slot.done != nullptr) {
-                cudaEventDestroy(slot.done);
+                (void)cudaEventDestroy(slot.done);
             }
             if (slot.copied != nullptr) {
-                cudaEventDestroy(slot.copied);
+                (void)cudaEventDestroy(slot.copied);
             }
         }
         if (m_copy_stream != nullptr) {
-            cudaStreamDestroy(m_copy_stream);
+            (void)cudaStreamDestroy(m_copy_stream);
         }
         if (m_stream != nullptr) {
-            cudaStreamDestroy(m_stream);
+            (void)cudaStreamDestroy(m_stream);
         }
+        (void)cudaGetLastError();
     }
     FFAFreqSweepCudaEngine(const FFAFreqSweepCudaEngine&)            = delete;
     FFAFreqSweepCudaEngine& operator=(const FFAFreqSweepCudaEngine&) = delete;
@@ -211,8 +220,23 @@ public:
         // Two-slot pipeline: chunk i runs on the GPU while the host
         // collects chunk i - 1's candidates and writes them out.
         std::optional<InFlight> prev;
+        // Synchronize both streams before unwinding prev or member staging
+        // buffers if an exception or interrupt unwinds execute().
+        struct StreamDrainGuard {
+            cudaStream_t copy_stream;
+            cudaStream_t compute_stream;
+            ~StreamDrainGuard() noexcept {
+                if (copy_stream != nullptr) {
+                    (void)cudaStreamSynchronize(copy_stream);
+                }
+                if (compute_stream != nullptr) {
+                    (void)cudaStreamSynchronize(compute_stream);
+                }
+            }
+        } stream_drain_guard{m_copy_stream, m_stream};
         std::vector<SizeType> redo;
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
+            loki::interrupt::check(stream);
             const search::FFASearchConfig& cfg_cur = ffa_regions_cfgs[i];
             const auto& freq_limits = cfg_cur.get_param_limits().back();
             spdlog::debug("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
@@ -433,6 +457,14 @@ private:
                                     "FfaFreqSweep: cudaEventRecord failed");
         if (n_passing > slot.args.capacity) {
             return;
+        }
+        if (n_passing > 0) {
+            // Ensure the asynchronous D2H copy into pageable staging has
+            // finished before stage_candidates reads m_scores_staging /
+            // m_indices_staging.
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(m_copy_stream),
+                "FfaFreqSweep: copy stream synchronize failed");
         }
         timing::SimpleTimer timer;
         timer.start();

@@ -18,6 +18,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/search/candidate_processing.hpp"
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
@@ -290,7 +291,7 @@ struct FFAResultMetadata {
     double wtsp{};
     SizeType nbins_min{};
     SizeType nbins_max{};
-    double octave_scale{};
+    double region_growth_factor{};
     double eta{};
     bool use_fourier{};
     std::optional<SizeType> bseg_brute;
@@ -349,6 +350,14 @@ private:
     void ensure_datasets(SizeType n_params);
 };
 
+/**
+ * @brief Writes an RFI-control configuration into @p rfi (an empty
+ * `rfi_config` group): pulsar_mask, harvest_scheme and the settings as
+ * attributes.
+ */
+void write_rfi_config(HighFive::Group& rfi,
+                      const algorithms::PruneRFIConfig& rfi_config);
+
 class PruneResultWriter {
 public:
     enum class Mode : std::uint8_t { kWrite, kAppend };
@@ -386,16 +395,18 @@ public:
                            SizeType n_params,
                            SizeType n_harvested_total);
 
-    void write_run_results(std::string_view run_name,
-                           std::span<const SizeType> snail_scheme,
-                           memory::CircularView<double> leaves_view,
-                           memory::CircularView<float> scores_view,
-                           memory::CircularView<float> scores_ep_view,
-                           double total_pruning_gflops,
-                           SizeType n_leaves,
-                           SizeType n_params,
-                           const PruneStatsCollection& pstats,
-                           std::span<const std::uint32_t> widths = {});
+    void
+    write_run_results(std::string_view run_name,
+                      std::span<const SizeType> snail_scheme,
+                      memory::CircularView<double> leaves_view,
+                      memory::CircularView<float> scores_view,
+                      memory::CircularView<float> scores_ep_view,
+                      double total_pruning_gflops,
+                      SizeType n_leaves,
+                      SizeType n_params,
+                      const PruneStatsCollection& pstats,
+                      std::span<const std::uint32_t> widths      = {},
+                      const detail::LeafReductionSpec* reduction = nullptr);
 
 private:
     std::filesystem::path m_filepath;

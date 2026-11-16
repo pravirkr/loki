@@ -23,6 +23,7 @@
 #include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/candidate_file.hpp"
 #include "loki/search/configs.hpp"
 
 #include "temp_dir.hpp"
@@ -64,7 +65,7 @@ PulsarSearchConfig make_test_cfg(double max_memory_gb = 4.0,
             /*use_fourier=*/use_fourier,
             nthreads,
             max_memory_gb,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
@@ -102,7 +103,7 @@ void check_memory_bounded_chunks(const PulsarSearchConfig& cfg,
         CHECK(chunk.actual_f_end >= chunk.nominal_f_end);
         CHECK(chunk.chunk_memory_gb <= cfg.get_max_process_memory_gb());
         CHECK(chunk.max_sugg >= 1024U);
-        CHECK(chunk.branch_max >= 32U);
+        CHECK(chunk.branch_max >= 1U);
         CHECK(!chunk.threshold_scheme.empty());
         CHECK(!chunk.branching_pattern.empty());
         CHECK(chunk.peak_complexity >= 1.0);
@@ -169,7 +170,7 @@ TEST_CASE("EPRegionPlanner wide band covers two regions and reports maxima",
     for (SizeType i = 0; i < chunks.size(); ++i) {
         const loki::plans::FFAPlan<float> plan(chunks[i].cfg);
         const auto forecast = plan.forecast_branching("taylor");
-        const auto needed   = std::max(forecast.max_children, SizeType{32});
+        const auto needed   = std::max(forecast.max_children, SizeType{1});
         CHECK(chunks[i].branch_max >= needed);
         CHECK(chunk_stats[i].branch_max == chunks[i].branch_max);
     }
@@ -339,6 +340,23 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         }
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::runtime_error);
     }
+
+    // 8. A branch_max below the chunk's forecast (a plan from an older
+    // forecast) is rejected on load, so the CLI replans
+    {
+        REQUIRE(orig_chunks[0].branch_max > 1);
+        const auto bad = outdir / "cache_bad_branch_max.h5";
+        std::filesystem::copy_file(
+            cache_file, bad, std::filesystem::copy_options::overwrite_existing);
+        {
+            const HighFive::File f(bad.string(), HighFive::File::ReadWrite);
+            f.getGroup("chunks")
+                .getGroup("chunk_0000")
+                .getAttribute("branch_max")
+                .write(orig_chunks[0].branch_max - 1);
+        }
+        CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
+    }
 }
 
 TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",
@@ -361,7 +379,8 @@ TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",
                                   limits, /*ducy_max=*/0.3, /*wtsp=*/1.5,
                                   /*use_fourier=*/false, /*nthreads=*/1,
                                   /*max_process_memory_gb=*/4.0,
-                                  /*octave_scale=*/2.0, /*nbins_max=*/1024,
+                                  /*region_growth_factor=*/2.0,
+                                  /*nbins_max=*/1024,
                                   /*nbins_min_lossy_bf=*/64,
                                   /*bseg_brute=*/1024,
                                   /*nsegments=*/8, /*snr_min=*/5.0,
@@ -460,6 +479,21 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     }
     CHECK(region_nbins.size() == 1);
 
+    // A leaf of the raw file is found again by its identity (run << 32 |
+    // leaf), with its (value, error) pairs.
+    const auto summary = loki::io::read_candidate_file_summary(result_file, 1);
+    CHECK(summary.reference_time == Catch::Approx(summary.tobs / 2.0));
+    if (!summary.top.empty()) {
+        const auto& best = summary.top.front();
+        REQUIRE(best.leaf.size() == (summary.param_names.size() + 2) * 2);
+        const auto again = loki::io::read_candidate_by_id(result_file, best.id);
+        CHECK(again.leaf == best.leaf);
+        CHECK(again.params == best.params);
+        CHECK(again.snr == best.snr);
+    }
+    CHECK_THROWS_AS(loki::io::read_candidate_by_id(result_file, ~0ULL),
+                    std::invalid_argument);
+
     // Verify temporary per-chunk directory was cleaned up
     const auto tmp_dir = outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix);
     CHECK(!std::filesystem::exists(tmp_dir));
@@ -545,14 +579,14 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
     }
 }
 
-TEST_CASE("EPFreqSweep CUDA rejects an active RFI config",
+TEST_CASE("EPFreqSweep CUDA rejects the impulsive veto",
           "[ep_freq_sweep][cuda]") {
     if (!cuda_available()) {
         SKIP("needs a CUDA build");
     }
     const auto cfg = make_test_cfg(4.0, 140.0, 142.0);
     loki::algorithms::PruneRFIConfig rfi;
-    rfi.harvest_scheme = {5.0F};
+    rfi.impulsive_veto = true;
     CHECK_THROWS_AS(EPFreqSweep(cfg, false, 0.1F, "taylor", 0.1F, rfi,
                                 std::nullopt, std::nullopt, std::nullopt,
                                 Exec::cuda(0)),
@@ -740,7 +774,8 @@ TEST_CASE("EPFreqSweep handles non-power-of-two nsamps without empty segments",
     const PulsarSearchConfig cfg(
         /*nsamps=*/40000, /*tsamp=*/64e-6, /*nbins=*/32, /*eta=*/1.0, limits,
         /*ducy_max=*/0.3, /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0, /*nbins_max=*/1024,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
+        /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/1024, /*nsegments=*/8,
         /*snr_min=*/5.0, /*max_passing_candidates=*/1U << 22U,
         /*prune_poly_order=*/2);

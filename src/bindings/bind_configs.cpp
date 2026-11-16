@@ -40,51 +40,60 @@ void bind_configs(py::module_& m) {
                        &CO::harmonic_denominator_max)
         .def_readwrite("harmonic_phase_distance", &CO::harmonic_phase_distance)
         .def_readwrite("harmonic_snr_distance", &CO::harmonic_snr_distance)
+        .def_readwrite("harmonic_doppler_tolerance",
+                       &CO::harmonic_doppler_tolerance)
+        .def_readwrite("harmonic_doppler_min_snr",
+                       &CO::harmonic_doppler_min_snr)
         .def_readwrite("max_per_cell", &CO::max_per_cell)
+        .def_readwrite("cell_bins", &CO::cell_bins)
         .def_readwrite("cell_log_width", &CO::cell_log_width)
+        .def_readwrite("dominance_kappa", &CO::dominance_kappa)
+        .def_static("ep_defaults", &CO::ep_defaults,
+                    "Options of EP searches: per-run reduction on")
         .def_readwrite("max_candidates", &CO::max_candidates)
         .def_readwrite("memory_gb", &CO::memory_gb)
         .def_readwrite("temporary_directory", &CO::temporary_directory)
         .def("validate", &CO::validate);
 
     py::class_<FFASearchConfig>(m_configs, "FFASearchConfig")
-        .def(py::init([](SizeType nsamps, double tsamp, SizeType nbins,
-                         double eta, const PyArrayT<double>& param_limits,
-                         double ducy_max, double wtsp, bool use_fourier,
-                         int nthreads, double max_process_memory_gb,
-                         double octave_scale, SizeType nbins_max,
-                         SizeType nbins_min_lossy_bf,
-                         std::optional<SizeType> bseg_brute,
-                         std::optional<SizeType> nsegments, double snr_min,
-                         SizeType max_passing_candidates,
-                         bool use_boxcar_kadane) {
-                 if (param_limits.ndim() != 2 || param_limits.shape(1) != 2) {
-                     throw std::invalid_argument(
-                         "param_limits must be a 2D NumPy array with shape "
-                         "(n_params, 2)");
-                 }
+        .def(py::init(
+                 [](SizeType nsamps, double tsamp, SizeType nbins, double eta,
+                    const PyArrayT<double>& param_limits, double ducy_max,
+                    double wtsp, bool use_fourier, int nthreads,
+                    double max_process_memory_gb, double region_growth_factor,
+                    SizeType nbins_max, SizeType nbins_min_lossy_bf,
+                    std::optional<SizeType> bseg_brute,
+                    std::optional<SizeType> nsegments, double snr_min,
+                    SizeType max_passing_candidates, bool use_boxcar_kadane) {
+                     if (param_limits.ndim() != 2 ||
+                         param_limits.shape(1) != 2) {
+                         throw std::invalid_argument(
+                             "param_limits must be a 2D NumPy array with shape "
+                             "(n_params, 2)");
+                     }
 
-                 const auto n_params =
-                     static_cast<SizeType>(param_limits.shape(0));
+                     const auto n_params =
+                         static_cast<SizeType>(param_limits.shape(0));
 
-                 std::vector<ParamLimit> limits(n_params);
-                 for (SizeType i = 0; i < n_params; ++i) {
-                     limits[i] = {
-                         .min = *param_limits.data(i, 0),
-                         .max = *param_limits.data(i, 1),
-                     };
-                 }
-                 return std::make_unique<FFASearchConfig>(
-                     nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
-                     use_fourier, nthreads, max_process_memory_gb, octave_scale,
-                     nbins_max, nbins_min_lossy_bf, bseg_brute, nsegments,
-                     snr_min, max_passing_candidates, use_boxcar_kadane);
-             }),
+                     std::vector<ParamLimit> limits(n_params);
+                     for (SizeType i = 0; i < n_params; ++i) {
+                         limits[i] = {
+                             .min = *param_limits.data(i, 0),
+                             .max = *param_limits.data(i, 1),
+                         };
+                     }
+                     return std::make_unique<FFASearchConfig>(
+                         nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
+                         use_fourier, nthreads, max_process_memory_gb,
+                         region_growth_factor, nbins_max, nbins_min_lossy_bf,
+                         bseg_brute, nsegments, snr_min, max_passing_candidates,
+                         use_boxcar_kadane);
+                 }),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
              py::arg("wtsp") = 1.5, py::arg("use_fourier") = true,
              py::arg("nthreads") = 1, py::arg("max_process_memory_gb") = 8.0,
-             py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
+             py::arg("region_growth_factor") = 1.5, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
              py::arg("nsegments") = std::nullopt, py::arg("snr_min") = 7.0,
@@ -165,7 +174,7 @@ void bind_configs(py::module_& m) {
                  [](SizeType nsamps, double tsamp, SizeType nbins, double eta,
                     const PyArrayT<double>& param_limits, double ducy_max,
                     double wtsp, bool use_fourier, int nthreads,
-                    double max_process_memory_gb, double octave_scale,
+                    double max_process_memory_gb, double region_growth_factor,
                     SizeType nbins_max, SizeType nbins_min_lossy_bf,
                     std::optional<SizeType> bseg_brute,
                     std::optional<SizeType> nsegments, double snr_min,
@@ -195,7 +204,7 @@ void bind_configs(py::module_& m) {
                      return std::make_unique<PulsarSearchConfig>(
                          nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
                          use_fourier, nthreads, max_process_memory_gb,
-                         octave_scale, nbins_max, nbins_min_lossy_bf,
+                         region_growth_factor, nbins_max, nbins_min_lossy_bf,
                          bseg_brute, nsegments, snr_min, max_passing_candidates,
                          prune_poly_order, p_orb_min, m_c_max, m_p_min,
                          propagator_significance, validation_significance,
@@ -206,7 +215,7 @@ void bind_configs(py::module_& m) {
              py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
              py::arg("wtsp") = 1.5, py::arg("use_fourier") = true,
              py::arg("nthreads") = 1, py::arg("max_process_memory_gb") = 8.0,
-             py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
+             py::arg("region_growth_factor") = 1.5, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
              py::arg("nsegments") = std::nullopt, py::arg("snr_min") = 7.0,
@@ -301,7 +310,7 @@ void bind_configs(py::module_& m) {
             })
         .def_readwrite("device", &FTC::device)
         .def_readwrite("max_process_memory_gb", &FTC::max_process_memory_gb)
-        .def_readwrite("octave_scale", &FTC::octave_scale)
+        .def_readwrite("region_growth_factor", &FTC::region_growth_factor)
         .def_readwrite("nbins_max", &FTC::nbins_max)
         .def_readwrite("nbins_min_lossy_bf", &FTC::nbins_min_lossy_bf)
         .def_readwrite("bseg_brute", &FTC::bseg_brute)
@@ -317,6 +326,29 @@ void bind_configs(py::module_& m) {
         .def_static("write_default", &FTC::write_default, py::arg("path"))
         .def_static("default_toml_string",
                     [] { return std::string(FTC::default_toml_string()); });
+
+    using RFI = search::EPRFIOptions;
+    py::class_<RFI>(m_configs, "EPRFIOptions",
+                    "The [ep.rfi] table: RFI control of the EP pruning (the "
+                    "impulsive veto is CPU only)")
+        .def(py::init<>())
+        .def_readwrite("pulsar_mask", &RFI::pulsar_mask)
+        .def_readwrite("n_harmonics", &RFI::n_harmonics)
+        .def_readwrite("fractional_harmonics", &RFI::fractional_harmonics)
+        .def_readwrite("harvest", &RFI::harvest)
+        .def_readwrite("harvest_min_level", &RFI::harvest_min_level)
+        .def_readwrite("harvest_offset", &RFI::harvest_offset)
+        .def_readwrite("harvest_min_snr", &RFI::harvest_min_snr)
+        .def_readwrite("harvest_mask_ntiles", &RFI::harvest_mask_ntiles)
+        .def_readwrite("max_harvests", &RFI::max_harvests)
+        .def_readwrite("harvest_store_folds", &RFI::harvest_store_folds)
+        .def_readwrite("impulsive_veto", &RFI::impulsive_veto)
+        .def_readwrite("impulsive_kappa", &RFI::impulsive_kappa)
+        .def_readwrite("impulsive_min_level", &RFI::impulsive_min_level)
+        .def_readwrite("impulsive_min_snr", &RFI::impulsive_min_snr)
+        .def_property_readonly("is_active", &RFI::is_active)
+        .def("validate", &RFI::validate)
+        .def("to_prune_rfi_config", &RFI::to_prune_rfi_config);
 
     using ETC = search::EPTomlConfig;
     py::class_<ETC, FTC>(m_configs, "EPTomlConfig")
@@ -335,8 +367,12 @@ void bind_configs(py::module_& m) {
         .def_readwrite("propagator_significance", &ETC::propagator_significance)
         .def_readwrite("validation_significance", &ETC::validation_significance)
         .def_readwrite("use_conservative_tile", &ETC::use_conservative_tile)
+        .def_readwrite("overflow_keep_fraction", &ETC::overflow_keep_fraction)
         .def_readwrite("plan_cache", &ETC::plan_cache)
         .def_readwrite("use_plan_cache", &ETC::use_plan_cache)
+        .def_readwrite("rfi", &ETC::rfi)
+        .def("prune_rfi_config", &ETC::prune_rfi_config)
+        .def("check_rfi_backend", &ETC::check_rfi_backend)
         .def("to_ep_search_config", &ETC::to_ep_search_config,
              py::arg("nsamps") = std::nullopt, py::arg("tsamp") = std::nullopt)
         .def("to_toml_string", &ETC::to_toml_string)

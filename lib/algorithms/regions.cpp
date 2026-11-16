@@ -175,19 +175,24 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
                                                    double tsamp,
                                                    SizeType nbins_min,
                                                    double eta_min,
-                                                   double octave_scale,
+                                                   double region_growth_factor,
                                                    SizeType nbins_max) {
-    error_check::check_greater(p_min, 0.0, "p_min must be positive.");
-    error_check::check_greater(p_max, p_min, "p_max must be > p_min.");
-    error_check::check_greater(tsamp, 0.0, "tsamp must be positive.");
+    error_check::check(utils::is_finite(p_min) && p_min > 0.0,
+                       "p_min must be finite and positive.");
+    error_check::check(utils::is_finite(p_max) && p_max > p_min,
+                       "p_max must be finite and > p_min.");
+    error_check::check(utils::is_finite(tsamp) && tsamp > 0.0,
+                       "tsamp must be finite and positive.");
     error_check::check_greater_equal(nbins_min, SizeType{2},
                                      "nbins_min must be >= 2.");
-    error_check::check_greater(eta_min, 0.0, "eta_min must be positive.");
+    error_check::check(utils::is_finite(eta_min) && eta_min > 0.0,
+                       "eta_min must be finite and positive.");
     error_check::check_greater(
         static_cast<double>(nbins_min), eta_min,
         "eta_min must be < nbins_min (duty cycle rho < 1).");
-    error_check::check_greater(octave_scale, 1.0,
-                               "octave_scale must be strictly > 1.0.");
+    error_check::check(
+        utils::is_finite(region_growth_factor) && region_growth_factor > 1.0,
+        "region_growth_factor must be finite and strictly > 1.0.");
     error_check::check_greater_equal(nbins_max, nbins_min,
                                      "nbins_max must be >= nbins_min.");
     error_check::check_greater(
@@ -213,6 +218,12 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
     const double t_w = std::max(p_min / static_cast<double>(nbins_min), tsamp);
     const double rho = eta_min / static_cast<double>(nbins_min);
 
+    const double est_regions =
+        std::ceil(std::log(p_max / p_min) / std::log(region_growth_factor));
+    error_check::check(
+        utils::is_finite(est_regions) && est_regions <= 1.0e6,
+        "region_growth_factor produces more than 1000000 regions");
+
     std::vector<coord::FFARegion> regions;
     double p_cur_low = p_min;
     while (p_cur_low < p_max) {
@@ -220,21 +231,31 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
             std::min(p_cur_low / t_w, static_cast<double>(nbins_max))));
         nbins_k      = std::clamp(nbins_k, SizeType{2}, nbins_max);
         if (nbins_k >= nbins_max) {
-            // The bin count is capped, but each octave still gets its own
+            // The bin count is capped, but each region still gets its own
             // brute-fold segment length (about one to two periods at the
             // band's f_max). One region for the whole capped tail would force
             // every slow frequency to use the segment length of the fastest.
             while (p_cur_low < p_max) {
                 const double p_cur_high =
-                    std::min(p_cur_low * octave_scale, p_max);
+                    std::min(p_cur_low * region_growth_factor, p_max);
                 error_check::check_greater(
                     p_cur_high, p_cur_low,
                     fmt::format("Period grid stalled at P={:.17g} s with "
-                                "octave_scale={:.17g}.",
-                                p_cur_low, octave_scale));
+                                "region_growth_factor={:.17g}.",
+                                p_cur_low, region_growth_factor));
+                const double f_low  = 1.0 / p_cur_high;
+                const double f_high = 1.0 / p_cur_low;
+                error_check::check_greater(
+                    f_high, f_low,
+                    fmt::format("Frequency grid stalled at P={:.17g} s with "
+                                "region_growth_factor={:.17g}.",
+                                p_cur_low, region_growth_factor));
+                error_check::check(
+                    regions.size() < SizeType{1'000'000},
+                    "region_growth_factor exceeds 1000000 regions");
                 regions.push_back({
-                    .f_start = 1.0 / p_cur_high,
-                    .f_end   = 1.0 / p_cur_low,
+                    .f_start = f_low,
+                    .f_end   = f_high,
                     .nbins   = nbins_max,
                     .eta     = rho * static_cast<double>(nbins_max),
                 });
@@ -242,15 +263,25 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
             }
             break;
         }
-        const double p_cur_high = std::min(p_cur_low * octave_scale, p_max);
+        const double p_cur_high =
+            std::min(p_cur_low * region_growth_factor, p_max);
         error_check::check_greater(
             p_cur_high, p_cur_low,
             fmt::format("Period grid stalled at P={:.17g} s with "
-                        "octave_scale={:.17g}.",
-                        p_cur_low, octave_scale));
+                        "region_growth_factor={:.17g}.",
+                        p_cur_low, region_growth_factor));
+        const double f_low  = 1.0 / p_cur_high;
+        const double f_high = 1.0 / p_cur_low;
+        error_check::check_greater(
+            f_high, f_low,
+            fmt::format("Frequency grid stalled at P={:.17g} s with "
+                        "region_growth_factor={:.17g}.",
+                        p_cur_low, region_growth_factor));
+        error_check::check(regions.size() < SizeType{1'000'000},
+                           "region_growth_factor exceeds 1000000 regions");
         regions.push_back({
-            .f_start = 1.0 / p_cur_high,
-            .f_end   = 1.0 / p_cur_low,
+            .f_start = f_low,
+            .f_end   = f_high,
             .nbins   = nbins_k,
             .eta     = rho * static_cast<double>(nbins_k),
         });
@@ -438,11 +469,14 @@ private:
         const double p_max     = 1.0 / f_min;
         const auto ffa_regions = generate_ffa_regions(
             p_min, p_max, m_base_cfg.get_tsamp(), m_base_cfg.get_nbins(),
-            m_base_cfg.get_eta(), m_base_cfg.get_octave_scale(),
+            m_base_cfg.get_eta(), m_base_cfg.get_region_growth_factor(),
             m_base_cfg.get_nbins_max());
         // Print region info
-        spdlog::info("FFARegionPlanner: planned {} regions",
-                     ffa_regions.size());
+        spdlog::info("FFARegionPlanner: planned {} regions (growth factor "
+                     "{:g}, phase tolerance {:.4g} turns in every region)",
+                     ffa_regions.size(), m_base_cfg.get_region_growth_factor(),
+                     m_base_cfg.get_eta() /
+                         static_cast<double>(m_base_cfg.get_nbins()));
         for (const auto& region : ffa_regions) {
             spdlog::debug("Region: f=[{:08.3f}, {:08.3f}] Hz, nbins={:04d}, "
                           "eta={:04.1f}",

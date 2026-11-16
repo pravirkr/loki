@@ -1020,6 +1020,14 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
     psr_utils::MiddleOutScheme const scheme(nsegments, ref_seg, tseg_ffa);
     std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
+    // The mean follows d4..d1 only: crackle splits only in the hole, a
+    // negligible share of the tree. The workspace bound needs crackle too.
+    // The kernels give every child the refined widths of all five parameters,
+    // crackle included, in the hole or not, and the transform moves widths
+    // independently of the leaf's values. So a leaf's widths depend only on
+    // its frequency and the level, the loop carries them all as the kernels
+    // do, and max_children is exact: a parent with significant jerk and
+    // insignificant snap or accel puts every child in the hole.
     SizeType max_children = 0;
 
     // Initialize dparam_cur_batch - each frequency gets the same dparams
@@ -1083,8 +1091,9 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
         }
         // Worst leaf before the 0.5 snap-occupancy factor. Hole expansion can
         // copy every child once per crackle branch, so the bound multiplies
-        // the d4..d1 product by the crackle count. Crackle's cell width is
-        // left on the mean path's trajectory.
+        // the d4..d1 product by the crackle count. The crackle width is
+        // carried for this bound (n_branches leaves it out); with the
+        // conservative tile it also widens the other widths.
         for (SizeType i = 0; i < n_freqs; ++i) {
             const SizeType idx0    = i * n_params;
             const double sig_cur   = dparam_cur_batch[idx0];
@@ -1097,6 +1106,8 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                     SizeType{1},
                     static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
             }
+            dparam_cur_next[idx0] =
+                sig_cur / static_cast<double>(crackle_count);
             const auto product =
                 static_cast<SizeType>(std::llround(n_branches[i]));
             const auto bound =

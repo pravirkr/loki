@@ -55,7 +55,7 @@ namespace {
     return f;
 }
 
-constexpr std::string_view kCacheVersion = "1.20.0";
+constexpr std::string_view kCacheVersion = "1.21.0";
 
 /// Threshold-scheme simulation of the planner. The seeds are fixed: the
 /// scheme sets the chunking, so plans of one configuration must not change
@@ -188,23 +188,23 @@ make_memory_context(const search::PulsarSearchConfig& cfg,
                     const Exec& exec) {
     search::detail::check_ep_supported(cfg, "EPRegionPlanner");
     detail::EPMemoryContext ctx{
-        .nparams   = cfg.get_nparams(),
-        .nsamps    = cfg.get_nsamps(),
-        .n_workers = resolve_n_workers(cfg.get_nthreads(), n_workers),
-        .harvest   = detail::EPHarvestBound::from(rfi_config),
+        .nparams    = cfg.get_nparams(),
+        .nsamps     = cfg.get_nsamps(),
+        .n_workers  = resolve_n_workers(cfg.get_nthreads(), n_workers),
+        .harvest    = detail::EPHarvestBound::from(rfi_config),
+        .rfi_active = rfi_config.is_active(),
     };
     if (exec.backend == Backend::kCPU) {
         return ctx;
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        if (rfi_config.is_active()) {
-            loki::detail::throw_unimplemented("EPRegionPlanner (rfi_config)",
-                                              exec.backend);
+        if (rfi_config.impulsive_veto) {
+            loki::detail::throw_unimplemented(
+                "EPRegionPlanner (rfi_config.impulsive_veto)", exec.backend);
         }
         ctx.n_workers         = 1;
         ctx.batch_size        = detail::kEPBatchSizeCuda;
-        ctx.harvest           = {};
         ctx.kind              = detail::EPMemoryKind::kCuda;
         ctx.device            = exec.device;
         ctx.cub_scratch_bytes = &detail::ep_cuda_cub_scratch_bytes;
@@ -368,7 +368,8 @@ public:
             "use_fourier", static_cast<uint8_t>(m_base_cfg.get_use_fourier()));
         file.createAttribute("max_process_memory_gb",
                              m_base_cfg.get_max_process_memory_gb());
-        file.createAttribute("octave_scale", m_base_cfg.get_octave_scale());
+        file.createAttribute("region_growth_factor",
+                             m_base_cfg.get_region_growth_factor());
         file.createAttribute("nbins_max", m_base_cfg.get_nbins_max());
         file.createAttribute("nbins_min_lossy_bf",
                              m_base_cfg.get_nbins_min_lossy_bf());
@@ -396,6 +397,8 @@ public:
                              detail::kEPMemoryModelVersion);
         file.createAttribute("batch_size", m_memory.batch_size);
         file.createAttribute("n_workers", m_memory.n_workers);
+        file.createAttribute("rfi_active",
+                             static_cast<uint8_t>(m_memory.rfi_active));
         file.createAttribute("harvest_enabled",
                              static_cast<uint8_t>(m_memory.harvest.enabled));
         file.createAttribute("max_harvests", m_memory.harvest.max_harvests);
@@ -466,7 +469,7 @@ public:
         if (file_version != kCacheVersion) {
             throw std::invalid_argument(fmt::format(
                 "EPRegionPlanner: cache file '{}' has version {}, expected {} "
-                "(stale plans carry an invalid branch_max; re-plan)",
+                "(a plan from another loki version; re-plan)",
                 filepath.string(), file_version, kCacheVersion));
         }
 
@@ -528,7 +531,8 @@ public:
             check_attr_double("max_process_memory_gb",
                               m_base_cfg.get_max_process_memory_gb());
         }
-        check_attr_double("octave_scale", m_base_cfg.get_octave_scale());
+        check_attr_double("region_growth_factor",
+                          m_base_cfg.get_region_growth_factor());
         check_attr_size("nbins_max", m_base_cfg.get_nbins_max());
         // The FFA segmentation sets every chunk's coordinates and buffers.
         check_attr_size("nbins_min_lossy_bf",
@@ -641,6 +645,11 @@ public:
             check_attr_u64("n_workers",
                            static_cast<std::uint64_t>(m_memory.n_workers));
         }
+        // RFI control adds device buffers to a CUDA plan; a CPU plan does
+        // not count them, and a plan from the other backend is rechecked.
+        if (same_backend && m_memory.kind == detail::EPMemoryKind::kCuda) {
+            check_attr_u64("rfi_active", m_memory.rfi_active ? 1U : 0U);
+        }
         check_attr_u64("harvest_enabled", m_memory.harvest.enabled ? 1U : 0U);
         check_attr_u64("max_harvests", m_memory.harvest.max_harvests);
         check_attr_u64("harvest_store_folds",
@@ -724,7 +733,10 @@ public:
             chunk_grp.getAttribute("predicted_peak").read(predicted_peak);
             chunk_grp.getAttribute("predicted_live").read(predicted_live);
             if (!same_backend) {
-                batch_size = m_memory.batch_size;
+                batch_size = m_memory.kind == detail::EPMemoryKind::kCuda
+                                 ? detail::ep_cuda_batch_for_nbins(
+                                       nbins, m_memory.batch_size)
+                                 : m_memory.batch_size;
             }
             if (batch_size == 0 || batch_size > m_memory.batch_size ||
                 !std::has_single_bit(batch_size)) {
@@ -754,6 +766,17 @@ public:
             auto chunk_cfg = m_base_cfg.get_updated_ep_config(
                 nbins, eta, actual_f_start, actual_f_end);
             const plans::FFAPlan<FoldType> plan(chunk_cfg);
+            // A plan from an older forecast can hold a smaller branch_max
+            // than the kernels reach (circular plans before the crackle
+            // widths were replayed): replan rather than fail mid-search.
+            const auto branch_max_needed = detail::compute_branch_max(
+                plan.forecast_branching(m_poly_basis).max_children);
+            if (branch_max < branch_max_needed) {
+                throw std::invalid_argument(fmt::format(
+                    "EPRegionPlanner: cached branch_max {} of chunk {} is "
+                    "below the forecast {}",
+                    branch_max, i, branch_max_needed));
+            }
             SizeType ncoords = plan.get_ncoords().back();
             if (chunk_grp.hasAttribute("ncoords")) {
                 chunk_grp.getAttribute("ncoords").read(ncoords);
@@ -877,11 +900,15 @@ private:
 
         const auto ffa_regions = generate_ffa_regions(
             p_min, p_max, m_base_cfg.get_tsamp(), m_base_cfg.get_nbins(),
-            m_base_cfg.get_eta(), m_base_cfg.get_octave_scale(),
+            m_base_cfg.get_eta(), m_base_cfg.get_region_growth_factor(),
             m_base_cfg.get_nbins_max());
 
-        spdlog::info("EPRegionPlanner: planned {} coarse FFA regions",
-                     ffa_regions.size());
+        spdlog::info("EPRegionPlanner: planned {} coarse FFA regions (growth "
+                     "factor {:g}, phase tolerance {:.4g} turns in every "
+                     "region)",
+                     ffa_regions.size(), m_base_cfg.get_region_growth_factor(),
+                     m_base_cfg.get_eta() /
+                         static_cast<double>(m_base_cfg.get_nbins()));
 
         const auto max_drift = calculate_max_drift(m_base_cfg);
         if (max_drift < 0.0 || max_drift >= 1.0) {

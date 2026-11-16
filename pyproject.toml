@@ -31,6 +31,7 @@ dependencies = [
 
 [project.scripts]
 loki-candidates = "loki.candidates:main"
+loki-sift-match = "loki.sift:main"
 
 [project.urls]
 Github = "https://github.com/pravirkr/loki"

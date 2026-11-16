@@ -3,13 +3,17 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <memory>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/algorithms/regions.hpp"
@@ -55,7 +59,7 @@ PulsarSearchConfig make_cfg(double f_min, double f_max, int nthreads) {
             /*use_fourier=*/false,
             nthreads,
             /*max_process_memory_gb=*/8.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
@@ -69,10 +73,10 @@ PulsarSearchConfig make_cfg(double f_min, double f_max, int nthreads) {
 /// suggestions for a chunk spanning the whole region; the others the minimum.
 std::vector<RegionDesign> make_designs(const PulsarSearchConfig& cfg,
                                        double first_max_sugg) {
-    const auto regions =
-        generate_ffa_regions(1.0 / cfg.get_f_max(), 1.0 / cfg.get_f_min(),
-                             cfg.get_tsamp(), cfg.get_nbins(), cfg.get_eta(),
-                             cfg.get_octave_scale(), cfg.get_nbins_max());
+    const auto regions = generate_ffa_regions(
+        1.0 / cfg.get_f_max(), 1.0 / cfg.get_f_min(), cfg.get_tsamp(),
+        cfg.get_nbins(), cfg.get_eta(), cfg.get_region_growth_factor(),
+        cfg.get_nbins_max());
     std::vector<RegionDesign> designs;
     for (const auto& r : regions) {
         const auto rcfg =
@@ -301,7 +305,7 @@ TEST_CASE("EP chunking searches a smaller shared size when the replan is "
     // The heavy run's minimum-width chunk does not fit next to the light
     // run's full shared size: the light run must be split further so the
     // shared size shrinks.
-    constexpr double kLimitGb = 0.08;
+    constexpr double kLimitGb = 0.065;
     const auto cfg            = make_cfg(30.0, 150.0, /*nthreads=*/2);
     const auto designs        = make_late_shared_designs(cfg);
     auto ctx                  = make_ctx(cfg);
@@ -515,22 +519,45 @@ TEST_CASE("EP forecasts account for adjacent populations, once per chunk",
           chunk.predicted_live + chunk.batch_size * chunk.branch_max);
 }
 
+TEST_CASE("CUDA batch keeps the work per batch at 2^22 parent-bins",
+          "[ep_chunking]") {
+    using loki::algorithms::detail::ep_cuda_batch_for_nbins;
+    constexpr SizeType kMax = SizeType{1} << 16U;
+    CHECK(ep_cuda_batch_for_nbins(16, kMax) == kMax);
+    CHECK(ep_cuda_batch_for_nbins(64, kMax) == kMax);
+    CHECK(ep_cuda_batch_for_nbins(128, kMax) == kMax / 2);
+    CHECK(ep_cuda_batch_for_nbins(1024, kMax) == 4096);
+    // Not a power of two: rounded down.
+    CHECK(ep_cuda_batch_for_nbins(1000, kMax) == 4096);
+    // The planner's halved batch caps it.
+    CHECK(ep_cuda_batch_for_nbins(1024, 1024) == 1024);
+}
+
 TEST_CASE("CUDA EP lowers the batch only when a minimum chunk cannot fit",
           "[ep_chunking]") {
     const auto cfg     = make_cfg(140.0, 145.0, 1);
     const auto designs = make_designs(cfg, 1000.0);
     auto ctx           = make_cuda_ctx(cfg);
     ctx.batch_size     = 1U << 16U;
+    // The planner says once when the batch was lowered, and only then.
+    std::ostringstream log;
+    const auto logger = spdlog::default_logger();
+    auto sink         = std::make_shared<spdlog::sinks::ostream_sink_mt>(log);
+    logger->sinks().push_back(sink);
     const auto ample =
         plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, ctx);
+    const auto ample_log = log.str();
+    const auto tight =
+        plan_chunks<float>(cfg, "taylor", designs, 0.0, 0.03, ctx);
+    std::erase(logger->sinks(), sink);
+    CHECK(ample_log.find("CUDA batch is at most") == std::string::npos);
+    CHECK(log.str().find("CUDA batch is at most") != std::string::npos);
     REQUIRE(!ample.chunk_cfgs.empty());
     CHECK(ample.chunk_cfgs.front().batch_size == ctx.batch_size);
-    const auto tight =
-        plan_chunks<float>(cfg, "taylor", designs, 0.0, 0.06, ctx);
     REQUIRE(!tight.chunk_cfgs.empty());
     CHECK(tight.chunk_cfgs.front().batch_size < ctx.batch_size);
     CHECK(std::has_single_bit(tight.chunk_cfgs.front().batch_size));
-    check_plan_fits(tight, ctx, 0.06);
+    check_plan_fits(tight, ctx, 0.03);
 }
 
 namespace {

@@ -176,6 +176,12 @@ public:
                          std::span<const float> var,
                          double tsamp,
                          const PreprocessOptions& o) = 0;
+    /// Self-check of the last zap() on ts_e (after output()); see
+    /// zap_bands(). Backends that do not zap return nothing.
+    [[nodiscard]] virtual std::vector<PreprocessReport::ZapBand>
+    zap_check(double /*tsamp*/, const PreprocessOptions& /*o*/) {
+        return {};
+    }
     /// Output pass: ts_e into `x`, ts_v into `z`, with per-block counts of
     /// clipped and masked samples.
     virtual void output(const BlockGrid& grid,

@@ -1,4 +1,7 @@
+#include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -18,8 +21,8 @@ namespace {
 using loki::ParamLimit;
 using loki::SizeType;
 
-loki::search::PulsarSearchConfig
-make_cfg(const std::vector<ParamLimit>& limits) {
+loki::search::PulsarSearchConfig make_cfg(const std::vector<ParamLimit>& limits,
+                                          bool conservative = false) {
     constexpr SizeType kNsamps = 1U << 22U;
     return {kNsamps,
             64e-6,
@@ -31,25 +34,34 @@ make_cfg(const std::vector<ParamLimit>& limits) {
             /*use_fourier=*/true,
             /*nthreads=*/1,
             /*max_process_memory_gb=*/8.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/std::nullopt,
             /*nsegments=*/32,
             /*snr_min=*/6.0,
             /*max_passing_candidates=*/1U << 22U,
-            /*prune_poly_order=*/limits.size()};
+            /*prune_poly_order=*/limits.size(),
+            /*p_orb_min=*/1e-5,
+            /*m_c_max=*/10.0,
+            /*m_p_min=*/1.4,
+            /*propagator_significance=*/2.0,
+            /*validation_significance=*/5.0,
+            /*use_conservative_tile=*/conservative};
 }
 
 void check_ref_seg_independent(const std::vector<ParamLimit>& limits,
-                               std::string_view poly_basis) {
-    const loki::plans::FFAPlan<loki::ComplexType> plan(make_cfg(limits));
+                               std::string_view poly_basis,
+                               bool conservative = false) {
+    const loki::plans::FFAPlan<loki::ComplexType> plan(
+        make_cfg(limits, conservative));
     const SizeType nsegments = plan.get_nsegments().back();
     REQUIRE(nsegments > 2);
     const auto ref = plan.forecast_branching(poly_basis, 0);
     for (SizeType ref_seg = 1; ref_seg < nsegments; ++ref_seg) {
         INFO("basis " << poly_basis << " nparams " << limits.size()
-                      << " ref_seg " << ref_seg);
+                      << " conservative " << conservative << " ref_seg "
+                      << ref_seg);
         const auto forecast = plan.forecast_branching(poly_basis, ref_seg);
         REQUIRE(forecast.max_children == ref.max_children);
         REQUIRE(forecast.mean == ref.mean);
@@ -70,6 +82,14 @@ TEST_CASE("Branching forecast does not depend on the reference segment",
     check_ref_seg_independent({snap, jerk, accel, freq}, "taylor");
     check_ref_seg_independent({crackle, snap, jerk, accel, freq}, "taylor");
     check_ref_seg_independent({jerk, accel, freq}, "chebyshev");
+    // A crackle range that splits within the levels, so the circular bound
+    // includes hole expansion, with both tiles.
+    const ParamLimit wide_crackle{.min = -3e-3, .max = 3e-3};
+    for (const bool conservative : {false, true}) {
+        check_ref_seg_independent({jerk, accel, freq}, "taylor", conservative);
+        check_ref_seg_independent({wide_crackle, snap, jerk, accel, freq},
+                                  "taylor", conservative);
+    }
 }
 
 TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",
@@ -83,7 +103,8 @@ TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",
     const loki::search::PulsarSearchConfig exact(
         /*nsamps=*/36000, /*tsamp=*/64e-6, /*nbins=*/32, /*eta=*/1.0, limits,
         /*ducy_max=*/0.3, /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0, /*nbins_max=*/1024,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
+        /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/1024, /*nsegments=*/8);
     REQUIRE(exact.get_bseg_brute() == 1125U);
     REQUIRE(exact.get_bseg_ffa() == 4500U);
@@ -99,7 +120,8 @@ TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",
     const loki::search::PulsarSearchConfig cfg(
         /*nsamps=*/35800, /*tsamp=*/64e-6, /*nbins=*/32, /*eta=*/1.0, limits,
         /*ducy_max=*/0.3, /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
-        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0, /*nbins_max=*/1024,
+        /*max_process_memory_gb=*/4.0, /*region_growth_factor=*/2.0,
+        /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/16, /*nsegments=*/128);
     REQUIRE(cfg.get_bseg_brute() == 17U);
     REQUIRE(cfg.get_bseg_ffa() == 272U);
@@ -114,10 +136,55 @@ TEST_CASE("Non-power-of-two nsamps splits into equal EP segments",
     const auto pattern = plan.get_branching_pattern_approx("taylor", 0U);
     REQUIRE(pattern.size() == plan.get_nsegments_active() - 1U);
     for (const double val : pattern) {
-        REQUIRE(std::isfinite(val));
+        const volatile std::uint64_t bits = std::bit_cast<std::uint64_t>(val);
+        CHECK((bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL);
         REQUIRE(val >= 1.0);
     }
     const auto forecast = plan.forecast_branching("taylor", 0U);
     REQUIRE(forecast.mean.size() == plan.get_nsegments_active() - 1U);
     REQUIRE(forecast.max_children >= 1U);
+}
+
+TEST_CASE("FFAPlan preserves use_conservative_tile without slicing",
+          "[ep_branching]") {
+    const std::vector<ParamLimit> limits{
+        {.min = -2.0, .max = 2.0},
+        {.min = -500.0, .max = 500.0},
+        {.min = 120.0, .max = 240.0},
+    };
+    const loki::plans::FFAPlan<loki::ComplexType> cons_plan(
+        make_cfg(limits, /*conservative=*/true));
+    const loki::plans::FFAPlan<loki::ComplexType> flat_plan(
+        make_cfg(limits, /*conservative=*/false));
+    REQUIRE_THROWS_AS(cons_plan.get_branching_pattern("chebyshev", 0U),
+                      std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        cons_plan.get_branching_pattern_approx("chebyshev", 0U, 1000),
+        std::invalid_argument);
+    REQUIRE_NOTHROW(flat_plan.get_branching_pattern("chebyshev", 0U));
+    REQUIRE_NOTHROW(
+        flat_plan.get_branching_pattern_approx("chebyshev", 0U, 1000));
+
+    const auto approx_cons =
+        cons_plan.get_branching_pattern_approx("taylor", 0U, 1000);
+    const auto approx_flat =
+        flat_plan.get_branching_pattern_approx("taylor", 0U, 1000);
+    REQUIRE(approx_cons.size() == approx_flat.size());
+    // Before the first stage where branching diverges, both plans track the
+    // same child center while the conservative tile widens uncertainties at
+    // least as fast, so at the first differing stage the conservative plan
+    // must split strictly more (later stages can then split less because the
+    // earlier split already narrowed the tracked child).
+    const auto [it_cons, it_flat] =
+        std::ranges::mismatch(approx_cons, approx_flat);
+    REQUIRE(it_cons != approx_cons.end());
+    REQUIRE(*it_cons > *it_flat);
+
+    const auto forecast_cons = cons_plan.forecast_branching("taylor", 0U);
+    const auto forecast_flat = flat_plan.forecast_branching("taylor", 0U);
+    REQUIRE(forecast_cons.max_children >= forecast_flat.max_children);
+    // Mean branching for threshold solving uses the non-conservative tile.
+    REQUIRE(forecast_cons.mean == forecast_flat.mean);
+    REQUIRE(cons_plan.get_branching_pattern("taylor", 0U) ==
+            flat_plan.get_branching_pattern("taylor", 0U));
 }

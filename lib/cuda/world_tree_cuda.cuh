@@ -179,6 +179,12 @@ public:
     /// @brief Account for @p n survivors written through get_direct_write()
     /// (n <= get_space_left()); same state as add_batch_scattered's fast path.
     void commit_direct_write(SizeType n);
+    /// @brief Compact survivors where @p keep_flags[r] != 0 into [0, kept)
+    /// relative to write_head and commit only those @c kept slots.
+    [[nodiscard]] SizeType
+    commit_direct_write_filtered(SizeType n,
+                                 cuda::std::span<const uint8_t> keep_flags,
+                                 cudaStream_t stream);
 
     // Add an initial set of candidate leaves to the Tree (reset buffer first)
     void add_initial(cuda::std::span<const double> leaves_batch,
@@ -186,6 +192,14 @@ public:
                      cuda::std::span<const float> scores_batch,
                      SizeType slots_to_write,
                      cudaStream_t stream);
+    /// Reset and add the seeds @p indices_batch[0..n_keep) of the batch, in
+    /// that order (seeds outside an RFI mask).
+    void add_initial_scattered(cuda::std::span<const double> leaves_batch,
+                               cuda::std::span<const FoldTypeCUDA> folds_batch,
+                               cuda::std::span<const float> scores_batch,
+                               cuda::std::span<const uint32_t> indices_batch,
+                               SizeType n_keep,
+                               cudaStream_t stream);
     /**
      * @brief Add batch during update with threshold filtering, scattered.
      *

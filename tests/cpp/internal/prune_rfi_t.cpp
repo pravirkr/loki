@@ -59,7 +59,7 @@ PulsarSearchConfig make_small_cfg() {
             /*use_fourier=*/false,
             /*nthreads=*/1,
             /*max_process_memory_gb=*/8.0,
-            /*octave_scale=*/2.0,
+            /*region_growth_factor=*/2.0,
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
@@ -113,8 +113,12 @@ TEST_CASE("HarvestBuffer stores optional folds", "[prune_rfi]") {
 
 TEST_CASE("PruneStats RFI summaries", "[prune_rfi]") {
     loki::search::PruneStats stats{};
+    stats.n_branches    = 0;
+    stats.n_leaves      = 0;
     stats.n_leaves_phy  = 0;
     stats.n_leaves_surv = 0;
+    REQUIRE(stats.branch_frac() == 0.0);
+    REQUIRE(stats.phys_frac() == 0.0);
     REQUIRE(stats.surv_frac() == 0.0);
     stats.n_leaves_phy    = 10;
     stats.n_leaves_surv   = 5;

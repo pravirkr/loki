@@ -56,6 +56,27 @@ void PruneRFIConfig::validate(SizeType nsegments) const {
         }
         validate_harvest_geometry(harvest_mask_ntiles);
     }
+    error_check::check(
+        !fractional_harmonics || n_harmonics <= kMaxFractionalHarmonics,
+        fmt::format("PruneRFIConfig: fractional_harmonics needs n_harmonics "
+                    "<= {} (got {})",
+                    kMaxFractionalHarmonics, n_harmonics));
+    if (harvest_defaults) {
+        error_check::check(harvest_scheme.empty(),
+                           "PruneRFIConfig: set harvest_scheme or "
+                           "harvest_defaults, not both");
+        error_check::check(
+            harvest_defaults->min_level >= 1 &&
+                harvest_defaults->min_level + 1 <= nsegments,
+            fmt::format("PruneRFIConfig: harvest_defaults.min_level must be "
+                        "in [1, nsegments - 1 = {}] (got {})",
+                        nsegments - 1, harvest_defaults->min_level));
+        error_check::check(utils::is_finite(harvest_defaults->offset) &&
+                               utils::is_finite(harvest_defaults->min_snr),
+                           "PruneRFIConfig: harvest_defaults.offset and "
+                           "min_snr must be finite");
+        validate_harvest_geometry(harvest_mask_ntiles);
+    }
     if (impulsive_veto) {
         error_check::check_greater(impulsive_kappa, 0.0,
                                    "PruneRFIConfig: impulsive_kappa must be "
@@ -68,6 +89,18 @@ void PruneRFIConfig::validate(SizeType nsegments) const {
         error_check::check(!utils::is_nan(impulsive_min_snr),
                            "PruneRFIConfig: impulsive_min_snr must not be NaN");
     }
+}
+
+PruneRFIConfig
+PruneRFIConfig::expand_harvest(std::span<const float> threshold_scheme) const {
+    PruneRFIConfig expanded = *this;
+    if (harvest_defaults) {
+        expanded.harvest_scheme = make_default_harvest_scheme(
+            threshold_scheme, harvest_defaults->min_level,
+            harvest_defaults->offset, harvest_defaults->min_snr);
+        expanded.harvest_defaults.reset();
+    }
+    return expanded;
 }
 
 ParamWindow make_pulsar_window(
@@ -119,7 +152,8 @@ ParamWindow make_harvest_window(double f,
                                 double da,
                                 double t_ref,
                                 double tobs,
-                                double ntiles) {
+                                double ntiles,
+                                double a_max) {
     error_check::check_greater(f, 0.0,
                                "make_harvest_window: f must be positive");
     error_check::check_greater_equal(df, 0.0,
@@ -134,10 +168,13 @@ ParamWindow make_harvest_window(double f,
                                "make_harvest_window: ntiles must be positive");
     error_check::check(utils::is_finite(ntiles),
                        "make_harvest_window: ntiles must be finite");
-    const auto reach = std::max(t_ref, tobs - t_ref);
-    const auto sweep = f * std::abs(a) * reach * utils::kInvCval;
-    const auto f_pad = (ntiles * df) + sweep;
-    const auto a_pad = ntiles * da;
+    error_check::check(!utils::is_nan(a_max) && a_max >= 0.0,
+                       "make_harvest_window: a_max must be >= 0");
+    const auto a_pad   = ntiles * da;
+    const auto a_reach = std::min(std::abs(a) + a_pad, a_max);
+    const auto reach   = std::max(t_ref, tobs - t_ref);
+    const auto sweep   = f * a_reach * reach * utils::kInvCval;
+    const auto f_pad   = (ntiles * df) + sweep;
     return ParamWindow{
         .f_lo = f - f_pad,
         .f_hi = f + f_pad,

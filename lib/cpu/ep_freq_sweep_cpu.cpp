@@ -105,6 +105,11 @@ public:
     EPFreqSweepCpuEngine(EPFreqSweepCpuEngine&&)                 = delete;
     EPFreqSweepCpuEngine& operator=(EPFreqSweepCpuEngine&&)      = delete;
 
+    void set_leaf_reduction(
+        std::optional<search::detail::LeafReductionSpec> spec) override {
+        m_reduction = std::move(spec);
+    }
+
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
@@ -130,6 +135,8 @@ public:
             (outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix))
                 .lexically_normal();
         std::filesystem::create_directories(tmp_dir, ec);
+        // Removed on every exit, including an interrupt or a failed chunk.
+        const detail::RemoveOnExit remove_tmp_dir(tmp_dir);
 
         const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
         const SizeType nchunks = chunk_cfgs.size();
@@ -219,6 +226,12 @@ public:
                     /*ascend_levels=*/{}, chunk.max_sugg, kBatchSize,
                     m_poly_basis, m_show_progress && (nchunks == 1),
                     m_rfi_config);
+                if (m_reduction) {
+                    auto spec = *m_reduction;
+                    spec.nbins =
+                        static_cast<std::uint32_t>(chunk.cfg.get_nbins());
+                    chunk_ep->set_leaf_reduction(spec);
+                }
 
                 chunk_ep->execute(ts_e, ts_v, tmp_dir, chunk_prefix);
             }
@@ -229,10 +242,7 @@ public:
         // Batch merge all chunk HDF5 files into unified result file
         const double accumulated_flops = detail::merge_ep_sweep_results(
             tmp_dir, result_file, chunk_cfgs, m_base_cfg, m_min_pd,
-            m_poly_basis, m_ref_ducy, total_runtime);
-
-        // Clean up temporary chunk output directory on successful completion
-        std::filesystem::remove_all(tmp_dir, ec);
+            m_poly_basis, m_ref_ducy, total_runtime, m_rfi_config.is_active());
 
         spdlog::info(
             "EPFreqSweep complete: {} chunks processed in {:.2f} seconds "
@@ -247,6 +257,7 @@ private:
     std::string m_poly_basis;
     float m_ref_ducy;
     algorithms::PruneRFIConfig m_rfi_config;
+    std::optional<search::detail::LeafReductionSpec> m_reduction;
     std::optional<SizeType> m_n_runs;
     std::optional<std::vector<SizeType>> m_ref_segs;
     // Workers pruning at the same time: min(nthreads, runs).

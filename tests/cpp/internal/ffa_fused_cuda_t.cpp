@@ -196,7 +196,8 @@ TEST_CASE("Fused frequency merges match the unfused levels bit for bit",
     const loki::search::FFASearchConfig cfg(
         /*nsamps=*/SizeType{1} << 15U, /*tsamp=*/1.0e-3, nbins, /*eta=*/1.0,
         limits, /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/false,
-        /*nthreads=*/1, /*max_process_memory_gb=*/1.0, /*octave_scale=*/2.0,
+        /*nthreads=*/1, /*max_process_memory_gb=*/1.0,
+        /*region_growth_factor=*/2.0,
         /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/SizeType{32});
     const loki::plans::FFAPlan<float> plan(cfg);
@@ -225,12 +226,14 @@ TEST_CASE("Fused frequency merges match the unfused levels bit for bit",
         max_elems = std::max(max_elems, nsegments[l] * ncoords[l] * stride);
     }
 
-    for (const int k : {3, 4, 5}) {
+    constexpr std::array<int, 3> kFuseFactors{3, 4, 5};
+    constexpr std::array<SizeType, 2> kFirstLevels{SizeType{1}, SizeType{2}};
+    for (const int k : kFuseFactors) {
         if (!loki::core::ffa_freq_fuse_fits_smem(k, nbins)) {
             continue;
         }
         // Start at level 1 and at level 2 (both parities of the input).
-        for (const SizeType first : {SizeType{1}, SizeType{2}}) {
+        for (const SizeType first : kFirstLevels) {
             CAPTURE(k, first);
             const auto input = random_floats(
                 nsegments[first - 1] * ncoords[first - 1] * stride,
@@ -258,7 +261,8 @@ TEST_CASE("Fused frequency merges are exact on a level over 2^31 bytes",
         /*nsamps=*/SizeType{1} << 23U, /*tsamp=*/64.0e-6, kNbins,
         /*eta=*/1.0, limits, /*ducy_max=*/0.2, /*wtsp=*/1.5,
         /*use_fourier=*/false, /*nthreads=*/1, /*max_process_memory_gb=*/32.0,
-        /*octave_scale=*/2.0, /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64,
+        /*region_growth_factor=*/2.0, /*nbins_max=*/1024,
+        /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/SizeType{128});
     const loki::plans::FFAPlan<float> plan(cfg);
     const auto ncoords    = plan.get_ncoords();

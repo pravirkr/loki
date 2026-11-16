@@ -4,6 +4,7 @@
 #include "loki/algorithms/ffa.hpp"           // IWYU pragma: export
 #include "loki/algorithms/fold.hpp"          // IWYU pragma: export
 #include "loki/algorithms/prune.hpp"         // IWYU pragma: export
+#include "loki/algorithms/prune_rfi.hpp"     // IWYU pragma: export
 #include "loki/algorithms/regions.hpp"       // IWYU pragma: export
 #include "loki/common/backend.hpp"           // IWYU pragma: export
 #include "loki/common/coord.hpp"             // IWYU pragma: export
@@ -16,6 +17,7 @@
 #include "loki/io/candidate_file.hpp"        // IWYU pragma: export
 #include "loki/io/observation.hpp"           // IWYU pragma: export
 #include "loki/io/preprocess.hpp"            // IWYU pragma: export
+#include "loki/io/sift.hpp"                  // IWYU pragma: export
 #include "loki/io/timeseries.hpp"            // IWYU pragma: export
 #include "loki/pipelines/ep_freq_sweep.hpp"  // IWYU pragma: export
 #include "loki/pipelines/ffa_freq_sweep.hpp" // IWYU pragma: export
@@ -23,6 +25,7 @@
 #include "loki/search/configs.hpp"           // IWYU pragma: export
 #include "loki/search/orbit.hpp"             // IWYU pragma: export
 #include "loki/search/provenance.hpp"        // IWYU pragma: export
+#include "loki/search/refold.hpp"            // IWYU pragma: export
 #include "loki/simulation/configs.hpp"       // IWYU pragma: export
 #include "loki/simulation/modulate.hpp"      // IWYU pragma: export
 #include "loki/simulation/pulse.hpp"         // IWYU pragma: export

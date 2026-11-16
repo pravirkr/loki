@@ -32,6 +32,7 @@
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/interrupt_cuda.cuh"
 #include "lib/cuda/prune_cuda.cuh"
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
@@ -95,7 +96,8 @@ public:
         const std::optional<std::filesystem::path>& plan_cache_file,
         std::optional<SizeType> n_runs,
         const std::optional<std::vector<SizeType>>& ref_segs,
-        int device_id)
+        int device_id,
+        algorithms::PruneRFIConfig rfi_config)
         : m_base_cfg(cfg.has_explicit_nsegments()
                          ? std::move(cfg)
                          : cfg.with_ep_default_nsegments()),
@@ -110,7 +112,8 @@ public:
               .nsamps     = m_base_cfg.get_nsamps(),
               .n_workers  = 1,
               .batch_size = algorithms::detail::kEPBatchSizeCuda,
-              .harvest    = {},
+              .harvest = algorithms::detail::EPHarvestBound::from(rfi_config),
+              .rfi_active = rfi_config.is_active(),
               .kind       = algorithms::detail::EPMemoryKind::kCuda,
               .device     = device_id,
               .cub_scratch_bytes =
@@ -122,7 +125,7 @@ public:
                            poly_basis,
                            ref_ducy,
                            plan_cache_file,
-                           algorithms::PruneRFIConfig{},
+                           rfi_config,
                            std::nullopt,
                            m_n_runs,
                            m_ref_segs,
@@ -132,6 +135,14 @@ public:
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         const auto& stats      = m_region_planner.get_stats();
         const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
+        // Each chunk's RFI control, with the harvest scheme of its own
+        // threshold scheme (written to the results, run by its pruning).
+        if (rfi_config.is_active()) {
+            for (const auto& chunk : chunk_cfgs) {
+                m_chunk_rfi.push_back(
+                    rfi_config.expand_harvest(chunk.threshold_scheme));
+            }
+        }
         spdlog::info(
             "EPFreqSweep (CUDA {}): {} chunks planned, peak {:.2f} GB of "
             "device memory (limit {:.2f} GB), max_sugg: {}",
@@ -203,6 +214,11 @@ public:
     EPFreqSweepCudaEngine(EPFreqSweepCudaEngine&&)                 = delete;
     EPFreqSweepCudaEngine& operator=(EPFreqSweepCudaEngine&&)      = delete;
 
+    void set_leaf_reduction(
+        std::optional<search::detail::LeafReductionSpec> spec) override {
+        m_reduction = std::move(spec);
+    }
+
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
@@ -230,6 +246,8 @@ public:
             (outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix))
                 .lexically_normal();
         std::filesystem::create_directories(tmp_dir, ec);
+        // Removed on every exit, including an interrupt or a failed chunk.
+        const detail::RemoveOnExit remove_tmp_dir(tmp_dir);
 
         // The inputs stay on the device for the whole sweep.
         const cudaStream_t stream = m_stream.get();
@@ -249,8 +267,10 @@ public:
 
         const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
         const SizeType nchunks = chunk_cfgs.size();
-        detail::EPSweepWriter result_writer(result_file, chunk_cfgs, m_base_cfg,
-                                            m_min_pd, m_poly_basis, m_ref_ducy);
+        detail::EPSweepWriter result_writer(
+            result_file, chunk_cfgs, m_base_cfg, m_min_pd, m_poly_basis,
+            m_ref_ducy, m_reduction,
+            std::span<const algorithms::PruneRFIConfig>(m_chunk_rfi));
         spdlog::debug("EPFreqSweep (CUDA {}): starting sweep over {} chunks",
                       m_device_id, nchunks);
 
@@ -346,6 +366,7 @@ public:
             };
 
             for (SizeType i = group.begin; i < group.end; ++i) {
+                loki::interrupt::check(stream);
                 const nvtx::Range chunk_range("ep sweep: chunk");
                 const auto& chunk = chunk_cfgs[i];
                 spdlog::debug("EPFreqSweep: processing chunk {}/{} - nominal "
@@ -371,7 +392,9 @@ public:
                 algorithms::EPMultiPassCudaCore<FoldTypeCUDA> chunk_ep(
                     pipeline, chunk.cfg, chunk.threshold_scheme, m_n_runs,
                     m_ref_segs, /*ascend_levels=*/{}, chunk.max_sugg,
-                    kBatchSize, m_poly_basis, m_device_id);
+                    kBatchSize, m_poly_basis, m_device_id,
+                    m_chunk_rfi.empty() ? algorithms::PruneRFIConfig{}
+                                        : m_chunk_rfi[i]);
                 chunk_ep.execute_device(tmp_dir, chunk_prefix);
             }
             cuda_utils::check_cuda_call(
@@ -384,9 +407,6 @@ public:
         // Wait for all snapshots to reach the final HDF5 file.
         const double accumulated_flops = result_writer.finish(total_runtime);
 
-        // Clean up temporary chunk output directory on successful completion
-        std::filesystem::remove_all(tmp_dir, ec);
-
         spdlog::info(
             "EPFreqSweep complete: {} chunks processed in {:.2f} seconds "
             "({:.2f} GFLOPs). Results saved to '{}'",
@@ -398,11 +418,14 @@ private:
     float m_min_pd;
     std::string m_poly_basis;
     float m_ref_ducy;
+    std::optional<search::detail::LeafReductionSpec> m_reduction;
     std::optional<SizeType> m_n_runs;
     std::optional<std::vector<SizeType>> m_ref_segs;
     int m_device_id;
     algorithms::detail::EPMemoryContext m_memory;
     algorithms::EPRegionPlanner<FoldType> m_region_planner;
+    /// Per chunk, when RFI control is active (else empty).
+    std::vector<algorithms::PruneRFIConfig> m_chunk_rfi;
 
     memory::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
     math::GpuFFTManager m_fft_manager;
@@ -475,15 +498,16 @@ std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_gpu(
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
     const std::optional<std::vector<SizeType>>& ref_segs,
-    int device_id) {
+    int device_id,
+    const algorithms::PruneRFIConfig& rfi_config) {
     if (cfg.get_use_fourier()) {
         return std::make_unique<EPFreqSweepCudaEngine<ComplexType>>(
             cfg, min_pd, poly_basis, ref_ducy, plan_cache_file, n_runs,
-            ref_segs, device_id);
+            ref_segs, device_id, rfi_config);
     }
     return std::make_unique<EPFreqSweepCudaEngine<float>>(
         cfg, min_pd, poly_basis, ref_ducy, plan_cache_file, n_runs, ref_segs,
-        device_id);
+        device_id, rfi_config);
 }
 } // namespace detail
 

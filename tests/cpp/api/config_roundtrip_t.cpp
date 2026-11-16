@@ -48,47 +48,53 @@ void set_non_defaults(FFATomlConfig& cfg) {
     o.zap_periodic              = true;
     o.zap_sigma                 = 7.5;
     o.zap_whiten_bins           = 501;
+    o.zap_mode                  = loki::io::ZapMode::kPhaseKept;
+    o.zap_seed                  = 1234;
     o.birdies   = {{.freq = 50.0, .width = 0.1}, {.freq = 60.0, .width = 0.25}};
     cfg.f_min   = 0.1;
     cfg.f_max   = 123.456;
     cfg.acc_min = -25.0;
     cfg.acc_max = 30.0;
-    cfg.jerk_min               = -0.5;
-    cfg.jerk_max               = 0.75;
-    cfg.nbins                  = 128;
-    cfg.eta                    = 0.5;
-    cfg.ducy_max               = 0.3;
-    cfg.wtsp                   = 1.25;
-    cfg.snr_min                = 6.5;
-    cfg.use_fourier            = false;
-    cfg.use_boxcar_kadane      = true;
-    cfg.nthreads               = 3;
-    cfg.device                 = 1;
-    cfg.max_process_memory_gb  = 12.5;
-    cfg.octave_scale           = 1.5;
-    cfg.nbins_max              = 512;
-    cfg.nbins_min_lossy_bf     = 32;
-    cfg.bseg_brute             = 256;
-    cfg.max_passing_candidates = 1000;
-    cfg.outdir                 = "out dir/";
-    cfg.prefix                 = "run_7";
-    auto& c                    = cfg.candidates;
-    c.enabled                  = false;
-    c.cluster                  = false;
-    c.grouping                 = "anchored";
-    c.radius                   = 2.0;
-    c.phase_radius             = 0.1;
-    c.retain_detections        = false;
-    c.flag_harmonics           = true;
-    c.remove_harmonics         = true;
-    c.harmonic_denominator_max = 16;
-    c.harmonic_phase_distance  = 0.5;
-    c.harmonic_snr_distance    = 2.0;
-    c.max_per_cell             = 1;
-    c.cell_log_width           = 2e-4;
-    c.max_candidates           = 50;
-    c.memory_gb                = 2.5;
-    c.temporary_directory      = "/scratch/tmp";
+    cfg.jerk_min                 = -0.5;
+    cfg.jerk_max                 = 0.75;
+    cfg.nbins                    = 128;
+    cfg.eta                      = 0.5;
+    cfg.ducy_max                 = 0.3;
+    cfg.wtsp                     = 1.25;
+    cfg.snr_min                  = 6.5;
+    cfg.use_fourier              = false;
+    cfg.use_boxcar_kadane        = true;
+    cfg.nthreads                 = 3;
+    cfg.device                   = 1;
+    cfg.max_process_memory_gb    = 12.5;
+    cfg.region_growth_factor     = 1.5;
+    cfg.nbins_max                = 512;
+    cfg.nbins_min_lossy_bf       = 32;
+    cfg.bseg_brute               = 256;
+    cfg.max_passing_candidates   = 1000;
+    cfg.outdir                   = "out dir/";
+    cfg.prefix                   = "run_7";
+    auto& c                      = cfg.candidates;
+    c.enabled                    = false;
+    c.cluster                    = false;
+    c.grouping                   = "anchored";
+    c.radius                     = 2.0;
+    c.phase_radius               = 0.1;
+    c.retain_detections          = false;
+    c.flag_harmonics             = true;
+    c.remove_harmonics           = true;
+    c.harmonic_denominator_max   = 16;
+    c.harmonic_phase_distance    = 0.5;
+    c.harmonic_snr_distance      = 2.0;
+    c.harmonic_doppler_tolerance = 1.0e-4;
+    c.harmonic_doppler_min_snr   = 12.0;
+    c.max_per_cell               = 1;
+    c.cell_bins                  = 0;
+    c.cell_log_width             = 2e-4;
+    c.dominance_kappa            = 1.5;
+    c.max_candidates             = 50;
+    c.memory_gb                  = 2.5;
+    c.temporary_directory        = "/scratch/tmp";
 }
 
 void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
@@ -117,6 +123,8 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(o.zap_periodic == p.zap_periodic);
     CHECK(o.zap_sigma == p.zap_sigma);
     CHECK(o.zap_whiten_bins == p.zap_whiten_bins);
+    CHECK(o.zap_mode == p.zap_mode);
+    CHECK(o.zap_seed == p.zap_seed);
     REQUIRE(o.birdies.size() == p.birdies.size());
     for (std::size_t i = 0; i < o.birdies.size(); ++i) {
         CHECK(o.birdies[i].freq == p.birdies[i].freq);
@@ -147,7 +155,7 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(a.backend == b.backend);
     CHECK(a.device == b.device);
     CHECK(a.max_process_memory_gb == b.max_process_memory_gb);
-    CHECK(a.octave_scale == b.octave_scale);
+    CHECK(a.region_growth_factor == b.region_growth_factor);
     CHECK(a.nbins_max == b.nbins_max);
     CHECK(a.nbins_min_lossy_bf == b.nbins_min_lossy_bf);
     CHECK(a.bseg_brute == b.bseg_brute);
@@ -167,8 +175,12 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(c.harmonic_denominator_max == d.harmonic_denominator_max);
     CHECK(c.harmonic_phase_distance == d.harmonic_phase_distance);
     CHECK(c.harmonic_snr_distance == d.harmonic_snr_distance);
+    CHECK(c.harmonic_doppler_tolerance == d.harmonic_doppler_tolerance);
+    CHECK(c.harmonic_doppler_min_snr == d.harmonic_doppler_min_snr);
     CHECK(c.max_per_cell == d.max_per_cell);
+    CHECK(c.cell_bins == d.cell_bins);
     CHECK(c.cell_log_width == d.cell_log_width);
+    CHECK(c.dominance_kappa == d.dominance_kappa);
     CHECK(c.max_candidates == d.max_candidates);
     CHECK(c.memory_gb == d.memory_gb);
     CHECK(c.temporary_directory == d.temporary_directory);
@@ -190,6 +202,24 @@ void check_same_ep(const EPTomlConfig& a, const EPTomlConfig& b) {
     CHECK(a.propagator_significance == b.propagator_significance);
     CHECK(a.validation_significance == b.validation_significance);
     CHECK(a.use_conservative_tile == b.use_conservative_tile);
+    CHECK(a.overflow_keep_fraction == b.overflow_keep_fraction);
+    REQUIRE(a.rfi.has_value() == b.rfi.has_value());
+    if (a.rfi) {
+        CHECK(a.rfi->pulsar_mask == b.rfi->pulsar_mask);
+        CHECK(a.rfi->n_harmonics == b.rfi->n_harmonics);
+        CHECK(a.rfi->fractional_harmonics == b.rfi->fractional_harmonics);
+        CHECK(a.rfi->harvest == b.rfi->harvest);
+        CHECK(a.rfi->harvest_min_level == b.rfi->harvest_min_level);
+        CHECK(a.rfi->harvest_offset == b.rfi->harvest_offset);
+        CHECK(a.rfi->harvest_min_snr == b.rfi->harvest_min_snr);
+        CHECK(a.rfi->harvest_mask_ntiles == b.rfi->harvest_mask_ntiles);
+        CHECK(a.rfi->max_harvests == b.rfi->max_harvests);
+        CHECK(a.rfi->harvest_store_folds == b.rfi->harvest_store_folds);
+        CHECK(a.rfi->impulsive_veto == b.rfi->impulsive_veto);
+        CHECK(a.rfi->impulsive_kappa == b.rfi->impulsive_kappa);
+        CHECK(a.rfi->impulsive_min_level == b.rfi->impulsive_min_level);
+        CHECK(a.rfi->impulsive_min_snr == b.rfi->impulsive_min_snr);
+    }
     CHECK(a.plan_cache == b.plan_cache);
     CHECK(a.use_plan_cache == b.use_plan_cache);
 }
@@ -244,9 +274,25 @@ TEST_CASE("EPTomlConfig to_toml_string gives back every setting",
     cfg.propagator_significance = 2.5;
     cfg.validation_significance = 4.5;
     cfg.use_conservative_tile   = true;
-    cfg.plan_cache              = std::filesystem::path("plans/ep.h5");
-    cfg.use_plan_cache          = false;
-    const auto text             = cfg.to_toml_string();
+    cfg.overflow_keep_fraction  = 0.25;
+    cfg.rfi                     = loki::search::EPRFIOptions{
+        .pulsar_mask          = {{50.0, 50.2}, {100.0, 100.5}},
+        .n_harmonics          = 4,
+        .fractional_harmonics = true,
+        .harvest              = true,
+        .harvest_min_level    = 6,
+        .harvest_offset       = 8.5F,
+        .harvest_min_snr      = 30.0F,
+        .harvest_mask_ntiles  = 2.5,
+        .max_harvests         = 1024,
+        .harvest_store_folds  = false,
+        .impulsive_veto       = true,
+        .impulsive_kappa      = 4.5,
+        .impulsive_min_level  = 4,
+        .impulsive_min_snr    = 12.0F};
+    cfg.plan_cache     = std::filesystem::path("plans/ep.h5");
+    cfg.use_plan_cache = false;
+    const auto text    = cfg.to_toml_string();
     CAPTURE(text);
     check_same_ep(cfg, EPTomlConfig::from_string(text));
 

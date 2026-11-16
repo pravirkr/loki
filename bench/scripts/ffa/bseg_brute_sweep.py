@@ -12,7 +12,7 @@ Usage:
         --workdir /tmp/loki_p0 --json out.json
 
 The default search window mirrors ``bench/ffa_freq_b.cpp`` (1-488 Hz,
-nbins=32 .. 1024, octave_scale=1.5), so the same regions are exercised.
+nbins=32 .. 1024, region_growth_factor=1.5), so the same regions are exercised.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def write_config(path: Path, args: argparse.Namespace, bseg: str, outdir: Path) 
     perf = [
         f"nthreads = {args.nthreads}",
         f"max_process_memory_gb = {args.memory_gb}",
-        f"octave_scale = {args.octave_scale}",
+        f"region_growth_factor = {args.region_growth_factor}",
         f"nbins_max = {args.nbins_max}",
         f"nbins_min_lossy_bf = {args.nbins_min_lossy_bf}",
     ]
@@ -132,7 +132,7 @@ def main() -> int:
     ap.add_argument("--eta", type=float, default=1.0)
     ap.add_argument("--nthreads", type=int, default=8)
     ap.add_argument("--memory-gb", type=float, default=16.0)
-    ap.add_argument("--octave-scale", type=float, default=1.5)
+    ap.add_argument("--region-growth-factor", type=float, default=1.5)
     ap.add_argument("--nbins-max", type=int, default=1024)
     ap.add_argument("--nbins-min-lossy-bf", type=int, default=32)
     ap.add_argument("--fourier", action="store_true")

@@ -143,5 +143,15 @@ TEST_CASE("timeseries read_info returns the header without the samples",
     const auto info = loki::io::TimeSeries::read_info(path);
     REQUIRE(info.nsamps == samples.size());
     REQUIRE_THAT(info.dt, WithinAbs(1.28e-4, 0.0));
+    // The observation metadata matches what read() reports.
+    const auto full = loki::io::TimeSeries::read(
+        path, {.preprocess = false, .preprocessing = {}});
+    const auto& obs = full.get_observation();
+    CHECK(info.observation.input_path == obs.input_path);
+    CHECK(info.observation.source == obs.source);
+    CHECK(info.observation.dm == obs.dm);
+    CHECK(info.observation.start_mjd == obs.start_mjd);
+    CHECK(info.observation.barycentric == obs.barycentric);
+    CHECK(info.observation.original_nsamps == samples.size());
     REQUIRE_THROWS(loki::io::TimeSeries::read_info(dir.path() / "none.tim"));
 }

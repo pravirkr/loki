@@ -27,11 +27,14 @@
  * prune and branching scratch, CUB temp storage, seeds, segment coordinates,
  * Fourier irfft scratch), the shared FFA workspace and fold buffer, the
  * device copy of the inputs, and the transient device scratch of the FFA
- * brute fold, which is live while the EP workspace is. There is no harvest
- * term: harvesting is rejected on CUDA.
+ * brute fold, which is live while the EP workspace is. With RFI control
+ * (pulsar mask, early harvest) it adds the device mask, the seed index list
+ * and the worst-case harvest staging of one batch (ep_cuda_rfi_bytes); the
+ * host harvest store is not device memory.
  */
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -61,6 +64,21 @@ constexpr SizeType kEPBatchSize = 1024U;
 /// minute per reference segment instead of seconds.
 constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 
+/// Parents times phase bins of one CUDA batch that keep the GPU busy: the
+/// batch of 2^16 measured at nbins 64. Below it the per-batch overhead
+/// dominates (docs/performance.md, "CUDA batch and branch_max").
+constexpr SizeType kEPCudaBatchWork = SizeType{1} << 22U;
+
+/// CUDA batch of a chunk with @p nbins phase bins: kEPCudaBatchWork / nbins
+/// as a power of two, at most @p max_batch (the policy's batch, which the
+/// planner halves when a minimum chunk does not fit).
+constexpr SizeType ep_cuda_batch_for_nbins(SizeType nbins,
+                                           SizeType max_batch) noexcept {
+    const SizeType wanted = std::bit_floor(
+        std::max<SizeType>(kEPCudaBatchWork / std::max<SizeType>(nbins, 1), 1));
+    return std::min(max_batch, wanted);
+}
+
 /// Version of this model. Bump it with every change to the formulas: plan
 /// caches store it and are rejected when it differs.
 ///  3: CUDA policy (EPMemoryKind), transient FFA scratch of the CUDA model.
@@ -74,7 +92,10 @@ constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 ///     multiple of kEPRingGranularity (was bit_ceil).
 /// 12: final winning-width reporting, uint32 per surviving CPU leaf.
 /// 13: CPU Fourier phase-step table included in transient FFA bytes.
-constexpr std::uint32_t kEPMemoryModelVersion = 13U;
+/// 14: CUDA RFI control without harvesting does not count harvest staging.
+/// 15: branch_max is the forecast's worst leaf, without a floor of 32;
+///     the CUDA batch of a chunk is kEPCudaBatchWork / nbins.
+constexpr std::uint32_t kEPMemoryModelVersion = 15U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -113,6 +134,9 @@ struct EPMemoryContext {
     int n_workers{1};
     SizeType batch_size{kEPBatchSize};
     EPHarvestBound harvest;
+    /// RFI control is active (pulsar mask or harvest): the CUDA policy counts
+    /// its device buffers.
+    bool rfi_active{false};
     EPMemoryKind kind{EPMemoryKind::kCpu};
     /// CUDA policy: the device the sweep runs on.
     int device{0};
@@ -425,6 +449,37 @@ SizeType ep_cuda_ep_workspace_bytes(const EPMemoryContext& ctx,
 
 /// Per-group device bytes of the CUDA policy: the EP workspace plus the
 /// irfft scratch the prune functors of each chunk allocate.
+/// Device bytes of CUDA RFI control for one chunk group: the mask bitset and
+/// seed index list (one cell per FFA coordinate) and, with harvesting
+/// enabled, the staging of one batch's harvest candidates (their leaves and
+/// scores, reported) and of the recorded folds. Zero without RFI control.
+template <SupportedFoldType FoldType>
+SizeType ep_cuda_rfi_bytes(const EPMemoryContext& ctx,
+                           SizeType nbins,
+                           SizeType ncoords_ffa,
+                           SizeType branch_max) {
+    if (!ctx.rfi_active) {
+        return 0;
+    }
+    constexpr SizeType kParamStride = 2U;
+    const SizeType leaves_stride    = (ctx.nparams + 2) * kParamStride;
+    const SizeType nbins_arg =
+        std::is_same_v<FoldType, ComplexType> ? (nbins / 2) + 1 : nbins;
+    const SizeType max_batch = ctx.batch_size * branch_max;
+    const SizeType mask  = ((ncoords_ffa + 63) / 64) * sizeof(std::uint64_t);
+    const SizeType seeds = ncoords_ffa * sizeof(std::uint32_t);
+    // The pruner allocates the staging only when it harvests.
+    const SizeType staging =
+        ctx.harvest.enabled
+            ? max_batch * ((leaves_stride * sizeof(double)) + sizeof(float))
+            : 0;
+    const SizeType folds = ctx.harvest.store_folds
+                               ? std::min(max_batch, ctx.harvest.max_harvests) *
+                                     2 * nbins_arg * fold_bytes<FoldType>()
+                               : 0;
+    return mask + seeds + staging + folds;
+}
+
 template <SupportedFoldType FoldType>
 SizeType ep_cuda_workspace_bytes(const EPMemoryContext& ctx,
                                  SizeType nbins,
@@ -443,7 +498,8 @@ SizeType ep_cuda_workspace_bytes(const EPMemoryContext& ctx,
                              : 0;
     return ep_cuda_ep_workspace_bytes<FoldType>(
                ctx, nbins, nsegments, ncoords_ffa, max_sugg, branch_max) -
-           overlap + ep_cuda_scorer_scratch_bytes(ctx, branch_max);
+           overlap + ep_cuda_scorer_scratch_bytes(ctx, branch_max) +
+           ep_cuda_rfi_bytes<FoldType>(ctx, nbins, ncoords_ffa, branch_max);
 }
 
 /// Bytes of the FFA workspace (internal fold buffer and device coordinates)

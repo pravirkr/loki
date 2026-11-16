@@ -108,6 +108,17 @@ uv pip install git+https://github.com/pravirkr/loki.git -C cmake.define.LOKI_ENA
 An image or binary that runs on other machines needs it off; the
 [container](#containers) sets an explicit CPU baseline instead.
 
+#### Installing without build isolation
+
+`--no-build-isolation` (for example on a cluster without internet access, or
+to build against the environment's own packages) skips the step that installs
+the build requirements, so install them into the environment first:
+
+```bash
+uv pip install "scikit-build-core>=0.10" "pybind11>=3.0"
+uv pip install --no-build-isolation git+https://github.com/pravirkr/loki.git
+```
+
 ---
 
 ### Mode B — C++ library (`cmake` + `find_package`)
@@ -249,8 +260,23 @@ pipe or a batch job's log gets plain lines. `NO_COLOR=1` turns colour off,
 `off`) overrides the progress bars.
 
 Exit status: 0 success, 1 failure, 130 stopped by Ctrl-C, 143 stopped by
-SIGTERM (e.g. Slurm's `scancel`); any other value is an invalid command
-line.
+SIGTERM (e.g. Slurm's `scancel` or HTCondor's `condor_rm`); any other value
+is an invalid command line. A search stops within seconds of the signal, in
+pruning (CPU or CUDA) or in candidate postprocessing, and removes its staging
+and scratch directories. If the search had already finished, its runs are
+kept as `<prefix>_ep_spool.h5` (`<prefix>_ffa_spool.h5`) for a retry without
+searching again (see [Candidate products](docs/candidates.md)). SIGKILL cannot
+be handled: it can leave a `.loki-ep-*` / `.loki-ffa-*` staging directory in
+the output directory.
+
+Every search results file records what the run cost in its `/run_stats`
+group: wall time per stage (`timing_load_s`, `timing_preprocess_s`,
+`timing_plan_s`, `timing_search_s`, `timing_postprocess_s`,
+`timing_total_s`), `peak_rss_gb` (peak host RSS of the process), and for EP
+`n_runs`, `n_runs_overloaded`, `n_overloads` and `plan_peak_memory_gb`; with
+`/detections`, also `detections_per_nbins/{nbins,count}`. The values are
+measurements, not results: two identical runs differ there. The log ends
+with a `Run statistics:` line giving the same timings.
 
 ---
 

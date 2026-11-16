@@ -331,8 +331,21 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   `LOKI_FORCE_CURAND_RNG`. The CUDA `DynamicThresholdScheme` numbers its work
   items per batch, so its results are reproducible per (seed, `batch_size`).
 - On the GPU, the time-domain brute fold accumulates with float `atomicAdd`
-  and is not bit-reproducible run to run (rule 6). Every other path is
+  and is not bit-reproducible run to run (rule 6). The CUDA EP search in the
+  Fourier domain is not bit-reproducible on real data either: two identical
+  runs of a 2^26-sample jerk search (2026-11, L40) gave final-leaf S/N that
+  differed by up to 7.6e-6 (absolute, below 1e-6 relative), and so slightly
+  different leaf sets near `snr_min`; the cause has not been investigated.
+  Production needs statistical, not bit, reproducibility: the same
+  detections, with S/N within 1e-4 relative. Every other path is
   deterministic for a fixed seed.
+- Candidate postprocessing (sorting, the per-run reduction, grouping and
+  selection) is deterministic: given the same final leaves it gives the same
+  product, bit for bit, in any thread count. Ties are broken by S/N, then the
+  frequency derivatives (lower first, frequency first), then the narrower
+  duty cycle, then the larger `nbins`, then the identity `(run << 32) | leaf`
+  (`candidate_brighter`). A near-tie that run-to-run
+  jitter reverses can still change which leaf represents a cluster.
 - The CUDA `FFAFreqSweep` merges the last FFA level(s) on chip with the
   boxcar scorer. In the time domain this is bit-identical to storing the
   levels and calling `score_and_filter_cuda_d`
@@ -401,7 +414,9 @@ none of YAML's implicit typing (`no`, `1e3`, `1:30`). The configs are flat
   `search::write_run_provenance` after the run: `config_effective` (the
   config after defaults and command-line overrides), `command_line` and
   `loki_version`. The CLI writes them for FFA and EP searches, and both
-  also keep the raw config file text in `config_toml`.
+  also keep the raw config file text in `config_toml`. A spool kept by a
+  failed postprocessing gets them too, and `loki publish` carries them into
+  the product it writes, adding `publish_command_line`.
 
 ## Memory planning
 
@@ -417,7 +432,8 @@ Both sweeps have a CPU engine and a CUDA engine. On CUDA,
 it and the free device memory less `kDeviceReserveGB`
 (`FFARegionPlanner(cfg, Exec)` and `EPRegionPlanner` with a GPU `Exec`; the
 CLI's `--dry-run` plans the same way). `EPFreqSweep` on CUDA prunes the runs
-of a chunk one at a time and rejects an active `rfi_config`.
+of a chunk one at a time and supports `rfi_config` (pulsar mask and early
+harvest; `impulsive_veto` is CPU-only and rejected).
 
 ## Checks
 

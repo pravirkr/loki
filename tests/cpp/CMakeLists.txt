@@ -83,7 +83,10 @@ if(CMAKE_CUDA_COMPILER)
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/cub_scratch_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/world_tree_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/branch_capacity_cuda_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/internal/circular_mask_cuda_t.cpp PROPERTIES LANGUAGE CUDA
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/circ_branch_bound_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/circular_mask_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/prune_transform_cuda_t.cpp
+    PROPERTIES LANGUAGE CUDA
   )
   if(TARGET ${PROJECT_NAME}_cuda_options)
     target_link_libraries(${LOKI_INTERNAL_TEST_TARGET} PRIVATE ${PROJECT_NAME}_cuda_options)
@@ -262,6 +265,40 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
                    --plan-only
   )
   set_tests_properties(loki_search_ep_rejects_rfi PROPERTIES WILL_FAIL TRUE)
+  # Without [input] nsamps and tsamp, --plan-only reads them from the input's
+  # header, and fails when there is no input either.
+  string(REPLACE "nsamps = 32768\ntsamp = 0.000064\n" "" LOKI_EP_CLI_NODIMS_CONTENT
+                 "${LOKI_EP_CLI_CONFIG_CONTENT}"
+  )
+  string(REPLACE "cli_ep_plan.h5" "header_ep_plan.h5" LOKI_EP_CLI_NODIMS_CONTENT
+                 "${LOKI_EP_CLI_NODIMS_CONTENT}"
+  )
+  file(WRITE ${LOKI_EP_CLI_DIR}/nodims.toml "${LOKI_EP_CLI_NODIMS_CONTENT}")
+  add_test(NAME loki_search_ep_header_simulate
+           COMMAND $<TARGET_FILE:loki_app> -q simulate --period 0.0070921985815602835 --dt
+                   0.000064 --nsamps 32768 --seed 1 -o ${LOKI_EP_CLI_DIR}/header.tim
+  )
+  set_tests_properties(loki_search_ep_header_simulate PROPERTIES FIXTURES_SETUP loki_ep_cli_header)
+  add_test(NAME loki_search_ep_clean_header_cache
+           COMMAND ${CMAKE_COMMAND} -E rm -f ${LOKI_EP_CLI_DIR}/out/header_ep_plan.h5
+  )
+  set_tests_properties(
+    loki_search_ep_clean_header_cache PROPERTIES FIXTURES_SETUP loki_ep_cli_header_cache
+  )
+  add_test(NAME loki_search_ep_plan_only_header
+           COMMAND $<TARGET_FILE:loki_app> search ep --config ${LOKI_EP_CLI_DIR}/nodims.toml -i
+                   ${LOKI_EP_CLI_DIR}/header.tim --plan-only
+  )
+  set_tests_properties(
+    loki_search_ep_plan_only_header
+    PROPERTIES FIXTURES_REQUIRED "loki_ep_cli_header;loki_ep_cli_header_cache"
+               PASS_REGULAR_EXPRESSION "nsamps = 32768"
+  )
+  add_test(NAME loki_search_ep_plan_only_needs_dims
+           COMMAND $<TARGET_FILE:loki_app> search ep --config ${LOKI_EP_CLI_DIR}/nodims.toml
+                   --plan-only
+  )
+  set_tests_properties(loki_search_ep_plan_only_needs_dims PROPERTIES WILL_FAIL TRUE)
 
   # inspect: simulate a 100 Hz pulsar, search it with the FFA (unclustered,
   # so -n has rows to cut), then summarise the result as text, JSON and with

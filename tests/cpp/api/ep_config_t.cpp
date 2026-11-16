@@ -97,23 +97,6 @@ TEST_CASE("EPTomlConfig reads the [preprocessing] table", "[config][ep]") {
         std::invalid_argument);
 }
 
-TEST_CASE("EPTomlConfig rejects RFI options, which the EP search lacks",
-          "[config][ep]") {
-    const auto message_for = [](const std::string& toml) -> std::string {
-        try {
-            (void)loki::search::EPTomlConfig::from_string(toml);
-        } catch (const std::invalid_argument& err) {
-            return err.what();
-        }
-        return {};
-    };
-    REQUIRE(message_for(make_doc("harvest_scheme = [5.0]\n")).find("RFI") !=
-            std::string::npos);
-    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
-                          make_doc("", "", "", "[rfi]\npulsar_mask = []\n")),
-                      std::invalid_argument);
-}
-
 TEST_CASE("The FFA reader rejects an [ep] table", "[config][ep]") {
     REQUIRE_THROWS_AS(loki::search::FFATomlConfig::from_string(
                           "[search]\nf_min = 1.0\nf_max = 10.0\n[ep]\n"
@@ -426,6 +409,15 @@ TEST_CASE("EP config defaults to 128 FFA segments when nsegments is omitted",
     REQUIRE(raw_cfg.get_nsegments() == 1U);
     const auto norm_cfg = raw_cfg.with_ep_default_nsegments();
     REQUIRE(norm_cfg.has_explicit_nsegments());
+    REQUIRE(norm_cfg.get_overflow_keep_fraction() == 0.5);
+
+    const loki::search::PulsarSearchConfig custom_keep(
+        70000, 64e-6, 32, 1.0, limits, 0.2, 1.5, true, 1, 8.0, 1.5, 1024, 64,
+        std::nullopt, std::nullopt, 7.0, 1U << 22U, 3, 1e-5, 10.0, 1.4, 2.0,
+        5.0, false, false, std::nullopt, 0.25);
+    REQUIRE(
+        custom_keep.with_ep_default_nsegments().get_overflow_keep_fraction() ==
+        0.25);
     REQUIRE(norm_cfg.get_nsegments() == 128U);
     REQUIRE(norm_cfg.get_nsamps_input() == 70000U);
     REQUIRE(norm_cfg.get_nsamps() == norm_cfg.get_bseg_ffa() * 128U);
@@ -487,4 +479,33 @@ TEST_CASE("EPSearchConfig TOML helpers round-trip", "[config][ep]") {
     const auto path = dir / "ep_search_cfg.toml";
     loki::search::EPSearchConfig::write_default_toml(path);
     REQUIRE(std::filesystem::exists(path));
+}
+
+TEST_CASE("EP configs reduce final leaves per run by default", "[config]") {
+    using loki::search::CandidateOptions;
+    const auto ep = CandidateOptions::ep_defaults();
+    REQUIRE(ep.max_per_cell == 32);
+    REQUIRE(ep.cell_bins == 64);
+    REQUIRE(ep.dominance_kappa == 1.5);
+    REQUIRE_NOTHROW(ep.validate());
+    // A default-constructed CandidateOptions and FFA configs keep every trial.
+    REQUIRE(CandidateOptions{}.max_per_cell == 0);
+    REQUIRE(loki::search::FFATomlConfig{}.candidates.max_per_cell == 0);
+    REQUIRE(
+        loki::search::FFATomlConfig::from_string("").candidates.max_per_cell ==
+        0);
+    const auto empty = loki::search::EPTomlConfig::from_string("");
+    REQUIRE(empty.candidates.max_per_cell == ep.max_per_cell);
+    REQUIRE(empty.candidates.cell_bins == ep.cell_bins);
+    REQUIRE(empty.candidates.dominance_kappa == ep.dominance_kappa);
+    const auto tmpl = loki::search::EPTomlConfig::from_string(
+        loki::search::EPTomlConfig::default_toml_string());
+    REQUIRE(tmpl.candidates.max_per_cell == ep.max_per_cell);
+    REQUIRE(tmpl.candidates.cell_bins == ep.cell_bins);
+    REQUIRE(tmpl.candidates.dominance_kappa == ep.dominance_kappa);
+    // max_per_cell = 0 alone turns the reduction off.
+    const auto off = loki::search::EPTomlConfig::from_string(
+        "[candidates]\nmax_per_cell = 0\n");
+    REQUIRE(off.candidates.max_per_cell == 0);
+    REQUIRE_NOTHROW(off.candidates.validate());
 }

@@ -43,6 +43,26 @@ target_compile_definitions(${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_BACKEND_DEFINITIO
 # Record the actual producer release in the common candidate product.
 set_property(SOURCE io/candidate_results.cpp APPEND PROPERTY COMPILE_DEFINITIONS
              LOKI_PRODUCER_VERSION="${PROJECT_VERSION}")
+set_property(SOURCE search/provenance.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+             LOKI_PRODUCER_VERSION="${PROJECT_VERSION}")
+
+# The git commit of the build, for /run_stats: regenerated at every build
+# (written only when it changes) as "lib/generated/git_commit.hpp".
+set(LOKI_GIT_COMMIT_HEADER ${PROJECT_BINARY_DIR}/lib/generated/git_commit.hpp)
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR} -DOUT=${LOKI_GIT_COMMIT_HEADER} -P
+          ${PROJECT_SOURCE_DIR}/cmake/LokiGitCommit.cmake
+)
+add_custom_target(
+  loki_git_commit
+  COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR} -DOUT=${LOKI_GIT_COMMIT_HEADER} -P
+          ${PROJECT_SOURCE_DIR}/cmake/LokiGitCommit.cmake
+  BYPRODUCTS ${LOKI_GIT_COMMIT_HEADER}
+  COMMENT "Recording the git commit"
+  VERBATIM
+)
+add_dependencies(${LOKI_LIBRARY_NAME} loki_git_commit)
+target_include_directories(${LOKI_LIBRARY_NAME} PRIVATE ${PROJECT_BINARY_DIR})
 
 # Dependencies
 include(${PROJECT_SOURCE_DIR}/cmake/LokiDependencies.cmake)

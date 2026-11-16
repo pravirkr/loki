@@ -151,9 +151,10 @@ fitted to.
 
 | Term | Contents | Lifetime |
 | --- | --- | --- |
-| group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_irfft_scratch_bytes` (the fused pruning kernel's statistics and tile states, one 8-byte word per branched leaf at most; no IRFFT fold scratch) | one group |
+| group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_scorer_scratch_bytes` (the fused pruning kernel's statistics and tile states, one 8-byte word per branched leaf at most; no IRFFT fold scratch) | one group |
 | shared | `ep_cuda_shared_bytes`: logical FFA internal fold size, coordinates, and seed-output fold buffer; internal/tree overlap is subtracted once from the group total | coordinates/output: whole sweep; shared fold arena: one group |
 | inputs | the device copy of `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
+| RFI control | with an active `[ep.rfi]`, `ep_cuda_rfi_bytes`: the device mask bitset and seed index list (one cell per FFA coordinate) and, with harvesting enabled, the staging of one batch's harvest candidates (reported leaves and scores, at most `batch_size * branch_max`) and of the recorded folds. Zero without RFI control, so default plans do not change. The run's harvest store is host memory and not counted | one group |
 | FFA brute-fold tables | the level-0 frequencies and the phase-bin map of the brute fold, `ep_ffa_transient_bytes` (CUDA; sizes from `ep_cuda_brute_table_sizes`). The engine sizes them once in its constructor, at the largest chunk, so no chunk grows them mid-sweep. The frequency and phase-map maxima may come from different chunks; the excess is the frequency table, 8 bytes per frequency, inside the unmodelled reserve | whole sweep |
 
 The CUB temporary storage is not a formula: `ep_cuda_cub_scratch_bytes`
@@ -183,13 +184,29 @@ Differences from the CPU policy:
   `kDeviceReserveGB` (1 GB) is what the GPU planners leave for the CUDA
   context, kernel images and those arrays, and the unmodelled reserve
   (0.5 GB) is a second margin.
-- The preferred batch is 2^16 parents on the GPU (`kEPBatchSizeCuda`) and 1024 on the
-  CPU (`kEPBatchSize`). A batch is one kernel round trip and one world-tree
-  synchronisation, so the GPU needs a large one: at 1024, one run of 2^25
-  samples took about 63 s, at 2^16 about 15 s. The batch is part of the memory
-  model (the world tree and the prune scratch scale with `batch * branch_max`).
-  If a minimum-width CUDA chunk cannot fit, planning retries with successively
-  halved batches, down to one parent. It never reduces forecast capacity
+- The CPU batch is 1024 parents (`kEPBatchSize`). A GPU batch is one kernel
+  round trip and one world-tree synchronisation, so it must carry enough work:
+  a CUDA chunk is planned with `kEPCudaBatchWork / nbins` parents
+  (`ep_cuda_batch_for_nbins`: 2^22 parent-bins, 2^16 parents at nbins 64 and
+  4096 at nbins 1024), at most 2^16 (`kEPBatchSizeCuda`). Below that work a
+  batch's fixed overhead dominates (at 1024 parents, one run of
+  2^25 samples took about 63 s, at 2^16 about 15 s). The batch is part of the
+  memory model (the world tree and the prune scratch scale with
+  `batch * branch_max`). `branch_max` is the chunk's worst leaf
+  (`BranchingForecast::max_children`: the most children any parent of its
+  grid can have), with no floor; a parameter that branched past it is
+  rejected. Every child gets its parent's refined cell widths, whatever its
+  values, so a leaf's widths depend only on its frequency and the level, and
+  the forecast replays them exactly. In the circular (crackle) model a
+  parent has its snap..velocity product of children, and hole expansion can
+  copy each of them once per crackle cell; a parent whose children all lie
+  in the hole is a valid tree state, so the bound is that product times the
+  crackle split, and it is reached
+  (`tests/cpp/internal/circ_branch_bound_t.cpp` drives the kernels against
+  it). With `use_conservative_tile` the widths are replayed with that tile.
+  A cached plan whose `branch_max` is below the chunk's forecast is
+  replanned. If a minimum-width CUDA chunk cannot fit, planning retries with
+  successively halved batches, down to one parent. It never reduces forecast capacity
   to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the
   world tree trims at batch boundaries, so results can depend on the batch.
@@ -197,8 +214,9 @@ Differences from the CPU policy:
   chip, the CPU with the lane FFT inside its scoring tiles. The FFA stage's
   GPU transforms keep only the small Bluestein tables; the host FFT tables
   are small, immutable and shared by all threads.
-- `PruneRFIConfig` (pulsar mask, harvesting, impulsive veto) is not implemented
-  on CUDA: an active one is rejected with `std::invalid_argument`.
+- `PruneRFIConfig` pulsar masking and early harvest run on CUDA (budgeted by
+  `ep_cuda_rfi_bytes`); `impulsive_veto` is CPU-only and rejected on CUDA with
+  `std::invalid_argument`.
 
 The FFA internal fold and EP tree folds use the same allocation in a sweep:
 the arena is `max(FFA internal bytes, tree fold bytes)`, rather than their sum.
