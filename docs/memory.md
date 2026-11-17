@@ -210,7 +210,10 @@ Differences from the CPU policy:
   thresholds, and the per-cell forecast of the seed slices are simulated
   with the normal tile, so a conservative-tile search runs at the thresholds
   of a normal one. Simulating them with the tile too would change those
-  thresholds.
+  thresholds. The tile's wider uncertainties pass more leaves at those
+  thresholds, so its noise population can exceed the forecast that sizes
+  `max_sugg` and the seed slices: a conservative-tile search can overload
+  where the normal one does not.
   A cached `branch_max` is trusted on load: every input of the forecast is
   part of the cache key, and a forecast change bumps the memory model
   version (replaying the forecast on every load cost ~0.4 s). If a
@@ -573,7 +576,10 @@ K sequential slices of frequency cells (every acceleration) over the same FFA
 output, and writes one merged result. Each subtree descends from one seed and
 every lookup goes to the whole FFA output, so the slices' final leaves are
 those of one prune, unless the tree overflows or an early harvest widens the
-mask (a harvest can then record another leaf of the same source).
+mask (a harvest can then record another leaf of the same source). The slices
+run in frequency order, so a harvest masks its cells only in the slices after
+it: the earlier slices have already run, where one prune of all seeds masks
+them at every later level.
 
 The planner forecasts a slice from its cells. The branching simulation gives
 each frequency cell's leaves per seed after stage `s`, `w_s[i]`, whose sums
@@ -602,7 +608,15 @@ whole sweep, and wider sliced chunks would hand them the room the slices
 free. On the CPU a run keeps its finished slices' final leaves (the
 leaf, two scores and a width, doubled for vector growth) until it writes them,
 `L_final` leaves per worker (`held_final_leaves`); the CUDA engine keeps them
-on the host, which the CUDA policy does not model. Every slice repeats all
+on the host, which the CUDA policy does not model. `L_final` is the noise
+forecast: a bright source or RFI that is not zapped, masked or harvested can
+fill every slice's tree, and a run then holds up to K times `max_sugg` final
+leaves on the host until it is written (per CPU worker; per run snapshot on
+CUDA). Where such a tree overflowed, the overload summary at the end of a
+search names the chunk. On CUDA
+a sliced run also keeps a device list of its slice's seed indices (4 bytes per
+FFA coordinate), which the model counts only with RFI control
+(`ep_cuda_rfi_bytes`). Every slice repeats all
 pruning levels, so slices cost search time (docs/performance.md, "Seed slices
 of a run"); the planner warns once when it uses them.
 
@@ -669,7 +683,8 @@ CUDA recovers final widths in batches using existing device index/score
 scratch, so it requires no additional problem-sized device allocation. The
 owned host result snapshot has one additional uint32 per leaf. At most three
 snapshots can coexist (the current producer, a pending payload and the active
-write), bounding this addition by `3 * 4 * capacity` bytes. As before, CUDA's
+write), bounding this addition by `3 * 4 * capacity` bytes per seed slice of
+the chunk (a run of K slices merges up to K trees' final leaves). As before, CUDA's
 search cap bounds device memory, and native host snapshots are outside it.
 The candidate graph has its separate host budget and starts after the writer
 has drained. EP source/provenance indexing is charged against that budget;

@@ -583,6 +583,22 @@ sliver at the bottom of one region (nbins 16); split evenly they are two
 just those two chunks (2 runs) took 87.6 s as a chunk plus sliver and 88.7 s
 split: the split removes a near-empty chunk, not search time.
 
+Leftover split with a lower half that does not fit: the split placed the
+upper half before fitting the lower one and then went on from the midpoint,
+so a circular 10-500 Hz search on the CPU at 2.2 GB planned its last region
+(nbins 512) as 6 chunks of halving width. Fitting the lower half before
+placing either keeps the chunk the width search found: 3 chunks there, 51
+instead of 54 in all, peak 1.35 against 1.34 GB. The other plans checked
+(circular 10-720 Hz at 30 GB, 10-500 Hz at 4 and 30 GB on CUDA, jerk 10-720
+Hz) did not change.
+
+Seeding per run: each seed slice recomputed every seed of its chunk. Seeding
+once per run gave the same final leaves in all 32 runs of the 495 Hz chunk
+above (CUDA, 6 and 13 slices; only the leaf order within a run differs, as it
+does between two runs of the same binary) and the same search time within
+noise (32.4 and 32.5 s against 32.7 and 32.4 s at 13 slices): seeding is
+negligible at a few slices and matters only near one slice per cell.
+
 Plan cache load: loading a cached plan replayed every chunk's branching
 forecast to recheck its `branch_max` (0.38 of 0.43 s per load on a 7-chunk
 jerk plan; the CLI loads it twice per file). The cache key and memory model

@@ -63,8 +63,9 @@ void bind_prune(py::module_& m) {
         .def_readonly("fold_size", &EPChunkConfig::fold_size)
         .def_readonly("ffa_transient_bytes",
                       &EPChunkConfig::ffa_transient_bytes,
-                      "Transient FFA scratch of this chunk (bytes). Counted "
-                      "in the sweep peak on CUDA; zero on the CPU.")
+                      "Transient FFA scratch of this chunk (bytes): the "
+                      "brute-fold tables on CUDA, the Fourier phase-step "
+                      "table on the CPU. Counted in the sweep peak.")
         .def_readonly("seed_slice_edges", &EPChunkConfig::seed_slice_edges,
                       "Frequency-cell edges of the seed slices each run "
                       "prunes in turn; empty for one slice.")

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <numbers>
 #include <span>
@@ -16,6 +17,7 @@
 
 #include "loki/common/types.hpp"
 
+#include "lib/core/branching.hpp"
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"

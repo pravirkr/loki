@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -12,6 +13,7 @@
 
 #include "loki/common/types.hpp"
 
+#include "lib/core/branching.hpp"
 #include "lib/core/cartesian.hpp"
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"

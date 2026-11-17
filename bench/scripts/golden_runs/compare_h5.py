@@ -113,6 +113,10 @@ def compare_file(fa, fb, rtol, extra, report):
     for n in sorted(names_a & names_b):
         oa, ob = fa[n], fb[n]
         attrs(n, oa, ob)
+        if isinstance(oa, h5py.Dataset) != isinstance(ob, h5py.Dataset):
+            report(f"  object {n}: a dataset on one side, a group on the other")
+            ok = False
+            continue
         if isinstance(oa, h5py.Dataset):
             if volatile(n.rsplit("/", 1)[-1], extra):
                 continue

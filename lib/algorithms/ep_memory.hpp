@@ -641,7 +641,7 @@ constexpr SizeType ep_input_bytes(SizeType nsamps) noexcept {
 
 /// Bytes resident for the whole sweep: shared FFA buffers plus the inputs.
 /// @p ffa_transient_bytes is the largest transient FFA scratch of any chunk
-/// (CUDA policy; ignored by the CPU policy).
+/// (ep_ffa_transient_bytes, both policies).
 template <SupportedFoldType FoldType>
 SizeType ep_fixed_bytes(const EPMemoryContext& ctx,
                         SizeType buffer_size,
