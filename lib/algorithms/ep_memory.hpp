@@ -102,7 +102,11 @@ constexpr SizeType ep_cuda_batch_for_nbins(SizeType nbins,
 ///     fails by raising it (see plan_chunks).
 /// 18: a region's leftover below a quarter of the chunk above it is split
 ///     evenly with that chunk instead of planned as a sliver.
-constexpr std::uint32_t kEPMemoryModelVersion = 18U;
+/// 19: that split happens only when both halves fit (the upper half is no
+///     longer placed alone); a minimum chunk snapped to its region's start
+///     keeps the minimum width's slice allowance; the CUDA batch is halved
+///     when the replanned sweep does not fit.
+constexpr std::uint32_t kEPMemoryModelVersion = 19U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.

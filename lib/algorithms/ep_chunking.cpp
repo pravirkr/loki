@@ -1071,8 +1071,10 @@ private:
             if (fit.ok || fit.outside_cap) {
                 return c;
             }
+            // A minimum chunk (start_of may snap it to the region start).
             const bool min_width =
-                end - start <= kMinChunkWidthHz * (1.0 + kRelativeTolerance);
+                end - start <= (kMinChunkWidthHz * (1.0 + kRelativeTolerance)) +
+                                   (kRelativeTolerance * boundary_tolerance);
             if (!min_width && ffa_gb(c) > kSlicedFFAShare * m_limit_gb) {
                 return c;
             }
@@ -1097,6 +1099,19 @@ private:
                 return merged;
             }
             return std::nullopt;
+        };
+
+        // The group and shared maxima once @p eval is placed.
+        const auto absorb = [&](const EvaluatedChunk& eval) {
+            // A new run starts when nbins changes (same rule as the sweep).
+            if (!state.group.active || state.group.nbins != nbins ||
+                state.group.batch_size != eval.batch_size) {
+                state.group        = fresh_group(nbins);
+                state.group.active = true;
+                state.group.nbins  = nbins;
+            }
+            state.group.absorb(eval);
+            state.shared.absorb(eval);
         };
 
         const auto place = [&](double nominal_start, double nominal_end,
@@ -1162,15 +1177,7 @@ private:
                                         : eval.seed_slice_edges.size() - 1,
             });
 
-            // A new run starts when nbins changes (same rule as the sweep).
-            if (!state.group.active || state.group.nbins != nbins ||
-                state.group.batch_size != eval.batch_size) {
-                state.group        = fresh_group(nbins);
-                state.group.active = true;
-                state.group.nbins  = nbins;
-            }
-            state.group.absorb(eval);
-            state.shared.absorb(eval);
+            absorb(eval);
             const double n_slices =
                 eval.seed_slice_edges.empty()
                     ? 1.0
@@ -1206,7 +1213,9 @@ private:
             }
             // A leftover far narrower than this chunk would be planned as
             // its own sliver: split the rest of the region evenly between
-            // the two instead, if both halves fit.
+            // the two instead, if both halves fit. The lower half is fitted
+            // next to the upper one (as placed), and neither is placed
+            // unless both fit.
             const double remainder = nominal_start - f_start;
             if (remainder > 0.0 &&
                 remainder <
@@ -1214,14 +1223,18 @@ private:
                 const double mid = f_start + (0.5 * (current_f_end - f_start));
                 auto upper       = size_fn(mid, current_f_end);
                 if (fits(upper).ok) {
-                    place(mid, current_f_end, upper);
-                    auto lower = size_fn(f_start, mid);
-                    if (fits(lower).ok) {
+                    const auto group_before  = state.group;
+                    const auto shared_before = state.shared;
+                    absorb(upper);
+                    auto lower            = size_fn(f_start, mid);
+                    const bool lower_fits = fits(lower).ok;
+                    state.group           = group_before;
+                    state.shared          = shared_before;
+                    if (lower_fits) {
+                        place(mid, current_f_end, upper);
                         place(f_start, mid, lower);
                         return;
                     }
-                    current_f_end = mid;
-                    continue;
                 }
             }
             place(nominal_start, current_f_end, eval);
