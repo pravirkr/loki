@@ -763,17 +763,30 @@ TEST_CASE("EPRegionPlanner accepts a plan cache written on the other backend",
     const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
     const EPRegionPlanner<float> planner(cfg, 0.1F, "taylor", 0.1F, cache_file);
     {
-        // Relabel the plan as a CUDA plan. The chunks stay as planned, and the
-        // loader rechecks the peak with the CPU policy.
+        // Relabel the plan as a CUDA plan, with the other backend's chunk
+        // memory. The chunks stay as planned, and the loader rechecks the
+        // peak and each chunk's memory with the CPU policy.
         const HighFive::File f(cache_file.string(), HighFive::File::ReadWrite);
         f.getAttribute("ep_backend").write(std::string("cuda"));
         f.getAttribute("ep_memory_model_kind").write(std::string("cuda"));
+        const auto chunks = f.getGroup("chunks");
+        for (const auto& name : chunks.listObjectNames()) {
+            chunks.getGroup(name).getAttribute("chunk_memory_gb").write(99.0);
+        }
     }
     const EPRegionPlanner<float> reloaded(cfg, 0.1F, "taylor", 0.1F,
                                           cache_file);
     REQUIRE(reloaded.get_nchunks() == planner.get_nchunks());
     CHECK(reloaded.get_stats().get_max_memory_gb() ==
           planner.get_stats().get_max_memory_gb());
+    const auto& planned = planner.get_stats().get_chunk_stats();
+    const auto& loaded  = reloaded.get_stats().get_chunk_stats();
+    for (SizeType i = 0; i < planned.size(); ++i) {
+        CHECK(loaded[i].memory_gb ==
+              Catch::Approx(planned[i].memory_gb).epsilon(1e-12));
+        CHECK(reloaded.get_chunk_cfgs()[i].chunk_memory_gb ==
+              Catch::Approx(planned[i].memory_gb).epsilon(1e-12));
+    }
 }
 
 TEST_CASE("EPFreqSweep handles non-power-of-two nsamps without empty segments",

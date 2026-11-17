@@ -819,6 +819,14 @@ public:
                 .seed_slice_edges    = std::move(seed_slice_edges),
                 .held_final_leaves   = held_final_leaves,
             });
+            if (!same_backend) {
+                // The cached value is the other backend's memory: the
+                // chunk's own on this one, as the planner computes it.
+                auto& added           = m_chunk_cfgs.back();
+                added.chunk_memory_gb = detail::ep_sweep_peak_gb<FoldType>(
+                    std::span(&added, 1), m_memory);
+                chunk_memory_gb = added.chunk_memory_gb;
+            }
 
             const double nominal_width = nominal_f_end - nominal_f_start;
             const double actual_width  = actual_f_end - actual_f_start;

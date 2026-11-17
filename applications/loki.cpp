@@ -795,22 +795,26 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
                   << "\n";
     }
 
-    std::cout << con.title("Groups of equal nbins")
+    // The sweep's groups: contiguous chunks of equal nbins and batch.
+    std::cout << con.title("Groups of equal nbins and batch")
               << ", each with its own workspaces:\n";
     for (SizeType begin = 0; begin < chunks.size();) {
         const auto nbins    = chunks[begin].cfg.get_nbins();
+        const auto batch    = chunks[begin].batch_size;
         SizeType end        = begin;
         SizeType max_sugg   = 0;
         SizeType branch_max = 0;
-        while (end < chunks.size() && chunks[end].cfg.get_nbins() == nbins) {
+        while (end < chunks.size() && chunks[end].cfg.get_nbins() == nbins &&
+               chunks[end].batch_size == batch) {
             max_sugg   = std::max(max_sugg, chunks[end].max_sugg);
             branch_max = std::max(branch_max, chunks[end].branch_max);
             ++end;
         }
         std::cout << fmt::format(
-            "  chunks {}..{}: nbins {}, max_sugg {}, branch_max {}, {} "
-            "worker(s)\n",
-            begin, end - 1, nbins, format_pow2(max_sugg), branch_max, workers);
+            "  chunks {}..{}: nbins {}, batch {}, max_sugg {}, branch_max {}, "
+            "{} worker(s)\n",
+            begin, end - 1, nbins, batch, format_pow2(max_sugg), branch_max,
+            workers);
         begin = end;
     }
     std::cout << con.title("Plan cache:")
