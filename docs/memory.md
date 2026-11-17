@@ -206,6 +206,11 @@ Differences from the CPU policy:
   crackle split, and it is reached
   (`tests/cpp/internal/circ_branch_bound_t.cpp` drives the kernels against
   it). With `use_conservative_tile` the widths are replayed with that tile.
+  Only this bound follows the tile: the mean branching, which sets the
+  thresholds, and the per-cell forecast of the seed slices are simulated
+  with the normal tile, so a conservative-tile search runs at the thresholds
+  of a normal one. Simulating them with the tile too would change those
+  thresholds.
   A cached `branch_max` is trusted on load: every input of the forecast is
   part of the cache key, and a forecast change bumps the memory model
   version (replaying the forecast on every load cost ~0.4 s). If a
