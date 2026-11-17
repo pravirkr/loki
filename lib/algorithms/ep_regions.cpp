@@ -379,6 +379,8 @@ public:
         file.createAttribute("prune_poly_order",
                              m_base_cfg.get_prune_poly_order());
         // The circular orbit limits: five parameters plan and prune by them.
+        // p_orb_max is not recorded: it only removes leaves, so a plan made
+        // without it bounds a search with it.
         file.createAttribute("p_orb_min", m_base_cfg.get_p_orb_min());
         file.createAttribute("m_c_max", m_base_cfg.get_m_c_max());
         file.createAttribute("m_p_min", m_base_cfg.get_m_p_min());

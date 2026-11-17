@@ -243,4 +243,55 @@ TEST_CASE("CUDA circular transform classes leaves as the CPU does",
         CHECK_THAT(leaves_gpu[i], WithinRel(leaves_cpu[i], kRelTol));
     }
 }
+TEST_CASE("CUDA circular validation with p_orb_max keeps the CPU's leaves",
+          "[circular][cuda]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    const loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    // (snap, dsnap, accel, daccel) around omega_min^2 = 1e-4 at k = 5; see
+    // the CPU test in circular_mask_t.cpp.
+    constexpr double kOmegaMinSq                   = 1e-4;
+    constexpr double kValidSig                     = 5.0;
+    const std::vector<std::array<double, 4>> cells = {
+        {0.0, 1e-7, 1.0, 0.01},     {-2e-4, 1e-6, 1.0, 0.01},
+        {-0.9e-4, 2e-6, 1.0, 0.01}, {-0.9e-4, 1e-7, 1.0, 0.01},
+        {0.0, 1e-7, 0.03, 0.01},    {0.0, 1e-4, 1.0, 0.01},
+        {0.0, 1e-7, -1.0, 0.01},    {2e-4, 1e-6, -1.0, 0.01}};
+    const SizeType n_leaves = cells.size();
+    std::vector<double> leaves(n_leaves * kLeavesStride, 0.0);
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const SizeType lo = i * kLeavesStride;
+        leaves[lo + 2]    = cells[i][0];
+        leaves[lo + 3]    = cells[i][1];
+        leaves[lo + 6]    = cells[i][2];
+        leaves[lo + 7]    = cells[i][3];
+        leaves[lo + 12]   = 100.0;
+    }
+    for (const double omega_min_sq : {kOmegaMinSq, 0.0}) {
+        INFO("omega_min_sq " << omega_min_sq);
+        auto leaves_cpu = leaves;
+        std::vector<SizeType> kept(n_leaves);
+        std::iota(kept.begin(), kept.end(), SizeType{0});
+        kept.resize(loki::core::circ_taylor_validate_batch(
+            leaves_cpu, kept, n_leaves, 1e-5, omega_min_sq, 1e6, kValidSig));
+
+        const thrust::device_vector<double> leaves_d(leaves);
+        thrust::device_vector<uint8_t> mask_d(n_leaves, 0);
+        loki::core::circ_taylor_validate_async_cuda(
+            loki::cuda_utils::as_span(leaves_d),
+            loki::cuda_utils::as_span(mask_d), n_leaves, 1e-5, omega_min_sq,
+            1e6, kValidSig, nullptr);
+        sync_device();
+        const auto mask = to_host(mask_d);
+        std::vector<SizeType> kept_gpu;
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            if (mask[i] != 0U) {
+                kept_gpu.push_back(i);
+            }
+        }
+        CHECK(kept_gpu == kept);
+        CHECK(kept.size() == (omega_min_sq > 0.0 ? n_leaves - 3 : n_leaves));
+    }
+}
 #endif // LOKI_ENABLE_CUDA

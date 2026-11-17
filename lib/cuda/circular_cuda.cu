@@ -341,6 +341,7 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
                                   uint8_t* __restrict__ validation_mask,
                                   uint32_t n_leaves,
                                   double p_orb_min,
+                                  double omega_min_sq,
                                   double x_mass_const,
                                   double validation_significance) {
     constexpr uint32_t kLeavesStride = 14;
@@ -366,6 +367,17 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
     if (snap_unphysical) {
         validation_mask[tid] = 0U; // kill outright
         return;
+    }
+    // p_orb_max: the whole cell is an orbit slower than omega_min (see the
+    // CPU circ_taylor_validate_batch).
+    if (omega_min_sq > 0.0 && is_sig_accel) {
+        const double snap_hi = fabs(snap) + (validation_significance * dsnap);
+        const double accel_lo =
+            fabs(accel) - (validation_significance * daccel);
+        if (snap_hi < omega_min_sq * accel_lo) {
+            validation_mask[tid] = 0U;
+            return;
+        }
     }
     if (!snap_region) {
         validation_mask[tid] = 1U; // hole region — always preserve
@@ -863,6 +875,7 @@ void circ_taylor_validate_async_cuda(
     cuda::std::span<uint8_t> validation_mask,
     SizeType n_leaves,
     double p_orb_min,
+    double omega_min_sq,
     double x_mass_const,
     double validation_significance,
     cudaStream_t stream) {
@@ -874,7 +887,7 @@ void circ_taylor_validate_async_cuda(
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_validate_branches_circular<<<grid_dim, block_dim, 0, stream>>>(
         leaves_branch.data(), validation_mask.data(), n_leaves, p_orb_min,
-        x_mass_const, validation_significance);
+        omega_min_sq, x_mass_const, validation_significance);
     cuda_utils::check_last_cuda_error(
         "kernel_validate_branches_circular launch failed");
 }
@@ -884,12 +897,13 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
                                 cuda::std::span<uint8_t> validation_mask,
                                 SizeType n_leaves,
                                 double p_orb_min,
+                                double omega_min_sq,
                                 double x_mass_const,
                                 double validation_significance,
                                 memory::CUBScratchArena& scratch_ws,
                                 cudaStream_t stream) {
     circ_taylor_validate_async_cuda(leaves_branch, validation_mask, n_leaves,
-                                    p_orb_min, x_mass_const,
+                                    p_orb_min, omega_min_sq, x_mass_const,
                                     validation_significance, stream);
 
     // Count number of passing profiles

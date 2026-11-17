@@ -460,6 +460,23 @@ the circular pruning validates its leaves against, and the five-parameter
 drift above; a `[search.orbit]` table sets them from its own orbit, and setting
 them in `[ep]` as well is an error.
 
+`[ep]` `p_orb_max` (seconds, off by default; circular searches only) targets
+the search at compact orbits. For a circular orbit `snap = -omega^2 accel` at
+every epoch, so once a leaf's acceleration is significant, the validation
+kills it when even its cell's largest `|snap|` and smallest `|accel|` (each
+widened by `validation_significance` cell widths) give an orbit slower than
+`omega_min = 2 pi / p_orb_max`: `|snap| + k dsnap < omega_min^2 (|accel| -
+k daccel)`. A snap still consistent with zero at a significant acceleration
+is such an orbit. Leaves near the orbit's nodes (acceleration not
+significant) are always kept, so the hand-off to the crackle basis is
+unchanged. The limit only removes leaves, so the plan's forecasts stay upper
+bounds: the plan cache does not record it, and a cached plan serves any
+`p_orb_max`. Leave headroom (e.g. 1.2-1.5 times the longest target period)
+for mildly eccentric orbits, whose local `-snap / accel` varies along the
+orbit. The margin makes the limit bite only when the snap is well measured,
+in practice for a limit within a few observation lengths (docs/performance.md),
+and a detection's reported `p_orb` (the cell centre) can exceed the limit.
+
 ### Ring capacity
 
 The population of a run is forecast from its region's design: `L_0 = n_seeds`

@@ -197,6 +197,7 @@ void check_same_ep(const EPTomlConfig& a, const EPTomlConfig& b) {
     CHECK(a.ref_segs == b.ref_segs);
     CHECK(a.nsegments == b.nsegments);
     CHECK(a.p_orb_min == b.p_orb_min);
+    CHECK(a.p_orb_max == b.p_orb_max);
     CHECK(a.m_c_max == b.m_c_max);
     CHECK(a.m_p_min == b.m_p_min);
     CHECK(a.propagator_significance == b.propagator_significance);
@@ -269,6 +270,7 @@ TEST_CASE("EPTomlConfig to_toml_string gives back every setting",
     cfg.ref_segs                = std::vector<loki::SizeType>{0, 3, 7};
     cfg.nsegments               = 64;
     cfg.p_orb_min               = 3600.0;
+    cfg.p_orb_max               = 7200.0;
     cfg.m_c_max                 = 2.0;
     cfg.m_p_min                 = 1.3;
     cfg.propagator_significance = 2.5;

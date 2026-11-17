@@ -1,5 +1,6 @@
 #include <array>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -125,4 +126,63 @@ TEST_CASE("The circular transform records each leaf's basis in its slot",
           leaf_basis_value(LeafBasis::kCircularCrackle));
     CHECK(batch[(2 * kLeavesStride) + kSlot] ==
           leaf_basis_value(LeafBasis::kCircularSnap));
+}
+
+namespace {
+
+// Leaves around p_orb_max with omega_min^2 = 1e-4 and k = 5: a significant
+// acceleration of 1 +/- 0.01 bounds |snap| below by 1e-4 (1 - 0.05).
+constexpr double kOmegaMinSq  = 1e-4;
+constexpr double kValidSig    = 5.0;
+constexpr double kPOrbMinTiny = 1e-5; // omega_max far above every leaf
+constexpr double kXMassHuge   = 1e6;  // no leaf near the mass limit
+
+constexpr Leaf
+orbit_leaf(double snap, double dsnap, double accel, double daccel) {
+    return {.crackle  = 0.0,
+            .dcrackle = 0.0,
+            .snap     = snap,
+            .dsnap    = dsnap,
+            .jerk     = 0.0,
+            .djerk    = 0.0,
+            .accel    = accel,
+            .daccel   = daccel};
+}
+
+const std::array<Leaf, 6> kPOrbMaxLeaves = {
+    // 0: snap consistent with zero at a significant acceleration: a wide orbit
+    orbit_leaf(0.0, 1e-7, 1.0, 0.01),
+    // 1: a resolved orbit faster than omega_min
+    orbit_leaf(-2e-4, 1e-6, 1.0, 0.01),
+    // 2: a slower orbit whose cell still reaches omega_min: kept by the margin
+    orbit_leaf(-0.9e-4, 2e-6, 1.0, 0.01),
+    // 3: the same orbit measured finely enough: killed
+    orbit_leaf(-0.9e-4, 1e-7, 1.0, 0.01),
+    // 4: near a node, acceleration not significant: always kept
+    orbit_leaf(0.0, 1e-7, 0.03, 0.01),
+    // 5: snap still unmeasured (wide cell): kept
+    orbit_leaf(0.0, 1e-4, 1.0, 0.01),
+};
+
+std::vector<loki::SizeType> validate_survivors(double omega_min_sq) {
+    auto batch = make_leaves(kPOrbMaxLeaves);
+    std::vector<loki::SizeType> origins(kPOrbMaxLeaves.size());
+    std::iota(origins.begin(), origins.end(), loki::SizeType{0});
+    const auto n = loki::core::circ_taylor_validate_batch(
+        batch, origins, kPOrbMaxLeaves.size(), kPOrbMinTiny, omega_min_sq,
+        kXMassHuge, kValidSig);
+    origins.resize(n);
+    return origins;
+}
+
+} // namespace
+
+TEST_CASE("p_orb_max kills only cells that are wholly slower orbits",
+          "[circular]") {
+    CHECK(validate_survivors(kOmegaMinSq) ==
+          std::vector<loki::SizeType>{1, 2, 4, 5});
+    // Without p_orb_max (0) no leaf here is killed.
+    CHECK(validate_survivors(0.0) ==
+          std::vector<loki::SizeType>{0, 1, 2, 3, 4, 5});
+    CHECK(loki::core::circ_omega_min_sq(std::nullopt) == 0.0);
 }

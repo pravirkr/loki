@@ -436,6 +436,8 @@ const toml_utils::Schema<EPTomlConfig>& ep_schema() {
                      [](auto& c) -> auto& { return c.nsegments; }),
             orbit_prior(field<E>("ep", "p_orb_min",
                                  [](auto& c) -> auto& { return c.p_orb_min; })),
+            field<E>("ep", "p_orb_max",
+                     [](auto& c) -> auto& { return c.p_orb_max; }),
             orbit_prior(field<E>("ep", "m_c_max",
                                  [](auto& c) -> auto& { return c.m_c_max; })),
             orbit_prior(field<E>("ep", "m_p_min",
@@ -1936,6 +1938,7 @@ public:
 
     SizeType m_prune_poly_order;
     double m_p_orb_min;
+    std::optional<double> m_p_orb_max;
     double m_m_c_max;
     double m_m_p_min;
     double m_propagator_significance;
@@ -2058,6 +2061,9 @@ double EPSearchConfig::get_target_snr() const noexcept {
 double EPSearchConfig::get_p_orb_min() const noexcept {
     return m_ep_impl->m_p_orb_min;
 }
+std::optional<double> EPSearchConfig::get_p_orb_max() const noexcept {
+    return m_ep_impl->m_p_orb_max;
+}
 double EPSearchConfig::get_m_c_max() const noexcept {
     return m_ep_impl->m_m_c_max;
 }
@@ -2085,13 +2091,15 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(
     double eta,
     std::span<const ParamLimit> param_limits) const {
     auto ffa = get_updated_config(nbins, eta, param_limits);
-    return EPSearchConfig(
+    auto out = EPSearchConfig(
         std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
+    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    return out;
 }
 
 EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
@@ -2099,25 +2107,50 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
                                                      double f_min,
                                                      double f_max) const {
     auto ffa = get_updated_config(nbins, eta, f_min, f_max);
-    return EPSearchConfig(
+    auto out = EPSearchConfig(
         std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
+    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    return out;
 }
 
 EPSearchConfig
 EPSearchConfig::with_ep_default_nsegments(SizeType target_n_segs) const {
     auto ffa = FFASearchConfig::with_ep_default_nsegments(target_n_segs);
-    return EPSearchConfig(
+    auto out = EPSearchConfig(
         std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
+    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    return out;
+}
+
+EPSearchConfig
+EPSearchConfig::with_p_orb_max(std::optional<double> p_orb_max) const {
+    if (p_orb_max.has_value()) {
+        if (get_nparams() != 5) {
+            throw std::invalid_argument(fmt::format(
+                "p_orb_max applies only to a circular-orbit (five-parameter) "
+                "search, not to one with {} parameters",
+                get_nparams()));
+        }
+        if (!utils::is_finite(*p_orb_max) ||
+            !(*p_orb_max > m_ep_impl->m_p_orb_min)) {
+            throw std::invalid_argument(fmt::format(
+                "p_orb_max ({} s) must be finite and above p_orb_min ({} s)",
+                *p_orb_max, m_ep_impl->m_p_orb_min));
+        }
+    }
+    auto out                   = *this;
+    out.m_ep_impl->m_p_orb_max = p_orb_max;
+    return out;
 }
 
 EPSearchConfig EPSearchConfig::from_toml(const std::filesystem::path& path,
@@ -2201,6 +2234,9 @@ void validate_ep_config(const EPTomlConfig& cfg) {
         }
     }
     require_positive(cfg.p_orb_min, "ep.p_orb_min");
+    if (cfg.p_orb_max.has_value()) {
+        require_positive(*cfg.p_orb_max, "ep.p_orb_max");
+    }
     require_positive(cfg.m_c_max, "ep.m_c_max");
     require_positive(cfg.m_p_min, "ep.m_p_min");
     require_positive(cfg.propagator_significance, "ep.propagator_significance");
@@ -2369,6 +2405,14 @@ n_runs = 16
 # p_orb_min = 0.00001
 # m_c_max = 10.0
 # m_p_min = 1.4
+
+# Circular (crackle) pruning only: the longest orbital period to keep, in
+# seconds (default: no limit). Leaves whose cell holds only slower orbits are
+# killed once their acceleration is significant. It saves work only for a
+# limit within one or two observation lengths, where the snap is resolved
+# (docs/performance.md). Leave headroom (e.g. 1.2-1.5 times the longest target
+# period) for mildly eccentric orbits.
+# p_orb_max = 3600.0
 
 # Significance levels of the propagator and the validation
 propagator_significance = 2.0
@@ -2600,7 +2644,8 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
     return EPSearchConfig(std::move(ffa), prune_poly_order, orbit_p_min,
                           orbit_m_c, orbit_m_p, propagator_significance,
                           validation_significance, use_conservative_tile,
-                          target_snr, overflow_keep_fraction);
+                          target_snr, overflow_keep_fraction)
+        .with_p_orb_max(p_orb_max);
 }
 
 void EPRFIOptions::validate() const {

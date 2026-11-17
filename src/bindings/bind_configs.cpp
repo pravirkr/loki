@@ -183,7 +183,8 @@ void bind_configs(py::module_& m) {
                     double propagator_significance,
                     double validation_significance, bool use_conservative_tile,
                     bool use_boxcar_kadane, std::optional<double> target_snr,
-                    double overflow_keep_fraction) {
+                    double overflow_keep_fraction,
+                    std::optional<double> p_orb_max) {
                      if (param_limits.ndim() != 2 ||
                          param_limits.shape(1) != 2) {
                          throw std::invalid_argument(
@@ -202,14 +203,17 @@ void bind_configs(py::module_& m) {
                          };
                      }
                      return std::make_unique<PulsarSearchConfig>(
-                         nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
-                         use_fourier, nthreads, max_process_memory_gb,
-                         region_growth_factor, nbins_max, nbins_min_lossy_bf,
-                         bseg_brute, nsegments, snr_min, max_passing_candidates,
-                         prune_poly_order, p_orb_min, m_c_max, m_p_min,
-                         propagator_significance, validation_significance,
-                         use_conservative_tile, use_boxcar_kadane, target_snr,
-                         overflow_keep_fraction);
+                         PulsarSearchConfig(
+                             nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
+                             use_fourier, nthreads, max_process_memory_gb,
+                             region_growth_factor, nbins_max,
+                             nbins_min_lossy_bf, bseg_brute, nsegments, snr_min,
+                             max_passing_candidates, prune_poly_order,
+                             p_orb_min, m_c_max, m_p_min,
+                             propagator_significance, validation_significance,
+                             use_conservative_tile, use_boxcar_kadane,
+                             target_snr, overflow_keep_fraction)
+                             .with_p_orb_max(p_orb_max));
                  }),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
@@ -227,7 +231,8 @@ void bind_configs(py::module_& m) {
              py::arg("use_conservative_tile")   = false,
              py::arg("use_boxcar_kadane")       = false, py::kw_only(),
              py::arg("target_snr")              = std::nullopt,
-             py::arg("overflow_keep_fraction")  = 0.5)
+             py::arg("overflow_keep_fraction")  = 0.5,
+             py::arg("p_orb_max")               = std::nullopt)
         .def_property_readonly(
             "target_snr", &PulsarSearchConfig::get_target_snr,
             "EP entropic information limit; None selects the parameter-count "
@@ -235,6 +240,10 @@ void bind_configs(py::module_& m) {
         .def_property_readonly("prune_poly_order",
                                &PulsarSearchConfig::get_prune_poly_order)
         .def_property_readonly("p_orb_min", &PulsarSearchConfig::get_p_orb_min)
+        .def_property_readonly(
+            "p_orb_max", &PulsarSearchConfig::get_p_orb_max,
+            "Longest orbital period (s) a circular-orbit search keeps; None "
+            "keeps every period.")
         .def_property_readonly("m_c_max", &PulsarSearchConfig::get_m_c_max)
         .def_property_readonly("m_p_min", &PulsarSearchConfig::get_m_p_min)
         .def_property_readonly("propagator_significance",
@@ -362,6 +371,7 @@ void bind_configs(py::module_& m) {
         .def_readwrite("ref_segs", &ETC::ref_segs)
         .def_readwrite("nsegments", &ETC::nsegments)
         .def_readwrite("p_orb_min", &ETC::p_orb_min)
+        .def_readwrite("p_orb_max", &ETC::p_orb_max)
         .def_readwrite("m_c_max", &ETC::m_c_max)
         .def_readwrite("m_p_min", &ETC::m_p_min)
         .def_readwrite("propagator_significance", &ETC::propagator_significance)

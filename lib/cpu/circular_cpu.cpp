@@ -406,6 +406,7 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     std::span<SizeType> leaves_origins,
                                     SizeType n_leaves,
                                     double p_orb_min,
+                                    double omega_min_sq,
                                     double x_mass_const,
                                     double validation_significance) {
     constexpr SizeType kParams       = 5U;
@@ -437,6 +438,20 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
             is_sig_snap && is_sig_accel && !is_physical_snap;
         if (snap_unphysical) {
             continue; // kill outright
+        }
+        // p_orb_max: kill when even the cell's largest |snap| and smallest
+        // |accel| give an orbit slower than omega_min. Needs a significant
+        // acceleration only, so a snap consistent with zero (a wide orbit) is
+        // killed too; near the nodes (acceleration not significant) the
+        // leaf is kept.
+        if (omega_min_sq > 0.0 && is_sig_accel) {
+            const double snap_hi =
+                std::abs(snap) + (validation_significance * dsnap);
+            const double accel_lo =
+                std::abs(accel) - (validation_significance * daccel);
+            if (snap_hi < omega_min_sq * accel_lo) {
+                continue;
+            }
         }
         const bool snap_region =
             is_sig_snap && is_sig_accel && is_physical_snap;

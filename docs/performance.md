@@ -645,6 +645,35 @@ spread 0.1 s), and the per-level counts copy back once per prune instead of
 syncing every stage. Writing the basis code into the leaf costs nothing
 measurable either (0.3 %, inside the spread).
 
+`ep.p_orb_max` (circular searches; docs/memory.md) kills a leaf only once its
+cell, widened by `validation_significance` (5) widths, is wholly a slower
+orbit, so it bites only when the snap is measured to a fraction of
+`omega_min^2 |accel|`, that is for a limit close to the observation length.
+Injections (2^24 samples, T = 1074 s, 100 Hz, S/N 25, circular orbits with
+m_c = 0.3 at four orbital phases, `p_orb_min` = T, 8 runs, CUDA):
+
+- limit 2000 s (1.9 T): leaves -0.6 to -4.6 % for orbits inside it and -0.2
+  to -1.1 % for orbits of 3000 and 6000 s, which keep their best S/N;
+- limit 1300 s (1.2 T): leaves -7 to -26 % inside it, -3 to -13 % for orbits
+  of 2000 s, whose best S/N falls by 4.7-6.6 at three of four phases, and
+  -2 to -4 % for orbits of 4000 s (snap never resolved), which keep theirs;
+- orbits inside the limit (0.9 and 1.0 times it, 16 cases) keep their best
+  S/N in every case. The best score of 7 of their 128 runs changed, and 3 of
+  the 16 cases lost one run scoring 8 or more. In each changed run the leaf
+  removed was a partial match scoring at most 11.4, 6.8-41 snap widths from
+  the true orbit (`snap = -omega^2 accel`); in the 43 unchanged runs scoring
+  15 or more the best leaf lies within 0.7 widths of it and passes the limit
+  with a margin of at least 17 %, also at 1.0 times the limit.
+
+A CPU search at the 1300 s limit behaves alike (leaves -13 %, best S/N kept,
+one run fewer at 8 or more). On a real 280 Hz binary pulsar whose detections
+all sit in the Taylor channel (snap unresolved; 5500 s observation, 32 runs,
+272-318 Hz, eta 1), limits of 80000, 40000 and 20000 s left the recovery
+unchanged (31 of 32 runs, median 18.06) and cut the leaves by 0.003, 0.15
+and 2.0 % (wall time 128, 128, 126 s against 128 s). At such settings the
+limit is nearly inert; restricting the children at branching with the same
+margin would remove the same leaves earlier, so it would be as inert.
+
 Reserve of a slice (docs/memory.md): on the 495 Hz chunk above, which holds a
 bright pulsar, the busiest slice held 65-100 cells' worth of leaves beyond
 its noise forecast at 32 and 64 slices (the room for one CUDA batch covered

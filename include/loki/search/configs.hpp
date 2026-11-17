@@ -312,6 +312,9 @@ public:
     double get_target_snr() const noexcept;
     SizeType get_prune_poly_order() const noexcept;
     double get_p_orb_min() const noexcept;
+    /// Longest orbital period a circular-orbit search keeps, in seconds;
+    /// empty (the default) keeps every period. See with_p_orb_max().
+    std::optional<double> get_p_orb_max() const noexcept;
     double get_m_c_max() const noexcept;
     double get_m_p_min() const noexcept;
     double get_propagator_significance() const noexcept;
@@ -341,6 +344,17 @@ public:
     /// fields.
     [[nodiscard]] EPSearchConfig with_ep_default_nsegments(
         SizeType target_n_segs = kDefaultEPSegments) const;
+
+    /// This configuration with the longest orbital period a circular-orbit
+    /// (five-parameter) search keeps, in seconds; empty keeps every period.
+    /// The validation kills a leaf whose cell, widened by
+    /// validation_significance cell widths, holds only orbits slower than
+    /// 2 pi / p_orb_max (|snap| < omega_min^2 |accel|). Leaves whose
+    /// acceleration is not significant, such as those near the orbit's nodes,
+    /// are always kept. Throws std::invalid_argument for another search or a
+    /// period not above p_orb_min.
+    [[nodiscard]] EPSearchConfig
+    with_p_orb_max(std::optional<double> p_orb_max) const;
 
     // --- TOML Helpers ---
     static EPSearchConfig
@@ -427,6 +441,9 @@ struct EPTomlConfig : FFATomlConfig {
     /// Segments the pruning starts from (power of 2); empty = 128.
     std::optional<SizeType> nsegments;
     double p_orb_min{1e-5};
+    /// Longest orbital period a circular-orbit search keeps, in seconds;
+    /// empty keeps every period (EPSearchConfig::with_p_orb_max).
+    std::optional<double> p_orb_max;
     double m_c_max{10.0};
     double m_p_min{1.4};
     double propagator_significance{2.0};

@@ -695,6 +695,7 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::validate(
     SizeType n_leaves) const {
     return circ_taylor_validate_batch(
         leaves_branch, leaves_origins, n_leaves, this->m_cfg.get_p_orb_min(),
+        circ_omega_min_sq(this->m_cfg.get_p_orb_max()),
         this->m_cfg.get_x_mass_const(),
         this->m_cfg.get_validation_significance());
 }

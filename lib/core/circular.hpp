@@ -1,6 +1,8 @@
 #pragma once
 
 #include <array>
+#include <numbers>
+#include <optional>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -57,12 +59,29 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   double propagator_significance,
                                   memory::BranchingWorkspace& branch_ws);
 
+/// Kills the leaves that cannot be a circular orbit within the limits, at
+/// validation_significance cell widths: unbound (snap and acceleration of
+/// one sign), faster than p_orb_min, or beyond the mass limit. With
+/// omega_min_sq > 0 (ep.p_orb_max) it also kills a leaf whose
+/// acceleration is significant and whose whole cell is a slower orbit:
+/// |snap| + k dsnap < omega_min_sq (|accel| - k daccel). 0 skips that test.
 SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     std::span<SizeType> leaves_origins,
                                     SizeType n_leaves,
                                     double p_orb_min,
+                                    double omega_min_sq,
                                     double x_mass_const,
                                     double validation_significance);
+
+/// omega_min^2 = (2 pi / p_orb_max)^2 of the validation, 0 without a limit.
+[[nodiscard]] inline double
+circ_omega_min_sq(std::optional<double> p_orb_max) noexcept {
+    if (!p_orb_max.has_value()) {
+        return 0.0;
+    }
+    const double omega_min = 2.0 * std::numbers::pi / *p_orb_max;
+    return omega_min * omega_min;
+}
 
 void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                                std::span<SizeType> param_indices,
