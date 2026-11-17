@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
 #include <limits>
 #include <numbers>
 #include <span>

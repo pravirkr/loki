@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <functional>
 #include <numeric>
 #include <span>
 #include <stdexcept>
