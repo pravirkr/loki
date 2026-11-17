@@ -633,6 +633,21 @@ TEST_CASE("preprocess: CUDA matches the CPU", "[io][preprocess][cuda]") {
     }
 }
 
+TEST_CASE("preprocess: a one-sample last block does not set the edge baseline",
+          "[io][preprocess]") {
+    // 2^16 + 1 samples leave a last block of one sample. On its own it is
+    // too noisy to anchor the reflection of the running median at the edge,
+    // so the baseline must not depend on it.
+    for (unsigned seed = 37; seed < 45; ++seed) {
+        auto raw     = white((1U << 16U) + 1, seed);
+        raw.back()   = 3.0F;
+        const auto a = run(raw);
+        raw.back()   = -3.0F;
+        const auto b = run(raw);
+        REQUIRE(a.rep.block_mu == b.rep.block_mu);
+    }
+}
+
 TEST_CASE("timeseries preprocess runs in place", "[io][preprocess]") {
     const auto raw = white(50'000, 21);
     loki::io::TimeSeries ts(raw, std::vector<float>(raw.size(), 1.0F), kTsamp);

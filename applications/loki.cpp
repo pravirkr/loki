@@ -347,13 +347,15 @@ std::optional<double> peak_rss_gb() {
     return std::nullopt;
 }
 
-/// Writes /run_stats (timings, peak RSS, overloads). Never fails the run.
+/// Writes /run_stats (timings, peak RSS unless @p measure_rss is false,
+/// overloads). Never fails the run.
 void record_run_stats(const std::filesystem::path& result_file,
-                      loki::search::RunStats stats) {
+                      loki::search::RunStats stats,
+                      bool measure_rss = true) {
     if (!std::filesystem::exists(result_file)) {
         return;
     }
-    stats.peak_rss_gb = peak_rss_gb();
+    stats.peak_rss_gb = measure_rss ? peak_rss_gb() : std::nullopt;
     try {
         loki::search::write_run_stats(result_file, stats);
     } catch (const std::exception& ex) {
@@ -780,29 +782,41 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
             chunk.nominal_f_end, chunk.actual_f_start, chunk.actual_f_end,
             chunk.ncoords, format_pow2(chunk.max_sugg), chunk.branch_max,
             chunk.nsegments, chunk.chunk_memory_gb, chunk.pd);
+        const auto n_slices = chunk.seed_slice_edges.empty()
+                                  ? SizeType{1}
+                                  : chunk.seed_slice_edges.size() - 1;
         std::cout << con.muted(fmt::format(
-                         "       predicted peak {}, live ring {}, batch {}",
+                         "       predicted peak {}, live ring {}, batch {}{}",
                          format_pow2(chunk.predicted_peak),
-                         format_pow2(chunk.predicted_live), chunk.batch_size))
+                         format_pow2(chunk.predicted_live), chunk.batch_size,
+                         n_slices > 1
+                             ? fmt::format(", {} seed slices (forecast per "
+                                           "slice)",
+                                           n_slices)
+                             : std::string{}))
                   << "\n";
     }
 
-    std::cout << con.title("Groups of equal nbins")
+    // The sweep's groups: contiguous chunks of equal nbins and batch.
+    std::cout << con.title("Groups of equal nbins and batch")
               << ", each with its own workspaces:\n";
     for (SizeType begin = 0; begin < chunks.size();) {
         const auto nbins    = chunks[begin].cfg.get_nbins();
+        const auto batch    = chunks[begin].batch_size;
         SizeType end        = begin;
         SizeType max_sugg   = 0;
         SizeType branch_max = 0;
-        while (end < chunks.size() && chunks[end].cfg.get_nbins() == nbins) {
+        while (end < chunks.size() && chunks[end].cfg.get_nbins() == nbins &&
+               chunks[end].batch_size == batch) {
             max_sugg   = std::max(max_sugg, chunks[end].max_sugg);
             branch_max = std::max(branch_max, chunks[end].branch_max);
             ++end;
         }
         std::cout << fmt::format(
-            "  chunks {}..{}: nbins {}, max_sugg {}, branch_max {}, {} "
-            "worker(s)\n",
-            begin, end - 1, nbins, format_pow2(max_sugg), branch_max, workers);
+            "  chunks {}..{}: nbins {}, batch {}, max_sugg {}, branch_max {}, "
+            "{} worker(s)\n",
+            begin, end - 1, nbins, batch, format_pow2(max_sugg), branch_max,
+            workers);
         begin = end;
     }
     std::cout << con.title("Plan cache:")
@@ -2195,6 +2209,35 @@ PublishSource read_publish_source(const std::filesystem::path& path) {
     return src;
 }
 
+/// The stage timings a search recorded in its own `/run_stats` (the raw
+/// file of a `--no-candidates` search has them; a spool has none).
+std::vector<std::pair<std::string, double>>
+recorded_timings(const std::filesystem::path& file) {
+    std::vector<std::pair<std::string, double>> timings;
+    constexpr std::string_view kPrefix = "timing_";
+    constexpr std::string_view kSuffix = "_s";
+    try {
+        const HighFive::File h5(file.string(), HighFive::File::ReadOnly);
+        if (!h5.exist("run_stats")) {
+            return timings;
+        }
+        const auto group = h5.getGroup("run_stats");
+        for (const auto& name : group.listAttributeNames()) {
+            if (name.size() > kPrefix.size() + kSuffix.size() &&
+                name.starts_with(kPrefix) && name.ends_with(kSuffix)) {
+                timings.emplace_back(
+                    name.substr(kPrefix.size(),
+                                name.size() - kPrefix.size() - kSuffix.size()),
+                    group.getAttribute(name).read<double>());
+            }
+        }
+    } catch (const std::exception&) {
+        // The search's timings are optional: publish records its own.
+        timings.clear();
+    }
+    return timings;
+}
+
 /// The product of @p cli: `-o`, else the spool's name with `_results.h5`.
 std::filesystem::path publish_output(const PublishCli& cli,
                                      const PublishSource& src) {
@@ -2375,6 +2418,15 @@ int publish_as(const PublishCli& cli, const PublishSource& src) {
                  .loki_version         = LOKI_VERSION,
                  .config_toml          = src.config_toml.value_or(""),
                  .publish_command_line = run_command_line()});
+
+    // Run statistics: the search's timings, if it recorded any, and this
+    // publish; the counts (overloads, harvests) come from the copied runs.
+    // Not the peak RSS: this process only published.
+    auto timings = recorded_timings(cli.file);
+    timings.emplace_back("publish", publish_s);
+    record_run_stats(output,
+                     {.timing_s = std::move(timings), .peak_rss_gb = {}},
+                     /*measure_rss=*/false);
 
     // Read the product back before the spool goes.
     const auto summary = loki::io::read_candidate_file_summary(output, 0);

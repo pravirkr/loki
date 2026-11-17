@@ -110,6 +110,12 @@ public:
         m_reduction = reduction;
     }
 
+    /// Prune each run's seeds in the frequency slices between @p f_edges
+    /// (checked by the engine); empty prunes them all at once.
+    void set_seed_slices(std::span<const SizeType> f_edges) {
+        m_seed_edges.assign(f_edges.begin(), f_edges.end());
+    }
+
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
                  std::span<const SizeType> ascend_levels,
@@ -141,50 +147,43 @@ public:
         log.close();
 
         const auto nsegments = m_ffa_plan.get_nsegments_active();
+        const auto n_slices  = get_n_seed_slices();
         // A task of the shared display, or a bar of its own.
         std::unique_ptr<progress::ProgressTracker> bar;
         if (tracker != nullptr) {
             bar = std::make_unique<progress::ProgressTracker>(tracker, task_id);
         } else if (show_progress) {
             bar = std::make_unique<progress::ProgressTracker>(
-                fmt::format("Pruning segment {:03d}", ref_seg), nsegments - 1,
+                fmt::format("Pruning segment {:03d}", ref_seg),
+                (nsegments - 1) * n_slices,
                 /*show=*/true, progress::ProgressBar::Kind::kPruning);
         }
 
-        initialize(ffa_fold, ref_seg, actual_log_file);
-
-        for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
-            loki::check_interrupt();
-            execute_iteration(ffa_fold, actual_log_file);
-            // Check for early termination (no survivors)
-            if (m_prune_complete) {
-                spdlog::debug(
-                    "Pruning terminated early at iteration {} - no survivors",
-                    iter + 1);
-                break;
+        initialize_run(ffa_fold, ref_seg);
+        if (n_slices == 1) {
+            initialize(ffa_fold, ref_seg, actual_log_file, std::nullopt);
+            prune_seeds(ffa_fold, ascend_levels, actual_log_file, bar.get(),
+                        /*progress_offset=*/0);
+            // Write results (after transforming to middle of the data)
+            report_survivors(actual_result_file, run_name);
+        } else {
+            // Prune the seeds slice by slice over the same FFA output and
+            // write one merged result for the run.
+            SliceResults merged;
+            for (SizeType s = 0; s < n_slices; ++s) {
+                std::ofstream slice_log(actual_log_file, std::ios::app);
+                slice_log << fmt::format("Seed slice {} of {}\n", s + 1,
+                                         n_slices);
+                slice_log.close();
+                initialize(ffa_fold, ref_seg, actual_log_file,
+                           search::SeedSlice{.f_begin = m_seed_edges[s],
+                                             .f_end   = m_seed_edges[s + 1]});
+                prune_seeds(ffa_fold, ascend_levels, actual_log_file, bar.get(),
+                            s * (nsegments - 1));
+                collect_slice(merged);
             }
-            // Should we reintegrate survivors at this level?
-            if (!ascend_levels.empty() &&
-                std::ranges::find(ascend_levels, m_prune_level) !=
-                    ascend_levels.end()) {
-                ascend_survivors_batched(ffa_fold);
-            }
-            if (bar) {
-                bar->set_score(ws.world_tree.get_score_max());
-                bar->set_leaves(ws.world_tree.get_size_lb());
-                bar->set_progress(iter + 1);
-            }
+            report_merged(actual_result_file, run_name, merged);
         }
-
-        // Final ascend if needed
-        if (ascend_levels.empty() ||
-            std::ranges::find(ascend_levels, m_prune_level) ==
-                ascend_levels.end()) {
-            ascend_survivors_batched(ffa_fold);
-        }
-
-        // Write results (after transforming to middle of the data)
-        report_survivors(actual_result_file, run_name);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
@@ -212,6 +211,8 @@ private:
     SizeType m_branch_max;
     std::string m_poly_basis;
     SizeType m_total_levels;
+    /// Frequency-cell edges of the seed slices; empty: one slice.
+    std::vector<SizeType> m_seed_edges;
 
     bool m_prune_complete{false};
     SizeType m_prune_level{};
@@ -255,20 +256,29 @@ private:
         return m_rfi->harvest_scheme[level - 1];
     }
 
-    void initialize(std::span<const FoldType> ffa_fold,
-                    SizeType ref_seg,
-                    const std::filesystem::path& log_file) {
-        auto& ws         = get_workspace();
-        auto& world_tree = ws.world_tree;
-        world_tree.reset();
+    [[nodiscard]] SizeType get_n_accel() const {
+        const auto& counts = m_ffa_plan.get_param_counts().back();
+        return counts[m_cfg.get_nparams() - 2];
+    }
+    [[nodiscard]] SizeType get_n_freq() const {
+        return m_ffa_plan.get_param_counts().back().back();
+    }
+    [[nodiscard]] SizeType get_n_seed_slices() const noexcept {
+        return m_seed_edges.empty() ? 1 : m_seed_edges.size() - 1;
+    }
 
-        // Initialize snail scheme for current ref_seg
-        const auto nsegments = m_ffa_plan.get_nsegments_active();
-        const auto tseg      = m_ffa_plan.get_tsegments().back();
+    /// Per-run state, shared by the run's seed slices: the snail scheme, the
+    /// seeds of every coordinate (each slice adds its own to the tree) and
+    /// the RFI state (the mask grows with harvests across slices).
+    void initialize_run(std::span<const FoldType> ffa_fold, SizeType ref_seg) {
+        auto& ws               = get_workspace();
+        const auto& world_tree = ws.world_tree;
+        const auto nsegments   = m_ffa_plan.get_nsegments_active();
+        const auto tseg        = m_ffa_plan.get_tsegments().back();
         m_snail_scheme = psr_utils::MiddleOutScheme(nsegments, ref_seg, tseg);
-
-        m_prune_level    = 0;
-        m_prune_complete = false;
+        m_prune_funcs->seed(
+            m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx()),
+            ws.seed_leaves, ws.seed_scores, m_snail_scheme.get_coord(0));
 
         // Per-run RFI state: start from the shared static mask
         m_mask.assign(*m_mask_base);
@@ -277,16 +287,47 @@ private:
             m_rfi->harvest_store_folds);
         m_n_harvested_total = 0;
         spdlog::debug("Pruning run {:03d}: initialized", ref_seg);
+    }
 
-        // Initialize the world tree with the first segment
+    /// Seeds the world tree with every seed (@p slice empty) or with one
+    /// seed slice, and starts the level stats.
+    void initialize(std::span<const FoldType> ffa_fold,
+                    SizeType ref_seg,
+                    const std::filesystem::path& log_file,
+                    std::optional<search::SeedSlice> slice) {
+        auto& ws         = get_workspace();
+        auto& world_tree = ws.world_tree;
+        world_tree.reset();
+
+        m_prune_level    = 0;
+        m_prune_complete = false;
+
+        // Initialize the world tree with the first segment (seeded once per
+        // run by initialize_run)
         const auto fold_segment =
             m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx());
-        const auto coord_init = m_snail_scheme.get_coord(m_prune_level);
-        const auto n_leaves   = m_ffa_plan.get_ncoords().back();
-        m_prune_funcs->seed(fold_segment, ws.seed_leaves, ws.seed_scores,
-                            coord_init);
+        auto n_leaves           = m_ffa_plan.get_ncoords().back();
         SizeType n_seeds_masked = 0;
-        if (m_mask.empty()) {
+        if (slice) {
+            // The slice's seeds, less the masked ones (the mask may have
+            // grown by harvests in earlier slices of this run).
+            const auto n_accel = get_n_accel();
+            const auto n_freq  = get_n_freq();
+            error_check::check_equal(
+                n_accel * n_freq, n_leaves,
+                "PruneImpl: seed slices need one seed per grid cell");
+            n_leaves          = n_accel * (slice->f_end - slice->f_begin);
+            const auto n_keep = search::select_slice_seeds(
+                ws.seed_keep_indices, n_accel, n_freq, *slice, m_mask);
+            n_seeds_masked = n_leaves - n_keep;
+            world_tree.add_initial_scattered(ws.seed_leaves, fold_segment,
+                                             ws.seed_scores,
+                                             ws.seed_keep_indices, n_keep);
+            spdlog::debug("Pruning run {:03d}: seed slice f cells [{}, {}): "
+                          "{} of {} seeds ({} masked)",
+                          ref_seg, slice->f_begin, slice->f_end, n_keep,
+                          n_leaves, n_seeds_masked);
+        } else if (m_mask.empty()) {
             world_tree.add_initial(ws.seed_leaves, fold_segment, ws.seed_scores,
                                    n_leaves);
         } else {
@@ -324,6 +365,127 @@ private:
         log.close();
         if (world_tree.get_size() == 0) {
             m_prune_complete = true;
+        }
+    }
+
+    /// Prunes the seeded tree through every level, then the final ascend.
+    void prune_seeds(std::span<const FoldType> ffa_fold,
+                     std::span<const SizeType> ascend_levels,
+                     const std::filesystem::path& log_file,
+                     progress::ProgressTracker* bar,
+                     SizeType progress_offset) {
+        const auto& world_tree = get_workspace().world_tree;
+        const auto nsegments   = m_ffa_plan.get_nsegments_active();
+        for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
+            loki::check_interrupt();
+            execute_iteration(ffa_fold, log_file);
+            // Check for early termination (no survivors)
+            if (m_prune_complete) {
+                spdlog::debug(
+                    "Pruning terminated early at iteration {} - no survivors",
+                    iter + 1);
+                break;
+            }
+            // Should we reintegrate survivors at this level?
+            if (!ascend_levels.empty() &&
+                std::ranges::find(ascend_levels, m_prune_level) !=
+                    ascend_levels.end()) {
+                ascend_survivors_batched(ffa_fold);
+            }
+            if (bar != nullptr) {
+                bar->set_score(world_tree.get_score_max());
+                bar->set_leaves(world_tree.get_size_lb());
+                bar->set_progress(progress_offset + iter + 1);
+            }
+        }
+
+        // Final ascend if needed
+        if (ascend_levels.empty() ||
+            std::ranges::find(ascend_levels, m_prune_level) ==
+                ascend_levels.end()) {
+            ascend_survivors_batched(ffa_fold);
+        }
+    }
+
+    /// The final leaves of a run pruned in seed slices, and its stats.
+    struct SliceResults {
+        std::vector<double> leaves;
+        std::vector<float> scores;
+        std::vector<float> scores_ep;
+        std::vector<std::uint32_t> widths;
+        search::PruneStatsCollection stats;
+        /// Deepest level any slice reached.
+        SizeType prune_level{0};
+    };
+
+    /// Final widths of the tree's leaves (Taylor basis, else empty), then
+    /// the leaves transformed to the middle of the data, in place.
+    std::vector<std::uint32_t> finalize_survivors() {
+        auto& world_tree    = get_workspace().world_tree;
+        const auto n_leaves = world_tree.get_size();
+        std::vector<std::uint32_t> widths;
+        if (m_poly_basis == "taylor") {
+            widths.resize(n_leaves);
+            const auto folds = world_tree.get_folds_circular_view();
+            const auto nfirst =
+                folds.first.size() / world_tree.get_folds_stride();
+            m_prune_funcs->final_widths(folds.first,
+                                        std::span(widths).first(nfirst));
+            m_prune_funcs->final_widths(folds.second,
+                                        std::span(widths).subspan(nfirst));
+        }
+        if (n_leaves > 0) {
+            const auto leaves_view = world_tree.get_leaves_circular_view();
+            const auto coord_mid   = m_snail_scheme.get_coord(m_prune_level);
+            search::detail::check_report_epoch(m_cfg, coord_mid.first,
+                                               "EPMultiPass::report");
+            const auto leaves_stride = world_tree.get_leaves_stride();
+            const auto n1            = leaves_view.first.size() / leaves_stride;
+            const auto n2 = leaves_view.second.size() / leaves_stride;
+            m_prune_funcs->report(leaves_view.first, coord_mid, n1);
+            if (n2 > 0) {
+                m_prune_funcs->report(leaves_view.second, coord_mid, n2);
+            }
+        }
+        return widths;
+    }
+
+    /// Appends this slice's final leaves and stats to @p merged.
+    void collect_slice(SliceResults& merged) {
+        const auto widths      = finalize_survivors();
+        const auto& world_tree = get_workspace().world_tree;
+        const auto append      = [](auto& dst, const auto& view) {
+            dst.insert(dst.end(), view.first.begin(), view.first.end());
+            dst.insert(dst.end(), view.second.begin(), view.second.end());
+        };
+        append(merged.leaves, world_tree.get_leaves_circular_view());
+        append(merged.scores, world_tree.get_scores_circular_view());
+        append(merged.scores_ep, world_tree.get_scores_ep_circular_view());
+        merged.widths.insert(merged.widths.end(), widths.begin(), widths.end());
+        merged.stats.merge_slice(m_pstats);
+        merged.prune_level = std::max(merged.prune_level, m_prune_level);
+    }
+
+    /// Writes the merged result of a run pruned in seed slices.
+    void report_merged(const std::filesystem::path& actual_result_file,
+                       std::string_view run_name,
+                       SliceResults& merged) {
+        // The run's stats and depth, as one prune of all seeds has them.
+        m_pstats                        = std::move(merged.stats);
+        m_prune_level                   = merged.prune_level;
+        const auto total_pruning_gflops = compute_total_prune_gflops();
+        auto result_writer              = search::PruneResultWriter(
+            actual_result_file, search::PruneResultWriter::Mode::kAppend);
+        result_writer.write_run_results(
+            run_name, m_snail_scheme.get_data(),
+            {std::span<double>(merged.leaves), {}},
+            {std::span<float>(merged.scores), {}},
+            {std::span<float>(merged.scores_ep), {}}, total_pruning_gflops,
+            merged.scores.size(), m_cfg.get_nparams(), m_pstats, merged.widths,
+            m_reduction);
+        if (m_rfi->has_harvest()) {
+            result_writer.write_run_harvest(
+                run_name, m_harvest, m_cfg.get_nparams(), m_n_harvested_total);
         }
     }
 
@@ -404,20 +566,10 @@ private:
 
     void report_survivors(const std::filesystem::path& actual_result_file,
                           std::string_view run_name) {
-        auto& ws            = get_workspace();
-        auto& world_tree    = ws.world_tree;
+        auto& world_tree    = get_workspace().world_tree;
         const auto n_leaves = world_tree.get_size();
-        std::vector<std::uint32_t> widths;
-        if (m_poly_basis == "taylor") {
-            widths.resize(n_leaves);
-            const auto folds = world_tree.get_folds_circular_view();
-            const auto nfirst =
-                folds.first.size() / world_tree.get_folds_stride();
-            m_prune_funcs->final_widths(folds.first,
-                                        std::span(widths).first(nfirst));
-            m_prune_funcs->final_widths(folds.second,
-                                        std::span(widths).subspan(nfirst));
-        }
+        // Widths, then the transform to the middle of the data
+        const auto widths = finalize_survivors();
 
         memory::CircularView<double> const leaves_view =
             world_tree.get_leaves_circular_view();
@@ -426,19 +578,6 @@ private:
         memory::CircularView<float> const scores_ep_view =
             world_tree.get_scores_ep_circular_view();
 
-        if (n_leaves > 0) {
-            // Transform the suggestion params to middle of the data
-            const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
-            search::detail::check_report_epoch(m_cfg, coord_mid.first,
-                                               "EPMultiPass::report");
-            const auto leaves_stride = world_tree.get_leaves_stride();
-            const auto n1            = leaves_view.first.size() / leaves_stride;
-            const auto n2 = leaves_view.second.size() / leaves_stride;
-            m_prune_funcs->report(leaves_view.first, coord_mid, n1);
-            if (n2 > 0) {
-                m_prune_funcs->report(leaves_view.second, coord_mid, n2);
-            }
-        }
         const auto total_pruning_gflops = compute_total_prune_gflops();
         // Write results
         auto result_writer = search::PruneResultWriter(
@@ -1203,6 +1342,12 @@ public:
         m_reduction = std::move(spec);
     }
 
+    void set_seed_slices(std::vector<SizeType> f_edges) override {
+        search::check_seed_slice_edges(
+            f_edges, m_ffa_plan.get_param_counts().back().back());
+        m_seed_edges = std::move(f_edges);
+    }
+
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
@@ -1304,6 +1449,7 @@ private:
     std::string m_poly_basis;
     bool m_show_progress;
     std::optional<search::detail::LeafReductionSpec> m_reduction;
+    std::vector<SizeType> m_seed_edges;
     PruneRFIConfig m_rfi_config;
 
     plans::FFAPlan<FoldType> m_ffa_plan;
@@ -1363,6 +1509,7 @@ private:
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
         prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
+        prune.set_seed_slices(m_seed_edges);
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
@@ -1391,12 +1538,14 @@ private:
         task_ids.reserve(ref_segs.size());
 
         const auto nsegments = m_ffa_plan.get_nsegments_active();
-        int id               = 0;
+        const auto n_slices =
+            m_seed_edges.empty() ? SizeType{1} : m_seed_edges.size() - 1;
+        int id = 0;
         for (const auto ref_seg : ref_segs) {
             if (tracker) {
                 id = tracker->add_task(
                     fmt::format("Pruning segment {:03d}", ref_seg),
-                    nsegments - 1,
+                    (nsegments - 1) * n_slices,
                     /*transient=*/true);
             } else {
                 id++;
@@ -1415,6 +1564,7 @@ private:
                     ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
                     m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
                 prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
+                prune.set_seed_slices(m_seed_edges);
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,

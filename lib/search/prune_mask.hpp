@@ -151,4 +151,49 @@ private:
     void set_range(SizeType lo, SizeType hi) noexcept;
 };
 
+/**
+ * @brief Frequency cells `[f_begin, f_end)` of one seed slice of an EP run.
+ *
+ * @details A run's seeds (one per base-grid cell `ia * n_freq + if`) can be
+ * pruned in sequential slices over the same FFA output. A slice holds a
+ * contiguous range of frequency cells with every acceleration. Each subtree
+ * descends from one seed, so the slices' final leaves together are those of a
+ * single prune, unless the world tree overflows or an early harvest widens
+ * the mask (both depend on which leaves share the tree).
+ */
+struct SeedSlice {
+    SizeType f_begin{0};
+    SizeType f_end{0};
+};
+
+/**
+ * @brief Edges of @p n_slices seed slices with (as nearly as possible)
+ * equal frequency cell counts: `e[0] = 0 < e[1] < ... < e[K] = n_freq`, with
+ * `K = n_slices` clamped to `[1, max(n_freq, 1)]`.
+ */
+[[nodiscard]] std::vector<SizeType> even_seed_slice_edges(SizeType n_slices,
+                                                          SizeType n_freq);
+
+/**
+ * @brief Check seed-slice edges: empty (one slice), or strictly increasing
+ * frequency cells from 0 to @p n_freq. Slice s is `[e[s], e[s + 1])`.
+ * @throws std::invalid_argument otherwise.
+ */
+void check_seed_slice_edges(std::span<const SizeType> edges, SizeType n_freq);
+
+/**
+ * @brief Select the seeds of @p slice that @p mask does not mask.
+ *
+ * @details Writes the seed indices `ia * n_freq + if`, `if` in the slice, in
+ * ascending order. An empty mask masks nothing (it may have no geometry);
+ * otherwise its grid must be `n_accel x n_freq`.
+ *
+ * @return Number of selected seeds.
+ */
+SizeType select_slice_seeds(std::span<SizeType> keep_indices,
+                            SizeType n_accel,
+                            SizeType n_freq,
+                            SeedSlice slice,
+                            const GridMask& mask);
+
 } // namespace loki::search

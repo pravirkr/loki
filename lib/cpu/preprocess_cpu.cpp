@@ -479,13 +479,13 @@ void block_medians(std::span<const float> x,
                 buf[cnt] = x[i0 + j];
                 cnt += (all_valid || mask[i0 + j] != 0U) ? 1 : 0;
             }
-            good[b] = static_cast<float>(cnt) / static_cast<float>(len);
-            const bool ok =
-                cnt >= min_valid(min_good, len) || (all_valid && cnt > 0);
-            usable[b] = ok ? 1U : 0U;
-            med[b]    = ok ? static_cast<float>(
-                                 median_bracketed(buf.data(), cnt, tmp.data()))
-                           : 0.0F;
+            good[b]       = static_cast<float>(cnt) / static_cast<float>(len);
+            const bool ok = cnt >= min_valid(min_good, len, block) ||
+                            (all_valid && cnt > 0);
+            usable[b]     = ok ? 1U : 0U;
+            med[b] = ok ? static_cast<float>(
+                              median_bracketed(buf.data(), cnt, tmp.data()))
+                        : 0.0F;
         }
     }
 }
@@ -517,7 +517,7 @@ void block_variances(std::span<const float> x,
                 buf[cnt] = x[i0 + j] - mub[j];
                 cnt += mask[i0 + j] != 0U ? 1 : 0;
             }
-            if (cnt < min_valid(min_good, len)) {
+            if (cnt < min_valid(min_good, len, block)) {
                 usable[b] = 0U;
                 var[b]    = 0.0F;
                 continue;

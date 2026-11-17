@@ -319,8 +319,8 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
                                          ? "loki-ep-group-fourier"
                                          : "loki-ep-group-time");
     const std::vector<float> thresholds(nsegments - 1, 100.0F);
-    const std::array<const loki::search::FFASearchConfig*, 3> cfgs{
-        &larger, &smaller, &larger};
+    const std::array<const PulsarSearchConfig*, 3> cfgs{&larger, &smaller,
+                                                        &larger};
     for (const auto* cfg : cfgs) {
         loki::algorithms::EPMultiPassCudaCore<TestType> core(
             pipeline, *cfg, thresholds, 1, std::nullopt, {}, capacity, kBatch);

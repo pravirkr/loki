@@ -112,6 +112,10 @@ public:
                  const std::filesystem::path& outdir = "./",
                  std::string_view file_prefix        = "test");
 
+    /// Prune each run's seeds in the frequency slices between @p f_edges
+    /// (see EPMultiPassEngine::set_seed_slices); empty by default (one slice).
+    void set_seed_slices(std::vector<SizeType> f_edges);
+
     /// Runs the FFA of the chunk on the shared device inputs and prunes it.
     /// Only for the shared-pipeline constructor.
     void execute_device(const std::filesystem::path& outdir,

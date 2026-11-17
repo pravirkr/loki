@@ -12,6 +12,7 @@
 
 #include "loki/common/types.hpp"
 
+#include "lib/core/branching.hpp"
 #include "lib/core/cartesian.hpp"
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
@@ -1665,7 +1666,8 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         SizeType nbins,
                         double eta,
                         SizeType ref_seg,
-                        bool use_conservative_tile) {
+                        bool use_conservative_tile,
+                        const BranchingStageFn& on_stage) {
     error_check::check_equal(param_arr.size(), dparams.size(),
                              "param_arr and dparams must have the same size");
     const auto n_params  = dparams.size();
@@ -1746,6 +1748,9 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
             weights[i] *= n_branches[i];
         }
         branching_pattern[prune_level - 1] = children / parents;
+        if (on_stage) {
+            on_stage(prune_level - 1, weights);
+        }
 
         // Transform dparams to the next segment
         const auto delta_t = coord_next.first - coord_cur.first;

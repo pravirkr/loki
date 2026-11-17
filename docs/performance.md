@@ -57,7 +57,7 @@ the FFA and EP workloads and the comparison tools).
 
 | Idea | Why not |
 |---|---|
-| Sub-octave chunk splitting, cost-model driven | Each EP chunk pays a fixed FFA initialisation, threshold and tree setup, and `2 · max_drift · f` of frequency overlap at every boundary. Filling one chunk to `max_process_memory_gb` beats splitting octaves. |
+| Sub-octave chunk splitting, cost-model driven | Each EP chunk pays a fixed FFA initialisation, threshold and tree setup, and `2 · max_drift · f` of frequency overlap at every boundary. Filling one chunk to `max_process_memory_gb` beats splitting octaves. Seed slices are a different lever: they split a chunk's tree, not its FFA, and add no overlap ("Seed slices of a run"). |
 | Padding a non-power-of-two `nsamps` to a power-of-two segment count | Up to 2× FFA cost (2^23 + 1 samples became 2^24). Replaced by equal-length segments (`docs/segments.md`). |
 | An uneven last EP segment (longer or shorter tail) | Breaks the equal-signal assumption the calibrated thresholds rest on. EP truncates to whole segments instead (fewer than 1 / `bseg_brute` of the series; S/N cost about half that). |
 
@@ -485,3 +485,152 @@ source whole, so it is the default; lower it only after measuring what a
 lower floor removes. Each harvest shrinks the tree, so a higher floor costs
 search time (28 s at 40 against 7.5 s at 15; 21 s at 40 with fractional
 masking).
+
+#### Seed slices of a run
+
+A run can prune its seeds in K sequential frequency slices over the same
+FFA output (`EPMultiPassEngine::set_seed_slices`): the tree then holds one
+slice's subtrees at a time. This is not the rejected sub-octave splitting:
+the chunk, its FFA output and its Doppler padding stay as they are, so no
+frequency overlap is added. On the CPU the result is exact: on a real
+2^26-sample circular Fourier series (4 runs, 128 levels, up to 4.0 M
+survivors per level) K = 8 and K = 1 gave the same final leaves and level
+stats bit for bit, in 27.7 s against 27.2 s.
+
+One chunk of a circular Fourier search on CUDA (L40, 2^26 samples, nbins 16,
+32 runs, 3062 frequency x 3 acceleration cells, 127 levels), K even slices:
+
+| K | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 3062 |
+|---|---|---|---|---|---|---|---|---|
+| Sweep (s) | 13.68 | 13.80 | 14.12 | 14.69 | 16.11 | 19.26 | 26.77 | 583.9 |
+| Peak live leaves, worst run | 5.45 M | 2.72 M | 1.47 M | 0.91 M | 0.62 M | 0.45 M | 0.33 M | 23 k |
+
+- Each slice costs about 5.8 ms per run, nearly all of it one round of
+  kernel launches and synchronisations per level, so the overhead grows as
+  K times the level count. Use the fewest slices that fit.
+- The tree shrinks about K-fold up to K = 8 (worst run 5.9-fold, median
+  6.7-fold). Beyond that a few seeds grow most of the tree: at K = 64 the
+  median run shrinks 36-fold, the worst only 16-fold.
+- The final leaves were bit-identical for K = 1, 2 and 8. Intermediate
+  level counts differed by single leaves at a threshold (one survivor in
+  1.3 M), which then died: the CUDA Fourier pruning is not bit-reproducible
+  near thresholds (see the numerics in docs/architecture.md), and slicing,
+  which changes how leaves share batches, makes that more visible.
+
+The planner now chooses slices (docs/memory.md, "Seed slices"): a chunk that
+does not fit takes the fewest slices that fit, before the width search
+narrows it; on CUDA a smaller batch replaces slices only where the search-time
+model says it is cheaper. On the same chunk (CUDA, limit set with
+`--memory-gb`, search with `--no-candidates`):
+
+| Limit | Before: chunks, CUDA batch | After: chunks, slices, CUDA batch | Search after |
+|---|---|---|---|
+| 30 GB | 1, 65536 | 1, 1, 65536 | 14.7 s |
+| 3 GB | 3, 32768 | 1, 3, 65536 | 14.7 s |
+| 2 GB | 9, 64 | 1, 6, 32768 | 15.5 s |
+| 1.5 GB | does not fit | 2, up to 13, 16384 | 32.2 s |
+
+At 3 GB and 2 GB the 1263 final leaves of the 32 runs equal those of the
+30 GB plan (no slices) exactly; no stage of any run overflowed its tree.
+On the CPU (4 threads, 4 runs of the same chunk) the plan at 2.4 GB took 13
+slices and at 2.2 GB 17; both gave the final leaves and every level count of
+the 30 GB plan exactly, with no overflow, at a peak RSS of 1.83 and 1.62 GB
+(12.15 GB with one slice).
+
+The batch costs search time only once it is small. The same chunk with one
+slice took 13.6, 13.3, 19.6 and 32.2 s at batches 65536, 32768, 16384 and
+8192: about 75 us per batch iteration of one level once launches dominate,
+on top of about 1.5 ns per leaf. A slice costs about 46 us per level per run
+(its iterations are small). The planner's model (`kCudaIterationSeconds`,
+`kCudaLeafSeconds` in ep_chunking.cpp) uses 50 us per iteration and 1 ns per
+forecast leaf, as the forecasts run about 1.65 times the measured
+populations. It only ranks plans: at 2 GB it chose 1 chunk with 6 slices at
+batch 32768 over 2 chunks with up to 64 slices at 65536.
+
+Whole searches, plan only (2^26 samples, CUDA, 32 runs):
+
+| Search | Before | After |
+|---|---|---|
+| circular, 10-720 Hz, 30 GB | does not fit (2 s) | 20 chunks, up to 32 slices, batch 32768; 179 s |
+| circular, 10-415 Hz, 30 GB | 26 chunks, batch 16; 292 s | 9 chunks, up to 8 slices, batch 65536; 12 s |
+| circular, 4 GB | 42 chunks, batch 16; 222 s | 24 chunks, up to 5 slices, batch 65536; 57 s |
+| jerk, 10-720 Hz, 30 GB | 7 chunks | the same plan |
+
+Chunk width against slices: capping the nominal chunk width (a probe build)
+on the same 495 Hz search at 2 GB gave 1, 2, 4, 8 and 16 chunks with up to 6,
+4, 3, 2 and 2 slices, searched in 14.5, 19.3, 28.5, 46.9 and 84.9 s. On a
+700 Hz band (2 runs, 8 GB) 2 chunks of up to 48 slices took 75.6 s and 4 of
+up to 41 slices 137.2 s: a narrow chunk still seeds its whole Doppler
+padding, so it saves few slices and prunes the padding again. The widest
+chunk that fits was the fastest in every case, and the planner's search-time
+forecast ranked all seven plans in the measured order (the measured times are
+1.7 to 1.9 times the forecast, the same factor for every plan of a search).
+
+The CUDA batch costs more at high frequency: the 700 Hz plan above (2 chunks,
+up to 48 slices) took 87.7 s at batch 32768 against 75.3 s at 65536, with the
+same final leaves (65536 to 32768 cost nothing at 495 Hz).
+
+Group `branch_max` replan (docs/memory.md, Width search): the 10-720 Hz
+circular search at 30 GB planned 16 chunks at the full batch in 38 s, where
+one minimum chunk had halved the batch of 14 of 20 chunks (179 s). The
+10-500 Hz circular search at 4 GB went from 24 to 15 chunks (planning 57 s
+to 13 s); the 32-run search took 310 s against 320 s. The same search on the
+CPU now plans at 2.2 and 2.4 GB, where a minimum chunk failed by 0.01 GB.
+
+Region leftovers: the 720 Hz search planned an 82.9 Hz chunk and a 1.44 Hz
+sliver at the bottom of one region (nbins 16); split evenly they are two
+42.2 Hz chunks (12 + 1 slices became 9 + 5), with the same peak. Searching
+just those two chunks (2 runs) took 87.6 s as a chunk plus sliver and 88.7 s
+split: the split removes a near-empty chunk, not search time.
+
+Leftover split with a lower half that does not fit: the split placed the
+upper half before fitting the lower one and then went on from the midpoint,
+so a circular 10-500 Hz search on the CPU at 2.2 GB planned its last region
+(nbins 512) as 6 chunks of halving width. Fitting the lower half before
+placing either keeps the chunk the width search found: 3 chunks there, 51
+instead of 54 in all, peak 1.35 against 1.34 GB. The other plans checked
+(circular 10-720 Hz at 30 GB, 10-500 Hz at 4 and 30 GB on CUDA, jerk 10-720
+Hz) did not change.
+
+Seeding per run: each seed slice recomputed every seed of its chunk. Seeding
+once per run gave the same final leaves in all 32 runs of the 495 Hz chunk
+above (CUDA, 6 and 13 slices; only the leaf order within a run differs, as it
+does between two runs of the same binary) and the same search time within
+noise (32.4 and 32.5 s against 32.7 and 32.4 s at 13 slices): seeding is
+negligible at a few slices and matters only near one slice per cell.
+
+Plan cache load: loading a cached plan replayed every chunk's branching
+forecast to recheck its `branch_max` (0.38 of 0.43 s per load on a 7-chunk
+jerk plan; the CLI loads it twice per file). The cache key and memory model
+version already cover every input of the forecast, so loading trusts the
+cached value: 2 ms per load.
+
+The 400-720 Hz part of that 720 Hz search (2^26 samples, 30 GB, CUDA) runs:
+6 chunks at batch 65536 with 16 to 54 seed slices, planned in 11 s; 2 runs
+searched in 994 s (about 8 minutes per run, so about 4.4 hours for 32 runs),
+no overloads, device peak 29.9 GB (nvidia-smi, CUDA context included) and
+1.1 GB of host memory.
+
+Chunk bounds and a weak signal: on that 10-500 Hz search a weak real signal
+at 280.14 Hz (score 8 or more in about a third of the 32 runs) was recovered
+in 11 runs by the old 4 GB plan and in 5 by the new one. Searching single
+chunks around it, without overloads: the old chunk's exact bounds gave 11,
+the same chunk sliced or not gave identical final leaves, and the same chunk
+with its bounds rounded by 4e-5 Hz gave 6. Other bounds gave 1, 5 and 11, and
+the widest chunk of all (249-504 Hz, from a 30 GB plan) 19. A chunk's FFA
+grid is laid out from its limits, so any change of the bounds moves every
+grid point; a signal near the thresholds is caught or not by where the
+points fall. Recovery has no trend with width or f_max, so the chunk width
+is not a sensitivity lever.
+
+Reserve of a slice (docs/memory.md): on the 495 Hz chunk above, which holds a
+bright pulsar, the busiest slice held 65-100 cells' worth of leaves beyond
+its noise forecast at 32 and 64 slices (the room for one CUDA batch covered
+it). At 700 Hz (2 runs, 30 slices) the busiest slice peaked at 13.2 M live
+leaves against a noise forecast of 28.7 M, the mean slice at 9.6 M. A
+reserve of 128 cells (23 M leaves there) turned a 0.5 Hz band at 8 GB into
+537 minimum-width chunks of about 1500 slices; 32 cells plans it as 2 chunks
+of up to 48 slices. A reserve of 1/16 of the whole chunk's forecast made every
+slice of the 720 Hz search mostly reserve (64 slices at batch 32). Wide
+sliced chunks without the FFA share cap pushed the shared FFA buffers to
+about 23 GB and the 720 Hz search no longer fitted.

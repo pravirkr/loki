@@ -6,6 +6,7 @@
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 
+#include "lib/core/branching.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::core {
@@ -102,6 +103,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         SizeType nbins,
                         double eta,
                         SizeType ref_seg,
-                        bool use_conservative_tile = false);
+                        bool use_conservative_tile       = false,
+                        const BranchingStageFn& on_stage = {});
 
 } // namespace loki::core

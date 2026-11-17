@@ -60,9 +60,12 @@ window_in_samples(double window_sec, double tsamp, SizeType n);
 /// Nearest odd count of blocks covering @p window samples (>= 1).
 [[nodiscard]] SizeType blocks_per_window(SizeType window, SizeType block);
 
-/// Fewest valid samples a block of @p len needs: max(3, ceil(min_good *
-/// len)).
-[[nodiscard]] SizeType min_valid(double min_good, SizeType len);
+/// Fewest valid samples a block of @p len on a grid of @p block needs:
+/// max(min(block, 3), ceil(min_good * len)). The floor comes from the grid,
+/// not from @p len, so a series' last block of one or two samples is not
+/// usable on its own (too noisy to anchor the edge of a running median),
+/// while a grid of one-bin blocks (the spectral zap path) still is.
+[[nodiscard]] SizeType min_valid(double min_good, SizeType len, SizeType block);
 
 /// Median of v[0, n) (mean of the two middle values for even n). Reorders v.
 template <typename T> double median_inplace(T* v, SizeType n) noexcept {

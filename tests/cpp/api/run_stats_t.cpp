@@ -3,16 +3,21 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
 #include "loki/io/observation.hpp"
@@ -78,6 +83,42 @@ TEST_CASE("write_run_stats records timings and EP run counts",
         CHECK(g.getAttribute("n_overloads").read<std::uint64_t>() == 0);
         CHECK(g.getAttribute("plan_peak_memory_gb").read<double>() > 0.0);
         CHECK_FALSE(g.exist("detections_per_nbins"));
+    }
+
+    // Overloaded runs are summarised in one warning, per chunk, with the
+    // usual remedies (the file itself is unchanged apart from /run_stats).
+    {
+        const HighFive::File h5(diag.string(), HighFive::File::ReadWrite);
+        const auto chunk    = h5.getGroup("chunks").getGroup("chunk_0000");
+        const auto runs     = chunk.getGroup("runs");
+        const auto stats_ds = runs.getGroup(runs.listObjectNames().front())
+                                  .getDataSet("level_stats");
+        const auto n_levels = stats_ds.getSpace().getElementCount();
+        // Write only the n_overloads member: 1 at every level.
+        const hid_t member = H5Tcreate(H5T_COMPOUND, sizeof(std::uint64_t));
+        REQUIRE(member >= 0);
+        REQUIRE(H5Tinsert(member, "n_overloads", 0, H5T_NATIVE_UINT64) >= 0);
+        const std::vector<std::uint64_t> ones(n_levels, 1U);
+        const auto status = H5Dwrite(stats_ds.getId(), member, H5S_ALL, H5S_ALL,
+                                     H5P_DEFAULT, ones.data());
+        H5Tclose(member);
+        REQUIRE(status >= 0);
+    }
+    std::ostringstream log;
+    const auto logger = spdlog::default_logger();
+    const auto sink   = std::make_shared<spdlog::sinks::ostream_sink_mt>(log);
+    logger->sinks().push_back(sink);
+    loki::search::write_run_stats(diag, stats);
+    std::erase(logger->sinks(), sink);
+    CHECK_THAT(log.str(),
+               Catch::Matchers::ContainsSubstring("EP tree overloads") &&
+                   Catch::Matchers::ContainsSubstring("in 1 of 2 runs") &&
+                   Catch::Matchers::ContainsSubstring("pulsar_mask"));
+    {
+        const HighFive::File h5(diag.string(), HighFive::File::ReadOnly);
+        const auto g = h5.getGroup("run_stats");
+        CHECK(g.getAttribute("n_runs_overloaded").read<std::uint64_t>() == 1);
+        CHECK(g.getAttribute("n_overloads").read<std::uint64_t>() > 0);
     }
 
     // A common product of the EP defaults: the per-nbins counts add up to

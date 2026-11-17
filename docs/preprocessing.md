@@ -63,6 +63,9 @@ so a CUDA search does not spend its single host core on it.
    - Block medians over valid samples feed a masked running median over
      `window_blocks` blocks, then a short running mean. The mean removes the
      staircase that a running median leaves on a drifting baseline.
+   - A block needs at least 3 valid samples (and `min_good_fraction`) to
+     count. The series' last block can be shorter; with one or two samples
+     it takes its baseline from its neighbours instead.
    - The result is interpolated linearly between block centres.
    - Edges use point reflection, so a linear trend has no edge bias.
    - The variance per block is the squared MAD, with a small-sample

@@ -16,6 +16,7 @@
 
 #include "loki/common/types.hpp"
 
+#include "lib/core/branching.hpp"
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
@@ -998,6 +999,13 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
     }
 }
 
+// GCC 12 at -O3 reports a false -Wfree-nonheap-object on this function's
+// vectors once it calls the stage observer (the vectors are plain heap
+// allocations, freed by their destructors).
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfree-nonheap-object"
+#endif
 plans::BranchingForecast
 generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
@@ -1006,7 +1014,8 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         SizeType nbins,
                         double eta,
                         SizeType ref_seg,
-                        bool use_conservative_tile) {
+                        bool use_conservative_tile,
+                        const BranchingStageFn& on_stage) {
     constexpr SizeType kParamsExpected = 5;
     error_check::check_equal(param_arr.size(), kParamsExpected,
                              "param_arr must have 5 parameters");
@@ -1135,6 +1144,9 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
             weights[i] *= n_branches[i];
         }
         branching_pattern[prune_level - 1] = children / parents;
+        if (on_stage) {
+            on_stage(prune_level - 1, weights);
+        }
 
         // Transform dparams to the next segment
         const auto delta_t = coord_next.first - coord_cur.first;
@@ -1157,5 +1169,8 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
 
     return {.mean = std::move(branching_pattern), .max_children = max_children};
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 } // namespace loki::core

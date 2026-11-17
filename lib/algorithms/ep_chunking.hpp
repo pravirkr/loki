@@ -59,6 +59,9 @@ struct ChunkPlan {
     SizeType fold_size{0};
     /// Peak sweep memory (see ep_memory.hpp), in GB.
     double peak_memory_gb{0.0};
+    /// Forecast search time of one run over every chunk, in seconds: only
+    /// for comparing plans (CUDA batch against seed slices).
+    double estimated_search_s{0.0};
     /// True if a pass with a fixed shared FFA size was needed.
     bool replanned{false};
     /// Fraction of the first pass's shared FFA size used as the fixed cap (1

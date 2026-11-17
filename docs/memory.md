@@ -83,9 +83,11 @@ limit on their own, because they are freed before the EP search. The designs
 run once per plan and are kept in the plan cache.
 
 A chunk is sized from its own design's final noise evaluation (2^15 trials
-natively, the refit's noise sample otherwise): see [Planning](#planning). It
-first narrows chunks; only when the minimum chunk cannot fit does it reduce
-the parent batch (CUDA). If even that cannot fit, planning fails with a
+natively, the refit's noise sample otherwise): see [Planning](#planning). A
+chunk that does not fit first prunes its seeds in slices, then narrows; on
+CUDA the planner also lowers the parent batch where that forecasts a faster
+search, or when the minimum chunk cannot fit at all (see
+[Seed slices](#seed-slices)). If even that cannot fit, planning fails with a
 required-memory diagnostic.
 
 ## What the model counts
@@ -101,7 +103,7 @@ peak = n_workers * thread_bytes(group) + shared_bytes + input_bytes
 
 | Term | Contents | Lifetime |
 | --- | --- | --- |
-| `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_harvest_bytes`. The pruning functors score in tiles of 16 leaves and hold no batch-sized scoring scratch | one group |
+| `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_harvest_bytes`, and on the CPU the final leaves a run holds between its seed slices (see Seed slices). The pruning functors score in tiles of 16 leaves and hold no batch-sized scoring scratch | one group |
 | `shared_bytes` | FFA workspace fold buffer and coordinates + output fold buffer, sized from the global maxima of `buffer_size` and `coord_size` | whole sweep |
 | `input_bytes` | `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
 
@@ -204,8 +206,19 @@ Differences from the CPU policy:
   crackle split, and it is reached
   (`tests/cpp/internal/circ_branch_bound_t.cpp` drives the kernels against
   it). With `use_conservative_tile` the widths are replayed with that tile.
-  A cached plan whose `branch_max` is below the chunk's forecast is
-  replanned. If a minimum-width CUDA chunk cannot fit, planning retries with
+  Only this bound follows the tile: the mean branching, which sets the
+  thresholds, and the per-cell forecast of the seed slices are simulated
+  with the normal tile, so a conservative-tile search runs at the thresholds
+  of a normal one. Simulating them with the tile too would change those
+  thresholds. The tile's wider uncertainties pass more leaves at those
+  thresholds, so its noise population can exceed the forecast that sizes
+  `max_sugg` and the seed slices: a conservative-tile search can overload
+  where the normal one does not.
+  A cached `branch_max` is trusted on load: every input of the forecast is
+  part of the cache key, and a forecast change bumps the memory model
+  version (replaying the forecast on every load cost ~0.4 s). If a
+  minimum-width CUDA chunk cannot fit (after the group
+  `branch_max` replan in [Width search](#width-search)), planning retries with
   successively halved batches, down to one parent. It never reduces forecast capacity
   to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the
@@ -506,7 +519,11 @@ chunk would be infeasible.
 splits the region into chunks from its top frequency down, growing each chunk
 until the sweep would exceed the effective limit with it (bisection on the
 width, with probes beyond the bracket since branching changes discretely with
-the band). A probe simulates nothing. Its population is the region design's
+the band). When the chunk just found leaves a remainder of the region below a
+quarter of its own width (`kRebalanceFraction`), the chunk and the remainder
+share the band evenly instead, if both halves fit: a sliver chunk would repeat
+a whole FFA and its Doppler padding for a small part of the band. A probe
+simulates nothing. Its population is the region design's
 on the probe's own branching pattern `bp'`:
 
 ```text
@@ -531,9 +548,77 @@ late can enlarge them after earlier groups were already fitted:
    room and makes the chunks that set the size narrower. If no scale works,
    the planner throws the original "Cannot fit minimum viable chunk" error.
 
+A group's workers are sized for its largest `branch_max` (the world tree and
+the branching scratch scale with it). A minimum-width chunk can fail only
+because it would raise that `branch_max` for the chunks already in its group:
+it fits alone, and it fits in the group at the group's `branch_max`. The
+planner then plans the pass again with every group of that nbins starting at
+the larger `branch_max` (kept for the later passes), so the earlier chunks are
+fitted next to it and come out narrower. Without this, the CUDA batch retry
+below halved the batch of every chunk for one minimum chunk: on one 720 Hz
+circular search, 20 chunks with 14 at half the batch became 16 chunks at the
+full batch, and on one 500 Hz CPU search at 2.2 and 2.4 GB the plan that
+failed now fits.
+
 After a replan the planner checks that the final peak is within the limit.
 `ChunkPlan::replanned` and `shared_cap_scale` record which path ran. Chunk
 evaluations (each builds an `FFAPlan`) are memoised across passes.
+
+### Seed slices
+
+A chunk whose tree does not fit with every seed at once is pruned in seed
+slices before the width search narrows it. On CUDA the planner then halves
+the batch while the plan uses slices and a forecast of the search time
+(batch iterations per level, slices times levels, and leaves) drops: a
+smaller batch is cheap until launches dominate, while every slice repeats all
+levels. The batch ladder still runs when no chunk fits at all. Each run then prunes its seeds in
+K sequential slices of frequency cells (every acceleration) over the same FFA
+output, and writes one merged result. Each subtree descends from one seed and
+every lookup goes to the whole FFA output, so the slices' final leaves are
+those of one prune, unless the tree overflows or an early harvest widens the
+mask (a harvest can then record another leaf of the same source). The slices
+run in frequency order, so a harvest masks its cells only in the slices after
+it: the earlier slices have already run, where one prune of all seeds masks
+them at every later level.
+
+The planner forecasts a slice from its cells. The branching simulation gives
+each frequency cell's leaves per seed after stage `s`, `w_s[i]`, whose sums
+over the grid give the branching pattern. With the region's pass rates
+`q_s = c_s m_s / prod_{j <= s} bp_j`, cell `i` holds
+`n_accel * w_s[i] * q_s` leaves after stage `s`; the cells sum to the chunk's
+`L_s`. A cell's live is the largest adjacent sum, and a slice's live is at
+most the sum of its cells':
+
+```text
+live_slice = max over slices (sum of cell lives) + reserve
+reserve    = min(32 * largest cell live, live / 16)
+```
+
+The reserve is room for data that departs from the noise model: a pulsar or
+RFI puts its subtrees into a few cells, so one slice can hold far more than
+its share (one slice keeps the whole forecast as that headroom).
+`max_sugg` is sized from `live_slice` as above, and `EPChunkConfig`'s
+`max_sugg`, `predicted_peak` and `predicted_live` are the largest slice's.
+The planner takes the fewest slices that fit, at most 64 while it widens a
+chunk and up to one per frequency cell at the minimum width, with edges that
+make the slices' forecasts as equal as possible (`seed_slice_edges`, stored in
+the plan cache). A chunk that needs slices may widen only while its own FFA
+buffers take at most a quarter of the limit: those buffers are shared by the
+whole sweep, and wider sliced chunks would hand them the room the slices
+free. On the CPU a run keeps its finished slices' final leaves (the
+leaf, two scores and a width, doubled for vector growth) until it writes them,
+`L_final` leaves per worker (`held_final_leaves`); the CUDA engine keeps them
+on the host, which the CUDA policy does not model. `L_final` is the noise
+forecast: a bright source or RFI that is not zapped, masked or harvested can
+fill every slice's tree, and a run then holds up to K times `max_sugg` final
+leaves on the host until it is written (per CPU worker; per run snapshot on
+CUDA). Where such a tree overflowed, the overload summary at the end of a
+search names the chunk. On CUDA
+a sliced run also keeps a device list of its slice's seed indices (4 bytes per
+FFA coordinate), which the model counts only with RFI control
+(`ep_cuda_rfi_bytes`). Every slice repeats all
+pruning levels, so slices cost search time (docs/performance.md, "Seed slices
+of a run"); the planner warns once when it uses them.
 
 `EPChunkConfig::chunk_memory_gb` and `EPChunkStats::memory_gb` are the memory of
 one chunk run alone. `EPRegionStats::get_max_memory_gb()` is the sweep peak
@@ -546,6 +631,43 @@ caches plans in `<outdir>/<prefix>_ep_plan.h5` by default. Set
 `output.use_plan_cache = false` or pass `--no-plan-cache` to disable automatic
 caching. Explicit cache paths retain strict validation; obsolete implicit
 caches are regenerated.
+
+## Choosing the limit and the search
+
+These are recommendations: the search is the configuration's, and the planner
+fits it into the limit as efficiently as it can. It never trades sensitivity
+for memory on its own.
+
+**Memory limit.** Give EP searches at least 10 GB (`max_process_memory_gb`,
+`--memory-gb`; device memory on CUDA). Any limit the fixed buffers fit in is
+honoured, or planning fails with the memory it needs, but a small limit costs
+search time: chunks prune their seeds in more slices, sweep FFA buffers are
+smaller, and on CUDA the batch shrinks. The planner warns once per plan when
+it uses slices or a smaller batch, with how many chunks it affects. Loki is
+not tuned for limits below about 4 GB. Measured cases are in
+docs/performance.md ("Seed slices of a run").
+
+**What sets the cost.** The tree of a chunk is about its seeds times the
+forecast leaves per seed, and the leaves per seed grow with frequency (more
+branching per level), with a finer grid (smaller `eta`) and with thresholds
+that keep more noise (smaller `target_snr`):
+
+- `eta` is the grid step in bins: the phase tolerance is `eta / nbins` turns.
+  A smaller `eta` keeps narrower pulses but branches more at every level.
+- `target_snr` is the S/N of the signal the threshold design keeps with
+  probability `min_pd` (by default 8.5 to 10.0 with the parameter count). A
+  lower target keeps weaker pulsars and more noise leaves; a higher one
+  prunes harder.
+
+**Fast pulsars in a separate search.** The highest frequencies dominate a
+circular or jerk search's memory and time. Searching them with their own
+configuration (for example 10-415 Hz at `eta = 1` and 415-720 Hz at
+`eta = 2`) keeps the fine grid below 415 Hz and uses a cheaper one where the
+branching is largest. A circular search of 2^26
+samples at 30 GB on CUDA planned 415-720 Hz as 6 chunks of up to 53 seed
+slices at `eta = 1`, and as 2 chunks of up to 8 slices at `eta = 2` (phase
+tolerance 0.0625 against 0.125 turns). Whether that tolerance is acceptable
+is a science choice: it loses pulses narrower than the grid.
 
 ## Candidate postprocessing
 
@@ -561,7 +683,8 @@ CUDA recovers final widths in batches using existing device index/score
 scratch, so it requires no additional problem-sized device allocation. The
 owned host result snapshot has one additional uint32 per leaf. At most three
 snapshots can coexist (the current producer, a pending payload and the active
-write), bounding this addition by `3 * 4 * capacity` bytes. As before, CUDA's
+write), bounding this addition by `3 * 4 * capacity` bytes per seed slice of
+the chunk (a run of K slices merges up to K trees' final leaves). As before, CUDA's
 search cap bounds device memory, and native host snapshots are outside it.
 The candidate graph has its separate host budget and starts after the writer
 has drained. EP source/provenance indexing is charged against that budget;

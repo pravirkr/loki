@@ -342,6 +342,41 @@ void PruneStatsCollection::update_stats(const PruneStats& stats,
 void PruneStatsCollection::update_stats(const PruneStats& stats) {
     m_stats_list.push_back(stats);
 }
+void PruneStatsCollection::merge_slice(const PruneStatsCollection& other,
+                                       bool sum_resolved) {
+    for (const auto& row : other.m_stats_list) {
+        const auto it =
+            std::ranges::find_if(m_stats_list, [&row](const auto& s) {
+                return s.level == row.level;
+            });
+        if (it == m_stats_list.end()) {
+            m_stats_list.push_back(row);
+            continue;
+        }
+        if (row.n_leaves_phy > 0) {
+            if (it->n_leaves_phy > 0) {
+                it->score_min = std::min(it->score_min, row.score_min);
+                it->score_max = std::max(it->score_max, row.score_max);
+            } else {
+                it->score_min = row.score_min;
+                it->score_max = row.score_max;
+            }
+        }
+        it->n_branches += row.n_branches;
+        it->n_leaves += row.n_leaves;
+        if (sum_resolved && row.level > 0) {
+            it->n_leaves_resolved += row.n_leaves_resolved;
+        }
+        it->n_leaves_phy += row.n_leaves_phy;
+        it->n_leaves_surv += row.n_leaves_surv;
+        it->n_leaves_masked += row.n_leaves_masked;
+        it->n_leaves_vetoed += row.n_leaves_vetoed;
+        it->n_harvested += row.n_harvested;
+        it->n_overloads += row.n_overloads;
+    }
+    std::ranges::sort(m_stats_list, {}, &PruneStats::level);
+    m_accumulated_timers += other.m_accumulated_timers;
+}
 std::optional<PruneStats>
 PruneStatsCollection::get_stats(SizeType level) const {
     const auto it = std::ranges::find_if(

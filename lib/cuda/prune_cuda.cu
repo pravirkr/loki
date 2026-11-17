@@ -270,6 +270,12 @@ public:
                m_prune_funcs->get_scorer_scratch_memory_gib();
     }
 
+    /// Prune each run's seeds in the frequency slices between @p f_edges
+    /// (checked by the engine); empty prunes them all at once.
+    void set_seed_slices(std::span<const SizeType> f_edges) {
+        m_seed_edges.assign(f_edges.begin(), f_edges.end());
+    }
+
     void execute(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                  SizeType ref_seg,
                  std::span<const SizeType> ascend_levels,
@@ -300,44 +306,45 @@ public:
         std::filesystem::path actual_result_file = result_file.value_or(
             outdir / fmt::format("tmp_{}_results.h5", run_name));
 
-        const auto nsegments = m_ffa_plan.get_nsegments_active();
-
-        initialize(ffa_fold, ref_seg, m_stream);
-        spdlog::debug("Pruning run {:03d}: initialized", ref_seg);
-
-        SizeType iterations_completed = 0;
-        for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
-            loki::interrupt::check(m_stream);
-            execute_iteration(ffa_fold, m_stream);
-            iterations_completed = iter + 1;
-            // Check for early termination (no survivors)
-            if (m_prune_complete) {
-                break;
+        initialize_run(ffa_fold, ref_seg, m_stream);
+        const auto n_slices = get_n_seed_slices();
+        // The tree restarts with every slice: its largest live count and its
+        // overload trims over the run.
+        const auto& world_tree = get_workspace().world_tree;
+        SizeType peak_live     = 0;
+        SizeType n_overloads   = 0;
+        if (n_slices == 1) {
+            initialize(ffa_fold, ref_seg, m_stream, std::nullopt);
+            spdlog::debug("Pruning run {:03d}: initialized", ref_seg);
+            prune_seeds(ffa_fold, ascend_levels);
+            peak_live   = world_tree.peak_live();
+            n_overloads = world_tree.overload_count();
+            // Write results (after transforming to middle of the data)
+            RunResults results;
+            collect_survivors(results);
+            report_survivors(actual_result_file, run_name, results);
+        } else {
+            // Prune the seeds slice by slice over the same FFA output and
+            // report one merged result for the run.
+            RunResults results;
+            SizeType prune_level = 0;
+            for (SizeType s = 0; s < n_slices; ++s) {
+                initialize(ffa_fold, ref_seg, m_stream,
+                           search::SeedSlice{.f_begin = m_seed_edges[s],
+                                             .f_end   = m_seed_edges[s + 1]});
+                prune_seeds(ffa_fold, ascend_levels);
+                peak_live = std::max(peak_live, world_tree.peak_live());
+                n_overloads += world_tree.overload_count();
+                collect_survivors(results);
+                // Resolved leaves are not counted on the GPU.
+                results.stats.merge_slice(m_pstats, /*sum_resolved=*/false);
+                prune_level = std::max(prune_level, m_prune_level);
             }
-            // Should we reintegrate survivors at this level?
-            if (!ascend_levels.empty() &&
-                std::ranges::find(ascend_levels, m_prune_level) !=
-                    ascend_levels.end()) {
-                ascend_survivors_batched(ffa_fold, m_stream);
-            }
+            // The run's stats and depth, as one prune of all seeds has them.
+            m_pstats      = std::move(results.stats);
+            m_prune_level = prune_level;
+            report_survivors(actual_result_file, run_name, results);
         }
-
-        // Log early exit ONCE after loop if needed
-        if (m_prune_complete && iterations_completed < nsegments - 1) {
-            spdlog::debug(
-                "Pruning terminated early at iteration {} - no survivors",
-                iterations_completed);
-        }
-
-        // Final ascend if needed
-        if (ascend_levels.empty() ||
-            std::ranges::find(ascend_levels, m_prune_level) ==
-                ascend_levels.end()) {
-            ascend_survivors_batched(ffa_fold, m_stream);
-        }
-
-        // Write results (after transforming to middle of the data)
-        report_survivors(actual_result_file, run_name);
 
         // Final log entries
         std::ofstream log(actual_log_file, std::ios::app);
@@ -349,8 +356,7 @@ public:
 
         spdlog::debug(
             "Pruning run {:03d}: complete (peak live {}, overload trims {})",
-            ref_seg, get_workspace().world_tree.peak_live(),
-            get_workspace().world_tree.overload_count());
+            ref_seg, peak_live, n_overloads);
         spdlog::debug("Pruning run {:03d}: stats: {}", ref_seg,
                       m_pstats.get_stats_summary_cuda(timer.stop()));
     }
@@ -370,6 +376,8 @@ private:
     int m_device_id;
     cudaStream_t m_stream;
     std::function<void(pipelines::detail::EPResultPayload)> m_result_sink;
+    /// Frequency-cell edges of the seed slices; empty: one slice.
+    std::vector<SizeType> m_seed_edges;
 
     bool m_prune_complete{false};
     SizeType m_prune_level{};
@@ -643,39 +651,80 @@ private:
         return n_harvested;
     }
 
-    void initialize(cuda::std::span<const FoldTypeCUDA> ffa_fold,
-                    SizeType ref_seg,
-                    cudaStream_t stream) {
-        //  Reset the suggestion buffer state
-        auto& ws         = get_workspace();
-        auto& world_tree = ws.world_tree;
-        world_tree.reset();
+    [[nodiscard]] SizeType get_n_accel() const {
+        const auto& counts = m_ffa_plan.get_param_counts().back();
+        return counts[m_cfg.get_nparams() - 2];
+    }
+    [[nodiscard]] SizeType get_n_freq() const {
+        return m_ffa_plan.get_param_counts().back().back();
+    }
+    [[nodiscard]] SizeType get_n_seed_slices() const noexcept {
+        return m_seed_edges.empty() ? 1 : m_seed_edges.size() - 1;
+    }
 
-        // Initialize snail scheme for current ref_seg
-        const auto nsegments = m_ffa_plan.get_nsegments_active();
-        const auto tseg      = m_ffa_plan.get_tsegments().back();
+    /// Seeds the tree with the first @p n_keep seeds listed in @p keep.
+    void upload_seeds(std::span<const SizeType> keep,
+                      SizeType n_keep,
+                      cuda::std::span<const double> seed_leaves,
+                      cuda::std::span<const FoldTypeCUDA> fold_segment,
+                      cuda::std::span<const float> seed_scores,
+                      cudaStream_t stream) {
+        std::vector<uint32_t> keep_u32(keep.begin(), keep.begin() + n_keep);
+        // Room for the largest slice's seeds (every seed without slices), so
+        // a later slice with more unmasked seeds allocates nothing.
+        if (m_seed_keep_d.size() < std::max<SizeType>(n_keep, 1)) {
+            SizeType room = m_ffa_plan.get_ncoords().back();
+            if (!m_seed_edges.empty()) {
+                SizeType widest = 0;
+                for (SizeType e = 0; e + 1 < m_seed_edges.size(); ++e) {
+                    widest =
+                        std::max(widest, m_seed_edges[e + 1] - m_seed_edges[e]);
+                }
+                room = get_n_accel() * widest;
+            }
+            m_seed_keep_d.resize(std::max({room, n_keep, SizeType{1}}));
+        }
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_seed_keep_d.data()),
+                            keep_u32.data(), n_keep * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice, stream),
+            "EP seed indices upload failed");
+        get_workspace().world_tree.add_initial_scattered(
+            seed_leaves, fold_segment, seed_scores,
+            cuda_utils::as_span(m_seed_keep_d), n_keep, stream);
+        // keep_u32 is pageable and dies here.
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "EP seed upload wait failed");
+    }
+
+    /// The seeds of this chunk's coordinates in the workspace (a sweep
+    /// workspace is sized for the largest chunk in its group).
+    [[nodiscard]] std::pair<cuda::std::span<double>, cuda::std::span<float>>
+    seed_buffers() {
+        auto& ws            = get_workspace();
+        const auto n_coords = m_ffa_plan.get_ncoords().back();
+        return {cuda_utils::as_span(ws.seed_leaves_d)
+                    .first(n_coords * ws.world_tree.get_leaves_stride()),
+                cuda_utils::as_span(ws.seed_scores_d).first(n_coords)};
+    }
+
+    /// Per-run state, shared by the run's seed slices: the snail scheme, the
+    /// seeds of every coordinate (each slice adds its own to the tree) and
+    /// the RFI state (the mask grows with harvests across slices).
+    void initialize_run(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                        SizeType ref_seg,
+                        cudaStream_t stream) {
+        const auto& world_tree = get_workspace().world_tree;
+        const auto nsegments   = m_ffa_plan.get_nsegments_active();
+        const auto tseg        = m_ffa_plan.get_tsegments().back();
         m_snail_scheme = psr_utils::MiddleOutScheme(nsegments, ref_seg, tseg);
+        const auto [seed_leaves, seed_scores] = seed_buffers();
+        m_prune_funcs->seed(
+            m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx()),
+            seed_leaves, seed_scores, m_snail_scheme.get_coord(0), stream);
 
-        m_prune_level    = 0;
-        m_prune_complete = false;
-
-        // Initialize the world tree with the first segment
-        const auto fold_segment =
-            m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx());
-        const auto coord_init = m_snail_scheme.get_coord(m_prune_level);
-        const auto n_leaves   = m_ffa_plan.get_ncoords().back();
-        // A sweep workspace is sized for the largest chunk in its group.
-        // Seed only this chunk's active coordinates, not the whole allocation.
-        const auto seed_leaves =
-            cuda_utils::as_span(ws.seed_leaves_d)
-                .first(n_leaves * world_tree.get_leaves_stride());
-        const auto seed_scores =
-            cuda_utils::as_span(ws.seed_scores_d).first(n_leaves);
-        m_prune_funcs->seed(fold_segment, seed_leaves, seed_scores, coord_init,
-                            stream);
         // Per-run RFI state: start from the chunk's static mask.
-        SizeType n_seeds_masked = 0;
-        m_mask_on_device        = false;
+        m_mask_on_device = false;
         if (m_rfi != nullptr) {
             m_mask.assign(*m_mask_base);
             m_harvest = search::HarvestBuffer<HostFoldT>(
@@ -686,7 +735,49 @@ private:
                 upload_mask();
             }
         }
-        if (!m_mask_on_device) {
+    }
+
+    /// Seeds the world tree with every seed (@p slice empty) or with one
+    /// seed slice, and starts the level stats.
+    void initialize(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                    SizeType ref_seg,
+                    cudaStream_t stream,
+                    std::optional<search::SeedSlice> slice) {
+        //  Reset the suggestion buffer state
+        auto& ws         = get_workspace();
+        auto& world_tree = ws.world_tree;
+        world_tree.reset();
+
+        m_prune_level    = 0;
+        m_prune_complete = false;
+
+        // Initialize the world tree with the first segment (seeded once per
+        // run by initialize_run)
+        const auto fold_segment =
+            m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx());
+        auto n_leaves                         = m_ffa_plan.get_ncoords().back();
+        const auto [seed_leaves, seed_scores] = seed_buffers();
+        SizeType n_seeds_masked               = 0;
+        if (slice) {
+            // The slice's seeds, less the masked ones (the mask may have
+            // grown by harvests in earlier slices of this run).
+            const auto n_accel = get_n_accel();
+            const auto n_freq  = get_n_freq();
+            error_check::check_equal(
+                n_accel * n_freq, n_leaves,
+                "PruneCUDAImpl: seed slices need one seed per grid cell");
+            n_leaves = n_accel * (slice->f_end - slice->f_begin);
+            std::vector<SizeType> keep(n_leaves);
+            const auto n_keep = search::select_slice_seeds(
+                keep, n_accel, n_freq, *slice, m_mask);
+            n_seeds_masked = n_leaves - n_keep;
+            upload_seeds(keep, n_keep, seed_leaves, fold_segment, seed_scores,
+                         stream);
+            spdlog::debug("Pruning run {:03d}: seed slice f cells [{}, {}): "
+                          "{} of {} seeds ({} masked)",
+                          ref_seg, slice->f_begin, slice->f_end, n_keep,
+                          n_leaves, n_seeds_masked);
+        } else if (!m_mask_on_device) {
             world_tree.add_initial(seed_leaves, fold_segment, seed_scores,
                                    n_leaves, stream);
         } else {
@@ -694,19 +785,8 @@ private:
             std::vector<SizeType> keep(n_leaves);
             const auto n_keep = m_mask.select_seeds(keep, n_leaves);
             n_seeds_masked    = n_leaves - n_keep;
-            std::vector<uint32_t> keep_u32(keep.begin(), keep.begin() + n_keep);
-            m_seed_keep_d.resize(std::max<SizeType>(n_keep, 1));
-            cuda_utils::check_cuda_call(
-                cudaMemcpyAsync(thrust::raw_pointer_cast(m_seed_keep_d.data()),
-                                keep_u32.data(), n_keep * sizeof(uint32_t),
-                                cudaMemcpyHostToDevice, stream),
-                "EP RFI seed indices upload failed");
-            world_tree.add_initial_scattered(
-                seed_leaves, fold_segment, seed_scores,
-                cuda_utils::as_span(m_seed_keep_d), n_keep, stream);
-            // keep_u32 is pageable and dies here.
-            cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                        "EP RFI seed upload wait failed");
+            upload_seeds(keep, n_keep, seed_leaves, fold_segment, seed_scores,
+                         stream);
             spdlog::debug("Pruning run {:03d}: pulsar mask removed {} of {} "
                           "seeds ({} grid cells masked)",
                           ref_seg, n_seeds_masked, n_leaves, m_mask.count());
@@ -729,6 +809,42 @@ private:
         m_pstats.update_stats(pstats_cur);
         if (world_tree.get_size() == 0) {
             m_prune_complete = true;
+        }
+    }
+
+    /// Prunes the seeded tree through every level, then the final ascend.
+    void prune_seeds(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                     std::span<const SizeType> ascend_levels) {
+        const auto nsegments          = m_ffa_plan.get_nsegments_active();
+        SizeType iterations_completed = 0;
+        for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
+            loki::interrupt::check(m_stream);
+            execute_iteration(ffa_fold, m_stream);
+            iterations_completed = iter + 1;
+            // Check for early termination (no survivors)
+            if (m_prune_complete) {
+                break;
+            }
+            // Should we reintegrate survivors at this level?
+            if (!ascend_levels.empty() &&
+                std::ranges::find(ascend_levels, m_prune_level) !=
+                    ascend_levels.end()) {
+                ascend_survivors_batched(ffa_fold, m_stream);
+            }
+        }
+
+        // Log early exit ONCE after loop if needed
+        if (m_prune_complete && iterations_completed < nsegments - 1) {
+            spdlog::debug(
+                "Pruning terminated early at iteration {} - no survivors",
+                iterations_completed);
+        }
+
+        // Final ascend if needed
+        if (ascend_levels.empty() ||
+            std::ranges::find(ascend_levels, m_prune_level) ==
+                ascend_levels.end()) {
+            ascend_survivors_batched(ffa_fold, m_stream);
         }
     }
 
@@ -835,8 +951,19 @@ private:
                        scores_ep_cv.second);
     }
 
-    void report_survivors(const std::filesystem::path& actual_result_file,
-                          std::string_view run_name) {
+    /// Final leaves of a run on the host: one seed slice after another.
+    struct RunResults {
+        std::vector<double> leaves;
+        std::vector<float> scores;
+        std::vector<float> scores_ep;
+        std::vector<std::uint32_t> widths;
+        /// The merged level stats of the slices (unused with one slice).
+        search::PruneStatsCollection stats;
+    };
+
+    /// Appends the tree's final leaves to @p out: their widths (Taylor
+    /// basis), then the leaves transformed to the middle of the data.
+    void collect_survivors(RunResults& out) {
         auto& ws         = get_workspace();
         auto& world_tree = ws.world_tree;
 
@@ -852,13 +979,14 @@ private:
         const auto coord_mid     = m_snail_scheme.get_coord(m_prune_level);
         const auto n1            = leaves_view.first.size() / leaves_stride;
         const auto n2            = leaves_view.second.size() / leaves_stride;
+        // Where this slice's rows start in the host vectors.
+        const auto offset = out.scores.size();
 
-        std::vector<std::uint32_t> widths_report_h;
         if (m_poly_basis == "taylor") {
-            widths_report_h.resize(n_leaves);
+            out.widths.resize(offset + n_leaves);
             const auto folds   = world_tree.get_folds_circular_view();
             auto& scratch      = ws.prune;
-            SizeType written   = 0;
+            SizeType written   = offset;
             const auto collect = [&](auto region) {
                 const auto stride = world_tree.get_folds_stride();
                 const auto count  = region.size() / stride;
@@ -873,7 +1001,7 @@ private:
                         region.subspan(p * stride, n * stride), widths, scores,
                         m_stream);
                     cuda_utils::check_cuda_call(
-                        cudaMemcpyAsync(widths_report_h.data() + written,
+                        cudaMemcpyAsync(out.widths.data() + written,
                                         widths.data(),
                                         n * sizeof(std::uint32_t),
                                         cudaMemcpyDeviceToHost, m_stream),
@@ -897,63 +1025,80 @@ private:
         }
 
         // Copy the results to the host
-        std::vector<double> leaves_report_h(n_leaves * leaves_stride);
-        std::vector<float> scores_report_h(n_leaves);
-        std::vector<float> scores_ep_report_h(n_leaves);
+        out.leaves.resize((offset + n_leaves) * leaves_stride);
+        out.scores.resize(offset + n_leaves);
+        out.scores_ep.resize(offset + n_leaves);
+        double* const leaves_h   = out.leaves.data() + (offset * leaves_stride);
+        float* const scores_h    = out.scores.data() + offset;
+        float* const scores_ep_h = out.scores_ep.data() + offset;
         cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(leaves_report_h.data(), leaves_view.first.data(),
+            cudaMemcpyAsync(leaves_h, leaves_view.first.data(),
                             (n1 * leaves_stride) * sizeof(double),
                             cudaMemcpyDeviceToHost, m_stream),
             "cudaMemcpyAsync leaves_report failed");
         if (n2 > 0) {
             cuda_utils::check_cuda_call(
-                cudaMemcpyAsync(leaves_report_h.data() + (n1 * leaves_stride),
+                cudaMemcpyAsync(leaves_h + (n1 * leaves_stride),
                                 leaves_view.second.data(),
                                 (n2 * leaves_stride) * sizeof(double),
                                 cudaMemcpyDeviceToHost, m_stream),
                 "cudaMemcpyAsync leaves_report failed");
         }
         cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(scores_report_h.data(), scores_view.first.data(),
+            cudaMemcpyAsync(scores_h, scores_view.first.data(),
                             n1 * sizeof(float), cudaMemcpyDeviceToHost,
                             m_stream),
             "cudaMemcpyAsync scores_report part 1 failed");
         if (n2 > 0) {
             cuda_utils::check_cuda_call(
-                cudaMemcpyAsync(scores_report_h.data() + n1,
-                                scores_view.second.data(), n2 * sizeof(float),
-                                cudaMemcpyDeviceToHost, m_stream),
+                cudaMemcpyAsync(scores_h + n1, scores_view.second.data(),
+                                n2 * sizeof(float), cudaMemcpyDeviceToHost,
+                                m_stream),
                 "cudaMemcpyAsync scores_report part 2 failed");
         }
         cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(scores_ep_report_h.data(),
-                            scores_ep_view.first.data(), n1 * sizeof(float),
-                            cudaMemcpyDeviceToHost, m_stream),
+            cudaMemcpyAsync(scores_ep_h, scores_ep_view.first.data(),
+                            n1 * sizeof(float), cudaMemcpyDeviceToHost,
+                            m_stream),
             "cudaMemcpyAsync scores_ep_report part 1 failed");
         if (n2 > 0) {
             cuda_utils::check_cuda_call(
-                cudaMemcpyAsync(scores_ep_report_h.data() + n1,
-                                scores_ep_view.second.data(),
+                cudaMemcpyAsync(scores_ep_h + n1, scores_ep_view.second.data(),
                                 n2 * sizeof(float), cudaMemcpyDeviceToHost,
                                 m_stream),
                 "cudaMemcpyAsync scores_ep_report part 2 failed");
         }
 
+        // The host vectors are complete, and the tree may be reseeded.
         cuda_utils::check_cuda_call(
             cudaStreamSynchronize(m_stream),
             "cudaStreamSynchronize write results failed");
+    }
+
+    /// Writes the run's final leaves @p results, with m_pstats as its
+    /// stats: to the sweep's sink, else to @p actual_result_file.
+    void report_survivors(const std::filesystem::path& actual_result_file,
+                          std::string_view run_name,
+                          RunResults& results) {
+        auto& leaves_report_h    = results.leaves;
+        auto& scores_report_h    = results.scores;
+        auto& scores_ep_report_h = results.scores_ep;
+        auto& widths_report_h    = results.widths;
+        const auto n_leaves      = scores_report_h.size();
 
         if (m_result_sink) {
             pipelines::detail::EPResultPayload payload{
-                .run_name     = std::string(run_name),
-                .snail_scheme = m_snail_scheme.get_data(),
-                .leaves       = std::move(leaves_report_h),
-                .scores       = std::move(scores_report_h),
-                .scores_ep    = std::move(scores_ep_report_h),
-                .widths       = std::move(widths_report_h),
-                .gflops       = compute_total_prune_gflops(),
-                .nparams      = m_cfg.get_nparams(),
-                .stats        = m_pstats,
+                .run_name          = std::string(run_name),
+                .snail_scheme      = m_snail_scheme.get_data(),
+                .leaves            = std::move(leaves_report_h),
+                .scores            = std::move(scores_report_h),
+                .scores_ep         = std::move(scores_ep_report_h),
+                .widths            = std::move(widths_report_h),
+                .gflops            = compute_total_prune_gflops(),
+                .nparams           = m_cfg.get_nparams(),
+                .stats             = m_pstats,
+                .harvest           = {},
+                .n_harvested_total = 0,
             };
             if (m_rfi != nullptr && m_rfi->has_harvest()) {
                 payload.harvest           = std::move(m_harvest);
@@ -1793,6 +1938,12 @@ public:
 
     /// Shared-pipeline execution: the FFA runs into the sweep's fold buffer
     /// from the sweep's device inputs, then the runs are pruned in turn.
+    void set_seed_slices(std::vector<SizeType> f_edges) {
+        search::check_seed_slice_edges(
+            f_edges, m_ffa_plan.get_param_counts().back().back());
+        m_seed_edges = std::move(f_edges);
+    }
+
     void execute_device(const std::filesystem::path& outdir,
                         std::string_view file_prefix) {
         timing::SimpleTimer timer;
@@ -1840,6 +1991,7 @@ private:
     // RFI control of the chunk and its static mask on the FFA base grid.
     PruneRFIConfig m_rfi_config;
     search::GridMask m_mask_base;
+    std::vector<SizeType> m_seed_edges;
 
     // Validate the RFI configuration and rasterise the static pulsar mask
     // onto the (accel, freq) grid that resolve() snaps to (as on CPU).
@@ -1946,6 +2098,7 @@ private:
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get(),
             sink, &m_rfi_config, &m_mask_base);
+        prune.set_seed_slices(m_seed_edges);
         for (const auto ref_seg : ref_segs_to_process) {
             loki::interrupt::check(m_execution_stream.get());
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
@@ -2056,6 +2209,12 @@ void EPMultiPassCudaCore<FoldTypeCUDA>::execute(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void EPMultiPassCudaCore<FoldTypeCUDA>::set_seed_slices(
+    std::vector<SizeType> f_edges) {
+    m_impl->set_seed_slices(std::move(f_edges));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void EPMultiPassCudaCore<FoldTypeCUDA>::execute_device(
     const std::filesystem::path& outdir, std::string_view file_prefix) {
     m_impl->execute_device(outdir, file_prefix);
@@ -2120,6 +2279,10 @@ public:
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix) override {
         m_impl.execute(ts_e, ts_v, outdir, file_prefix);
+    }
+
+    void set_seed_slices(std::vector<SizeType> f_edges) override {
+        m_impl.set_seed_slices(std::move(f_edges));
     }
 
 private:

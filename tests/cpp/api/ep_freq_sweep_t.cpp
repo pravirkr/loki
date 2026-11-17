@@ -341,21 +341,34 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         CHECK_THROWS_AS(reloaded.load_cache(bad), std::runtime_error);
     }
 
-    // 8. A branch_max below the chunk's forecast (a plan from an older
-    // forecast) is rejected on load, so the CLI replans
+    // 8. Seed slices: a run's frequency cells in slices round-trip, and edges
+    // that do not split the chunk's cells are rejected.
     {
-        REQUIRE(orig_chunks[0].branch_max > 1);
-        const auto bad = outdir / "cache_bad_branch_max.h5";
-        std::filesystem::copy_file(
-            cache_file, bad, std::filesystem::copy_options::overwrite_existing);
-        {
-            const HighFive::File f(bad.string(), HighFive::File::ReadWrite);
-            f.getGroup("chunks")
-                .getGroup("chunk_0000")
-                .getAttribute("branch_max")
-                .write(orig_chunks[0].branch_max - 1);
-        }
-        CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
+        CHECK(orig_chunks[0].seed_slice_edges.empty());
+        CHECK(planner.get_stats().get_chunk_stats()[0].n_seed_slices == 1);
+        const loki::plans::FFAPlan<float> plan(orig_chunks[0].cfg);
+        const SizeType n_freq = plan.get_param_counts().back().back();
+        REQUIRE(n_freq >= 3);
+        const auto with_edges = [&](const std::string& filename,
+                                    const std::vector<SizeType>& edges) {
+            const auto path = outdir / filename;
+            std::filesystem::copy_file(
+                cache_file, path,
+                std::filesystem::copy_options::overwrite_existing);
+            const HighFive::File f(path.string(), HighFive::File::ReadWrite);
+            auto chunk = f.getGroup("chunks").getGroup("chunk_0000");
+            chunk.unlink("seed_slice_edges");
+            chunk.createDataSet("seed_slice_edges", edges);
+            return path;
+        };
+        const std::vector<SizeType> edges{0, n_freq / 3, n_freq};
+        reloaded.load_cache(with_edges("cache_slices.h5", edges));
+        CHECK(reloaded.get_chunk_cfgs()[0].seed_slice_edges == edges);
+        CHECK(reloaded.get_stats().get_chunk_stats()[0].n_seed_slices == 2);
+        CHECK_THROWS_AS(
+            reloaded.load_cache(
+                with_edges("cache_bad_slices.h5", {0, n_freq / 3, n_freq + 1})),
+            std::invalid_argument);
     }
 }
 
@@ -750,17 +763,117 @@ TEST_CASE("EPRegionPlanner accepts a plan cache written on the other backend",
     const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
     const EPRegionPlanner<float> planner(cfg, 0.1F, "taylor", 0.1F, cache_file);
     {
-        // Relabel the plan as a CUDA plan. The chunks stay as planned, and the
-        // loader rechecks the peak with the CPU policy.
+        // Relabel the plan as a CUDA plan, with the other backend's chunk
+        // memory. The chunks stay as planned, and the loader rechecks the
+        // peak and each chunk's memory with the CPU policy.
         const HighFive::File f(cache_file.string(), HighFive::File::ReadWrite);
         f.getAttribute("ep_backend").write(std::string("cuda"));
         f.getAttribute("ep_memory_model_kind").write(std::string("cuda"));
+        const auto chunks = f.getGroup("chunks");
+        for (const auto& name : chunks.listObjectNames()) {
+            chunks.getGroup(name).getAttribute("chunk_memory_gb").write(99.0);
+        }
     }
     const EPRegionPlanner<float> reloaded(cfg, 0.1F, "taylor", 0.1F,
                                           cache_file);
     REQUIRE(reloaded.get_nchunks() == planner.get_nchunks());
     CHECK(reloaded.get_stats().get_max_memory_gb() ==
           planner.get_stats().get_max_memory_gb());
+    const auto& planned = planner.get_stats().get_chunk_stats();
+    const auto& loaded  = reloaded.get_stats().get_chunk_stats();
+    for (SizeType i = 0; i < planned.size(); ++i) {
+        CHECK(loaded[i].memory_gb ==
+              Catch::Approx(planned[i].memory_gb).epsilon(1e-12));
+        CHECK(reloaded.get_chunk_cfgs()[i].chunk_memory_gb ==
+              Catch::Approx(planned[i].memory_gb).epsilon(1e-12));
+    }
+}
+
+namespace {
+
+/// A run's final leaves as sorted rows of (score, parameters), order-free.
+std::vector<std::vector<double>> sorted_leaves(const HighFive::File& h5,
+                                               const std::string& run) {
+    const auto scores =
+        h5.getDataSet(run + "/scores").read<std::vector<float>>();
+    const auto params =
+        h5.getDataSet(run + "/param_sets")
+            .read<std::vector<std::vector<std::vector<double>>>>();
+    REQUIRE(params.size() == scores.size());
+    std::vector<std::vector<double>> rows;
+    for (SizeType i = 0; i < scores.size(); ++i) {
+        std::vector<double> row{static_cast<double>(scores[i])};
+        for (const auto& p : params[i]) {
+            row.insert(row.end(), p.begin(), p.end());
+        }
+        rows.push_back(std::move(row));
+    }
+    std::ranges::sort(rows);
+    return rows;
+}
+
+} // namespace
+
+TEST_CASE("EPFreqSweep prunes a planned chunk in seed slices exactly",
+          "[ep_freq_sweep]") {
+    // A plan whose chunk carries seed slices (as the planner sets them under
+    // a tight limit): the CPU sweep must give the final leaves of the same
+    // chunk pruned with every seed at once.
+    const TempDir outdir("loki-ep-sweep-slices");
+    const auto cfg    = make_test_cfg(4.0, 140.0, 142.0, /*n_threads=*/2);
+    auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps());
+    constexpr double kFSignal = 141.0;
+    for (SizeType i = 0; i < ts_e.size(); ++i) {
+        const double phase =
+            std::fmod(static_cast<double>(i) * cfg.get_tsamp() * kFSignal, 1.0);
+        if (phase < 0.05) {
+            ts_e[i] += 4.0F;
+        }
+    }
+    const std::vector<SizeType> ref_segs{2U, 4U};
+    const auto whole_cache  = outdir / "whole.h5";
+    const auto sliced_cache = outdir / "sliced.h5";
+    {
+        EPFreqSweep whole(cfg, false, 0.1F, "taylor", 0.1F, {}, whole_cache,
+                          std::nullopt, ref_segs);
+        whole.execute(ts_e, ts_v, outdir.path(), "whole");
+    }
+    std::filesystem::copy_file(whole_cache, sliced_cache);
+    {
+        const HighFive::File f(sliced_cache.string(),
+                               HighFive::File::ReadWrite);
+        REQUIRE(f.getAttribute("nchunks").read<SizeType>() == 1);
+        auto chunk = f.getGroup("chunks").getGroup("chunk_0000");
+        // The chunk's frequency cells, as the plan cache loader sees them.
+        const loki::plans::FFAPlan<float> plan(cfg.get_updated_ep_config(
+            chunk.getAttribute("nbins").read<SizeType>(),
+            chunk.getAttribute("eta").read<double>(),
+            chunk.getAttribute("actual_f_start").read<double>(),
+            chunk.getAttribute("actual_f_end").read<double>()));
+        const auto n_freq = plan.get_param_counts().back().back();
+        REQUIRE(n_freq >= 3);
+        chunk.unlink("seed_slice_edges");
+        chunk.createDataSet("seed_slice_edges",
+                            std::vector<SizeType>{0, 1, n_freq / 2, n_freq});
+    }
+    {
+        EPFreqSweep sliced(cfg, false, 0.1F, "taylor", 0.1F, {}, sliced_cache,
+                           std::nullopt, ref_segs);
+        sliced.execute(ts_e, ts_v, outdir.path(), "sliced");
+    }
+    const HighFive::File whole_h5((outdir / "whole_ep_results.h5").string(),
+                                  HighFive::File::ReadOnly);
+    const HighFive::File sliced_h5((outdir / "sliced_ep_results.h5").string(),
+                                   HighFive::File::ReadOnly);
+    const auto runs = whole_h5.getGroup("/chunks/chunk_0000/runs");
+    REQUIRE(runs.listObjectNames().size() == ref_segs.size());
+    for (const auto& name : runs.listObjectNames()) {
+        CAPTURE(name);
+        const auto path     = "/chunks/chunk_0000/runs/" + name;
+        const auto expected = sorted_leaves(whole_h5, path);
+        REQUIRE(!expected.empty());
+        CHECK(sorted_leaves(sliced_h5, path) == expected);
+    }
 }
 
 TEST_CASE("EPFreqSweep handles non-power-of-two nsamps without empty segments",

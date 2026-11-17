@@ -47,9 +47,18 @@ struct EPChunkConfig {
     SizeType coord_size{0};
     SizeType fold_size{0};
     /// Transient scratch of this chunk's FFA, live while the EP workspace is
-    /// (bytes; CUDA backend only, zero on the CPU). Shared across chunks as
-    /// the maximum.
+    /// (bytes): the brute-fold tables on CUDA, the Fourier phase-step table
+    /// on the CPU. Shared across chunks as the maximum.
     SizeType ffa_transient_bytes{0};
+    /// Seed slices: each run prunes its seeds in sequential slices of
+    /// frequency cells `[seed_slice_edges[s], seed_slice_edges[s + 1])` (every
+    /// acceleration) over the same FFA output, so the tree holds one slice at
+    /// a time. Empty: one slice, every seed at once. max_sugg,
+    /// predicted_peak and predicted_live are then those of the largest slice.
+    std::vector<SizeType> seed_slice_edges{};
+    /// Forecast final leaves of a run that a CPU worker holds between its
+    /// slices (zero with one slice).
+    SizeType held_final_leaves{0};
 };
 
 /**
@@ -77,6 +86,8 @@ struct EPChunkStats {
     /// Memory of this chunk alone (EPChunkConfig::chunk_memory_gb).
     double memory_gb{0.0};
     double overlap_fraction{0.0};
+    /// Seed slices of each run (1: every seed at once).
+    SizeType n_seed_slices{1};
 };
 
 /**

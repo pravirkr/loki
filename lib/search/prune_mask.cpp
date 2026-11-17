@@ -7,7 +7,12 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <utility>
+#include <vector>
+
+#include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
@@ -240,6 +245,61 @@ SizeType GridMask::select_seeds(std::span<SizeType> keep_indices,
     for (SizeType i = 0; i < n_seeds; ++i) {
         if (!is_masked(i)) {
             keep_indices[n_keep++] = i;
+        }
+    }
+    return n_keep;
+}
+
+std::vector<SizeType> even_seed_slice_edges(SizeType n_slices,
+                                            SizeType n_freq) {
+    const auto k =
+        std::clamp<SizeType>(n_slices, 1, std::max<SizeType>(n_freq, 1));
+    std::vector<SizeType> edges(k + 1);
+    for (SizeType s = 0; s <= k; ++s) {
+        edges[s] = (s * n_freq) / k;
+    }
+    return edges;
+}
+
+void check_seed_slice_edges(std::span<const SizeType> edges, SizeType n_freq) {
+    if (edges.empty()) {
+        return;
+    }
+    bool ok = edges.size() >= 2 && edges.front() == 0 && edges.back() == n_freq;
+    for (SizeType i = 1; ok && i < edges.size(); ++i) {
+        ok = edges[i] > edges[i - 1];
+    }
+    if (!ok) {
+        throw std::invalid_argument(fmt::format(
+            "Seed slice edges must rise strictly from 0 to the {} frequency "
+            "cells, got [{}]",
+            n_freq, fmt::join(edges, ", ")));
+    }
+}
+
+SizeType select_slice_seeds(std::span<SizeType> keep_indices,
+                            SizeType n_accel,
+                            SizeType n_freq,
+                            SeedSlice slice,
+                            const GridMask& mask) {
+    error_check::check(slice.f_begin <= slice.f_end && slice.f_end <= n_freq,
+                       "select_slice_seeds: slice outside the grid");
+    error_check::check_greater_equal(
+        keep_indices.size(), n_accel * (slice.f_end - slice.f_begin),
+        "select_slice_seeds: keep_indices too small");
+    const bool masked = !mask.empty();
+    if (masked) {
+        error_check::check(mask.get_n_accel() == n_accel &&
+                               mask.get_n_freq() == n_freq,
+                           "select_slice_seeds: mask grid does not match");
+    }
+    SizeType n_keep = 0;
+    for (SizeType ia = 0; ia < n_accel; ++ia) {
+        for (SizeType i = (ia * n_freq) + slice.f_begin;
+             i < (ia * n_freq) + slice.f_end; ++i) {
+            if (!masked || !mask.is_masked(i)) {
+                keep_indices[n_keep++] = i;
+            }
         }
     }
     return n_keep;

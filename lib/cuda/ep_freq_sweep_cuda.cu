@@ -395,6 +395,7 @@ public:
                     kBatchSize, m_poly_basis, m_device_id,
                     m_chunk_rfi.empty() ? algorithms::PruneRFIConfig{}
                                         : m_chunk_rfi[i]);
+                chunk_ep.set_seed_slices(chunk.seed_slice_edges);
                 chunk_ep.execute_device(tmp_dir, chunk_prefix);
             }
             cuda_utils::check_cuda_call(

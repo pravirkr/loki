@@ -63,8 +63,15 @@ void bind_prune(py::module_& m) {
         .def_readonly("fold_size", &EPChunkConfig::fold_size)
         .def_readonly("ffa_transient_bytes",
                       &EPChunkConfig::ffa_transient_bytes,
-                      "Transient FFA scratch of this chunk (bytes). Counted "
-                      "in the sweep peak on CUDA; zero on the CPU.");
+                      "Transient FFA scratch of this chunk (bytes): the "
+                      "brute-fold tables on CUDA, the Fourier phase-step "
+                      "table on the CPU. Counted in the sweep peak.")
+        .def_readonly("seed_slice_edges", &EPChunkConfig::seed_slice_edges,
+                      "Frequency-cell edges of the seed slices each run "
+                      "prunes in turn; empty for one slice.")
+        .def_readonly("held_final_leaves", &EPChunkConfig::held_final_leaves,
+                      "Forecast final leaves a CPU worker holds between a "
+                      "run's seed slices (zero for one slice).");
 
     py::class_<EPChunkStats>(m_prune, "EPChunkStats")
         .def_readonly("chunk_id", &EPChunkStats::chunk_id)
@@ -88,7 +95,8 @@ void bind_prune(py::module_& m) {
         .def_readonly("memory_gb", &EPChunkStats::memory_gb,
                       "Memory (GB) of this chunk run alone: its workers, its "
                       "own shared FFA buffers and the input series.")
-        .def_readonly("overlap_fraction", &EPChunkStats::overlap_fraction);
+        .def_readonly("overlap_fraction", &EPChunkStats::overlap_fraction)
+        .def_readonly("n_seed_slices", &EPChunkStats::n_seed_slices);
 
     py::class_<EPRegionStats>(m_prune, "EPRegionStats")
         .def_property_readonly("max_sugg", &EPRegionStats::get_max_sugg)

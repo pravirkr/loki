@@ -36,8 +36,10 @@ void interpolate_block(const BlockGrid& grid,
 /**
  * @brief Median of the valid samples (`mask != 0`) of every block.
  *
- * @p usable is 1 where the block has at least `max(3, ceil(min_good *
- * len))` valid samples; @p good is the valid fraction.
+ * @p usable is 1 where the block has at least `min_valid(min_good, len,
+ * block)` valid samples (preprocess_robust.hpp), or, with no mask (every
+ * sample valid), any sample at all, so a short tail block of an unmasked
+ * series stays usable; @p good is the valid fraction.
  */
 void block_medians(std::span<const float> x,
                    std::span<const std::uint8_t> mask,

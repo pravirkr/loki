@@ -77,11 +77,9 @@ def compare_values(a, b, rtol: float) -> bool:
     if a.dtype.kind in "fc":
         return a.tobytes() == b.tobytes()
     if a.dtype.names:
-        return (
-            a.tobytes() == b.tobytes()
-            if rtol == 0
-            else all(compare_values(a[n], b[n], rtol) for n in a.dtype.names)
-        )
+        # Field by field: a compound's padding bytes are not data (the
+        # writers copy them from uninitialised memory).
+        return all(compare_values(a[n], b[n], rtol) for n in a.dtype.names)
     return bool(np.array_equal(a, b))
 
 
@@ -115,6 +113,10 @@ def compare_file(fa, fb, rtol, extra, report):
     for n in sorted(names_a & names_b):
         oa, ob = fa[n], fb[n]
         attrs(n, oa, ob)
+        if isinstance(oa, h5py.Dataset) != isinstance(ob, h5py.Dataset):
+            report(f"  object {n}: a dataset on one side, a group on the other")
+            ok = False
+            continue
         if isinstance(oa, h5py.Dataset):
             if volatile(n.rsplit("/", 1)[-1], extra):
                 continue
