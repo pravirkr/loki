@@ -621,7 +621,19 @@ the widest chunk of all (249-504 Hz, from a 30 GB plan) 19. A chunk's FFA
 grid is laid out from its limits, so any change of the bounds moves every
 grid point; a signal near the thresholds is caught or not by where the
 points fall. Recovery has no trend with width or f_max, so the chunk width
-is not a sensitivity lever.
+is not a sensitivity lever. That search ran circular at eta 2, where the
+loss is largest (next paragraph); at eta 1 the same signal is found in 31 of
+32 runs.
+
+Tolerance eta and a real signal (S/N about 20 when folded): on one chunk
+around it, 32 runs, the runs scoring 8 or more and the median best score
+were, for a jerk search, 29 / 18.2 at eta 1, 26 / 16.7 at 1.25, 22 / 14.6
+at 1.5, 20 / 10.1 at 1.75 and 18 / 11.1 at 2; for a circular search 31 /
+18.1, 31 / 18.0, 28 / 14.3, 20 / 10.5 and 2 / 0 (wall time of the whole
+command, planning included: 127, 58, 39, 21 and 15 s). The jerk search
+loses smoothly; the circular one keeps eta 1 sensitivity to 1.25 and loses
+the signal at 2. Pick eta from such a curve, measured on the search's own
+configuration.
 
 Reserve of a slice (docs/memory.md): on the 495 Hz chunk above, which holds a
 bright pulsar, the busiest slice held 65-100 cells' worth of leaves beyond
