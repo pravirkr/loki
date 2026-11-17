@@ -79,7 +79,8 @@ constexpr SizeType ep_cuda_batch_for_nbins(SizeType nbins,
     return std::min(max_batch, wanted);
 }
 
-/// Version of this model. Bump it with every change to the formulas: plan
+/// Version of this model. Bump it with every change to the formulas and to
+/// the branching forecast (a cached branch_max is trusted on load): plan
 /// caches store it and are rejected when it differs.
 ///  3: CUDA policy (EPMemoryKind), transient FFA scratch of the CUDA model.
 ///  4: the Kadane scorer is fused too, so it no longer keeps the irfft scratch.

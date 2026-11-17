@@ -206,8 +206,10 @@ Differences from the CPU policy:
   crackle split, and it is reached
   (`tests/cpp/internal/circ_branch_bound_t.cpp` drives the kernels against
   it). With `use_conservative_tile` the widths are replayed with that tile.
-  A cached plan whose `branch_max` is below the chunk's forecast is
-  replanned. If a minimum-width CUDA chunk cannot fit (after the group
+  A cached `branch_max` is trusted on load: every input of the forecast is
+  part of the cache key, and a forecast change bumps the memory model
+  version (replaying the forecast on every load cost ~0.4 s). If a
+  minimum-width CUDA chunk cannot fit (after the group
   `branch_max` replan in [Width search](#width-search)), planning retries with
   successively halved batches, down to one parent. It never reduces forecast capacity
   to force a fit. The chosen batch is stored per chunk

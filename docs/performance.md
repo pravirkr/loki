@@ -577,6 +577,12 @@ one minimum chunk had halved the batch of 14 of 20 chunks (179 s). The
 to 13 s); the 32-run search took 310 s against 320 s. The same search on the
 CPU now plans at 2.2 and 2.4 GB, where a minimum chunk failed by 0.01 GB.
 
+Plan cache load: loading a cached plan replayed every chunk's branching
+forecast to recheck its `branch_max` (0.38 of 0.43 s per load on a 7-chunk
+jerk plan; the CLI loads it twice per file). The cache key and memory model
+version already cover every input of the forecast, so loading trusts the
+cached value: 2 ms per load.
+
 The 400-720 Hz part of that 720 Hz search (2^26 samples, 30 GB, CUDA) runs:
 6 chunks at batch 65536 with 16 to 54 seed slices, planned in 11 s; 2 runs
 searched in 994 s (about 8 minutes per run, so about 4.4 hours for 32 runs),

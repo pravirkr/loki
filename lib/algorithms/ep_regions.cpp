@@ -775,17 +775,10 @@ public:
             auto chunk_cfg = m_base_cfg.get_updated_ep_config(
                 nbins, eta, actual_f_start, actual_f_end);
             const plans::FFAPlan<FoldType> plan(chunk_cfg);
-            // A plan from an older forecast can hold a smaller branch_max
-            // than the kernels reach (circular plans before the crackle
-            // widths were replayed): replan rather than fail mid-search.
-            const auto branch_max_needed = detail::compute_branch_max(
-                plan.forecast_branching(m_poly_basis).max_children);
-            if (branch_max < branch_max_needed) {
-                throw std::invalid_argument(fmt::format(
-                    "EPRegionPlanner: cached branch_max {} of chunk {} is "
-                    "below the forecast {}",
-                    branch_max, i, branch_max_needed));
-            }
+            // branch_max is trusted as cached: every input of the branching
+            // forecast is part of the cache key, and a forecast change bumps
+            // kEPMemoryModelVersion. Replaying the forecast here cost ~0.4 s
+            // per load.
             SizeType ncoords = plan.get_ncoords().back();
             if (chunk_grp.hasAttribute("ncoords")) {
                 chunk_grp.getAttribute("ncoords").read(ncoords);
