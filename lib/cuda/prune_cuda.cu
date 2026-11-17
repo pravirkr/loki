@@ -1057,15 +1057,17 @@ private:
 
         if (m_result_sink) {
             pipelines::detail::EPResultPayload payload{
-                .run_name     = std::string(run_name),
-                .snail_scheme = m_snail_scheme.get_data(),
-                .leaves       = std::move(leaves_report_h),
-                .scores       = std::move(scores_report_h),
-                .scores_ep    = std::move(scores_ep_report_h),
-                .widths       = std::move(widths_report_h),
-                .gflops       = compute_total_prune_gflops(),
-                .nparams      = m_cfg.get_nparams(),
-                .stats        = m_pstats,
+                .run_name          = std::string(run_name),
+                .snail_scheme      = m_snail_scheme.get_data(),
+                .leaves            = std::move(leaves_report_h),
+                .scores            = std::move(scores_report_h),
+                .scores_ep         = std::move(scores_ep_report_h),
+                .widths            = std::move(widths_report_h),
+                .gflops            = compute_total_prune_gflops(),
+                .nparams           = m_cfg.get_nparams(),
+                .stats             = m_pstats,
+                .harvest           = {},
+                .n_harvested_total = 0,
             };
             if (m_rfi != nullptr && m_rfi->has_harvest()) {
                 payload.harvest           = std::move(m_harvest);
