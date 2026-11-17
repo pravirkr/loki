@@ -577,6 +577,12 @@ one minimum chunk had halved the batch of 14 of 20 chunks (179 s). The
 to 13 s); the 32-run search took 310 s against 320 s. The same search on the
 CPU now plans at 2.2 and 2.4 GB, where a minimum chunk failed by 0.01 GB.
 
+Region leftovers: the 720 Hz search planned an 82.9 Hz chunk and a 1.44 Hz
+sliver at the bottom of one region (nbins 16); split evenly they are two
+42.2 Hz chunks (12 + 1 slices became 9 + 5), with the same peak. Searching
+just those two chunks (2 runs) took 87.6 s as a chunk plus sliver and 88.7 s
+split: the split removes a near-empty chunk, not search time.
+
 Plan cache load: loading a cached plan replayed every chunk's branching
 forecast to recheck its `branch_max` (0.38 of 0.43 s per load on a 7-chunk
 jerk plan; the CLI loads it twice per file). The cache key and memory model

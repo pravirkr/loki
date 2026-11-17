@@ -30,7 +30,11 @@ constexpr double kBisectionToleranceHz = 1.0e-2;
 constexpr double kMinChunkWidthHz      = 1.0e-2;
 constexpr double kRelativeTolerance    = 1.0e-4;
 constexpr double kSliverFactor         = 4.0;
-constexpr SizeType kMaxBisectionSteps  = 50;
+/// A region's leftover below this fraction of the chunk above it is not
+/// planned as its own chunk: the two share the band evenly instead. A narrow
+/// chunk repeats a whole FFA and its Doppler padding for a sliver of band.
+constexpr double kRebalanceFraction   = 0.25;
+constexpr SizeType kMaxBisectionSteps = 50;
 /// Planning passes spent searching a smaller fixed shared FFA size.
 constexpr SizeType kMaxCapSearchSteps = 8;
 /// Most seed slices of a chunk wider than the minimum width. Past it the
@@ -1199,6 +1203,26 @@ private:
                 throw std::runtime_error(fmt::format(
                     "EPRegionPlanner: no progress in [{:08.3f}, {:08.3f}] Hz.",
                     f_start, current_f_end));
+            }
+            // A leftover far narrower than this chunk would be planned as
+            // its own sliver: split the rest of the region evenly between
+            // the two instead, if both halves fit.
+            const double remainder = nominal_start - f_start;
+            if (remainder > 0.0 &&
+                remainder <
+                    kRebalanceFraction * (current_f_end - nominal_start)) {
+                const double mid = f_start + (0.5 * (current_f_end - f_start));
+                auto upper       = size_fn(mid, current_f_end);
+                if (fits(upper).ok) {
+                    place(mid, current_f_end, upper);
+                    auto lower = size_fn(f_start, mid);
+                    if (fits(lower).ok) {
+                        place(f_start, mid, lower);
+                        return;
+                    }
+                    current_f_end = mid;
+                    continue;
+                }
             }
             place(nominal_start, current_f_end, eval);
             current_f_end = nominal_start;

@@ -511,7 +511,11 @@ chunk would be infeasible.
 splits the region into chunks from its top frequency down, growing each chunk
 until the sweep would exceed the effective limit with it (bisection on the
 width, with probes beyond the bracket since branching changes discretely with
-the band). A probe simulates nothing. Its population is the region design's
+the band). When the chunk just found leaves a remainder of the region below a
+quarter of its own width (`kRebalanceFraction`), the chunk and the remainder
+share the band evenly instead, if both halves fit: a sliver chunk would repeat
+a whole FFA and its Doppler padding for a small part of the band. A probe
+simulates nothing. Its population is the region design's
 on the probe's own branching pattern `bp'`:
 
 ```text

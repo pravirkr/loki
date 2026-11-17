@@ -941,3 +941,39 @@ TEST_CASE("EP chunking starts a group at the branch_max a later chunk needs",
         CHECK(floored);
     }
 }
+
+TEST_CASE("EP chunking splits a region's leftover evenly instead of a sliver",
+          "[ep_chunking]") {
+    // Filling a region from its top leaves whatever remains at its bottom;
+    // a leftover far narrower than the chunk above it is shared evenly with
+    // that chunk instead of planned as its own sliver.
+    const auto cfg     = make_cfg(70.0, 145.0, /*nthreads=*/2);
+    const auto designs = make_designs(cfg, /*first_max_sugg=*/2.0e6);
+    const auto ctx     = make_ctx(cfg);
+    bool split_seen    = false;
+    for (double limit = 0.4; limit >= 0.12; limit *= 0.95) {
+        CAPTURE(limit);
+        const auto plan = plan_chunks<float>(cfg, "taylor", designs,
+                                             /*max_drift=*/0.0, limit, ctx);
+        check_plan_fits(plan, ctx, limit);
+        const auto& chunks = plan.chunk_cfgs;
+        for (SizeType i = 1; i < chunks.size(); ++i) {
+            const auto& upper = chunks[i - 1];
+            const auto& lower = chunks[i];
+            if (upper.cfg.get_nbins() != lower.cfg.get_nbins()) {
+                continue; // a region boundary
+            }
+            const double w_upper = upper.nominal_f_end - upper.nominal_f_start;
+            const double w_lower = lower.nominal_f_end - lower.nominal_f_start;
+            const bool region_bottom =
+                i + 1 == chunks.size() ||
+                chunks[i + 1].cfg.get_nbins() != lower.cfg.get_nbins();
+            if (region_bottom) {
+                CHECK(w_lower >= 0.25 * w_upper);
+                split_seen =
+                    split_seen || std::abs(w_lower - w_upper) < 1e-9 * w_upper;
+            }
+        }
+    }
+    CHECK(split_seen);
+}

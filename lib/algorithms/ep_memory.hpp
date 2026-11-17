@@ -100,7 +100,9 @@ constexpr SizeType ep_cuda_batch_for_nbins(SizeType nbins,
 ///     holds the final leaves of a run's finished slices.
 /// 17: a chunk group starts at the branch_max of a minimum chunk that only
 ///     fails by raising it (see plan_chunks).
-constexpr std::uint32_t kEPMemoryModelVersion = 17U;
+/// 18: a region's leftover below a quarter of the chunk above it is split
+///     evenly with that chunk instead of planned as a sliver.
+constexpr std::uint32_t kEPMemoryModelVersion = 18U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
