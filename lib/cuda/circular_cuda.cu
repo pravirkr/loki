@@ -383,13 +383,18 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
         validation_mask[tid] = 1U; // hole region — always preserve
         return;
     }
-    // Inside snap_region: omega_sq is guaranteed positive
-    const double omega_sq    = -snap / accel;
-    const double limit_accel = x_mass_const * pow(omega_sq, 2.0 / 3.0);
-    const bool valid_omega   = omega_sq < omega_max_sq;
-    // |d2| < x * omega^(4/3)
-    const bool valid_accel = fabs(accel) <= limit_accel;
-    validation_mask[tid]   = (valid_omega && valid_accel) ? 1 : 0;
+    // Kill only when the whole cell, widened by k widths, is too fast an
+    // orbit or too heavy a companion (see the CPU circ_taylor_validate_batch).
+    // accel_lo > 0 here (accel is significant).
+    const double k        = validation_significance;
+    const double snap_lo  = fabs(snap) - (k * dsnap);
+    const double snap_hi  = fabs(snap) + (k * dsnap);
+    const double accel_lo = fabs(accel) - (k * daccel);
+    const double accel_hi = fabs(accel) + (k * daccel);
+    const bool too_fast   = snap_lo > omega_max_sq * accel_hi;
+    const bool too_heavy =
+        accel_lo > x_mass_const * pow(snap_hi / accel_lo, 2.0 / 3.0);
+    validation_mask[tid] = (too_fast || too_heavy) ? 0U : 1U;
 }
 
 __global__ void

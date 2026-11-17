@@ -688,7 +688,17 @@ leaves 1.3-2.8 times as many leaves; widening them, 1.09-1.31 times. At
 P_orb = `p_orb_min` the checks as they are lower the best score in 6 of the 8
 cases (by 2.1-5.5) and lose runs scoring 8 or more in 5; widened, they recover
 as much as removing them does (same best score in all 32 cases). From
-1.1 `p_orb_min` the widening changes no best score. Most of the loss of
+1.1 `p_orb_min` the widening changes no best score. The widened checks are
+the default since 2026-11-18. Rerun with the resolve fix below (runs scoring
+8 or more, of 512): 350 as they were, 361 widened, 370 removed; at P_orb = T
+the old checks lowered the best score in all 8 cases (by 0.7-4.4), the
+widened ones in none. Each of the 9 runs the widened checks lose against
+none had its best leaf off the orbit (a CPU trace of one: every leaf only
+the unchecked search kept is 10 or more of 16 bins rms from the orbit and
+implies a period of 0.76-0.89 T). On the real 280 Hz binary pulsar (one
+chunk, 32 runs, eta 1) the widened checks keep the recovery (32 of 32,
+median 18.06) with 6.6 % more leaves and 8.5 % more wall time (139 against
+128 s, two pairs). Most of the loss of
 compact orbits is elsewhere: without an orbit the same search finds the
 signal in 14 of 16 runs (median best score 18.9); with the heavy companion
 at P_orb = T, even without the checks, in 4-9 runs (median 0-8.5). Traces of
@@ -713,9 +723,9 @@ frequency included) show two losses, the same with and without the checks:
   stage 34, a stage without branching. The no-orbit control's leaf, matching
   to 0.3-0.5 bins, scores 9.0 there. Already at stages 2-5 the matched
   orbit leaf scores 4.0 falling to 2.6 against the control's 4.0-4.6 at the
-  same match, so the deficit is not in the leaf's own parameters; whether it
-  is the score kept from coarser ancestors (earlier segments are not
-  refolded) or the folding of orbit leaves is not yet known.
+  same match. Not explained yet: such losses come in contiguous blocks of
+  reference segments that move with the orbital phase (all of 0-59 for one
+  phase), like the known loss of runs referenced near the orbit's nodes.
 
 Frequency of the moving-grid resolve (2026-11-18): on the moving grid a leaf
 keeps its seed's f0 and carries its own frequency offset in its velocity,

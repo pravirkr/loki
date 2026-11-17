@@ -1,4 +1,5 @@
 #include <array>
+#include <numbers>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -175,6 +176,37 @@ std::vector<loki::SizeType> validate_survivors(double omega_min_sq) {
     return origins;
 }
 
+// omega_max^2 = 1e-4 (p_orb_min = 2 pi / 0.01 s) and, separately, a mass
+// limit |accel| <= 1000 omega^(4/3); k = 5. The leaves marked "margin" are
+// killed by the point estimate omega^2 = -snap / accel but their cells,
+// widened by k widths, still reach the limit.
+constexpr double kPOrbMinFast = 2.0 * std::numbers::pi / 0.01;
+constexpr double kXMassHeavy  = 1000.0;
+
+const std::array<Leaf, 4> kFastLeaves = {
+    orbit_leaf(-2e-4, 1e-6, 1.0, 0.01),    // 0: omega^2 twice the limit
+    orbit_leaf(-1.2e-4, 1e-6, 1.0, 0.01),  // 1: wholly faster: killed
+    orbit_leaf(-1.08e-4, 1e-6, 1.0, 0.01), // 2: margin: kept
+    orbit_leaf(-0.9e-4, 1e-6, 1.0, 0.01),  // 3: slower than the limit
+};
+
+const std::array<Leaf, 3> kHeavyLeaves = {
+    orbit_leaf(-4e-4, 1e-7, 4.0, 0.01),   // 0: wholly too heavy: killed
+    orbit_leaf(-2.3e-4, 1e-6, 2.3, 0.05), // 1: margin: kept
+    orbit_leaf(-2e-4, 1e-6, 2.0, 0.05),   // 2: inside the mass limit
+};
+
+std::vector<loki::SizeType>
+orbit_survivors(std::span<const Leaf> leaves, double p_orb_min, double x_mass) {
+    auto batch = make_leaves(leaves);
+    std::vector<loki::SizeType> origins(leaves.size());
+    std::iota(origins.begin(), origins.end(), loki::SizeType{0});
+    const auto n = loki::core::circ_taylor_validate_batch(
+        batch, origins, leaves.size(), p_orb_min, 0.0, x_mass, kValidSig);
+    origins.resize(n);
+    return origins;
+}
+
 } // namespace
 
 TEST_CASE("p_orb_max kills only cells that are wholly slower orbits",
@@ -185,4 +217,12 @@ TEST_CASE("p_orb_max kills only cells that are wholly slower orbits",
     CHECK(validate_survivors(0.0) ==
           std::vector<loki::SizeType>{0, 1, 2, 3, 4, 5});
     CHECK(loki::core::circ_omega_min_sq(std::nullopt) == 0.0);
+}
+
+TEST_CASE("The p_orb_min and mass checks kill only cells wholly beyond them",
+          "[circular]") {
+    CHECK(orbit_survivors(kFastLeaves, kPOrbMinFast, kXMassHuge) ==
+          std::vector<loki::SizeType>{2, 3});
+    CHECK(orbit_survivors(kHeavyLeaves, kPOrbMinTiny, kXMassHeavy) ==
+          std::vector<loki::SizeType>{1, 2});
 }

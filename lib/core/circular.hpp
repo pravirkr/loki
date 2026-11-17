@@ -60,8 +60,11 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   memory::BranchingWorkspace& branch_ws);
 
 /// Kills the leaves that cannot be a circular orbit within the limits, at
-/// validation_significance cell widths: unbound (snap and acceleration of
-/// one sign), faster than p_orb_min, or beyond the mass limit. With
+/// validation_significance (k) cell widths: unbound (snap and acceleration
+/// of one sign, both significant), or, once both are significant, a cell
+/// that is wholly faster than p_orb_min (|snap| - k dsnap > omega_max^2
+/// (|accel| + k daccel)) or wholly beyond the mass limit (|accel| - k daccel
+/// > x_mass ((|snap| + k dsnap) / (|accel| - k daccel))^(2/3)). With
 /// omega_min_sq > 0 (ep.p_orb_max) it also kills a leaf whose
 /// acceleration is significant and whose whole cell is a slower orbit:
 /// |snap| + k dsnap < omega_min_sq (|accel| - k daccel). 0 skips that test.

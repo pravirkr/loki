@@ -459,6 +459,13 @@ circular EP search. `[ep]` `p_orb_min`, `m_c_max` and `m_p_min` are the orbit
 the circular pruning validates its leaves against, and the five-parameter
 drift above; a `[search.orbit]` table sets them from its own orbit, and setting
 them in `[ep]` as well is an error.
+Once a leaf's snap and acceleration are both significant
+(`validation_significance` k), the validation kills it only when its whole
+cell, widened by k widths, is faster than `p_orb_min` (`|snap| - k dsnap >
+omega_max^2 (|accel| + k daccel)`) or beyond the mass limit (`|accel| -
+k daccel > x_mass ((|snap| + k dsnap) / (|accel| - k daccel))^(2/3)`). It
+only removes leaves, and the noise forecasts do not model it, so they stay
+upper bounds.
 
 `[ep]` `p_orb_max` (seconds, off by default; circular searches only) targets
 the search at compact orbits. For a circular orbit `snap = -omega^2 accel` at

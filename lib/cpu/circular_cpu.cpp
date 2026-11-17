@@ -456,15 +456,23 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
         const bool snap_region =
             is_sig_snap && is_sig_accel && is_physical_snap;
         if (snap_region) {
-            // snap_region: apply physical validity checks
-            const double omega_sq = -snap / accel;
-            const double limit_accel =
-                x_mass_const * std::pow(omega_sq, kTwoThirds);
-
-            const bool valid_omega = omega_sq < omega_max_sq;
-            // |d2| < x * omega^(4/3)
-            const bool valid_accel = std::abs(accel) <= limit_accel;
-            if (!valid_omega || !valid_accel) {
+            // Kill only when the whole cell, widened by k widths, is too fast
+            // an orbit or too heavy a companion: the point estimate
+            // omega^2 = -snap / accel is uncertain by up to ~40 % near the
+            // significance gate. accel_lo > 0 here (accel is significant).
+            const double k        = validation_significance;
+            const double snap_lo  = std::abs(snap) - (k * dsnap);
+            const double snap_hi  = std::abs(snap) + (k * dsnap);
+            const double accel_lo = std::abs(accel) - (k * daccel);
+            const double accel_hi = std::abs(accel) + (k * daccel);
+            // omega^2 > omega_max^2 even at the cell's slowest orbit
+            const bool too_fast = snap_lo > omega_max_sq * accel_hi;
+            // |accel| > x omega^(4/3) even at the cell's smallest |accel|
+            // and largest omega^2
+            const bool too_heavy =
+                accel_lo >
+                x_mass_const * std::pow(snap_hi / accel_lo, kTwoThirds);
+            if (too_fast || too_heavy) {
                 continue;
             }
         }

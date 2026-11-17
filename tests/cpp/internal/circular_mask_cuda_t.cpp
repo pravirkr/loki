@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 #include <numeric>
 #include <utility>
 #include <vector>
@@ -295,6 +296,71 @@ TEST_CASE("CUDA circular validation with p_orb_max keeps the CPU's leaves",
         }
         CHECK(kept_gpu == kept);
         CHECK(kept.size() == (omega_min_sq > 0.0 ? n_leaves - 3 : n_leaves));
+    }
+}
+TEST_CASE("CUDA circular orbit checks keep the CPU's leaves",
+          "[circular][cuda]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    const loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    // (snap, dsnap, accel, daccel) on both sides of the p_orb_min and mass
+    // limits at k = 5; see the CPU test in circular_mask_t.cpp.
+    constexpr double kValidSig = 5.0;
+    struct Case {
+        double p_orb_min, x_mass;
+        std::vector<std::array<double, 4>> cells;
+        std::vector<SizeType> kept;
+    };
+    const std::vector<Case> cases = {
+        {2.0 * std::numbers::pi / 0.01,
+         1e6,
+         {{-2e-4, 1e-6, 1.0, 0.01},
+          {-1.2e-4, 1e-6, 1.0, 0.01},
+          {-1.08e-4, 1e-6, 1.0, 0.01},
+          {-0.9e-4, 1e-6, 1.0, 0.01}},
+         {2, 3}},
+        {1e-5,
+         1000.0,
+         {{-4e-4, 1e-7, 4.0, 0.01},
+          {-2.3e-4, 1e-6, 2.3, 0.05},
+          {-2e-4, 1e-6, 2.0, 0.05}},
+         {1, 2}},
+    };
+    for (const auto& c : cases) {
+        INFO("p_orb_min " << c.p_orb_min << " x_mass " << c.x_mass);
+        const SizeType n_leaves = c.cells.size();
+        std::vector<double> leaves(n_leaves * kLeavesStride, 0.0);
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            const SizeType lo = i * kLeavesStride;
+            leaves[lo + 2]    = c.cells[i][0];
+            leaves[lo + 3]    = c.cells[i][1];
+            leaves[lo + 6]    = c.cells[i][2];
+            leaves[lo + 7]    = c.cells[i][3];
+            leaves[lo + 12]   = 100.0;
+        }
+        auto leaves_cpu = leaves;
+        std::vector<SizeType> kept(n_leaves);
+        std::iota(kept.begin(), kept.end(), SizeType{0});
+        kept.resize(loki::core::circ_taylor_validate_batch(
+            leaves_cpu, kept, n_leaves, c.p_orb_min, 0.0, c.x_mass, kValidSig));
+
+        const thrust::device_vector<double> leaves_d(leaves);
+        thrust::device_vector<uint8_t> mask_d(n_leaves, 0);
+        loki::core::circ_taylor_validate_async_cuda(
+            loki::cuda_utils::as_span(leaves_d),
+            loki::cuda_utils::as_span(mask_d), n_leaves, c.p_orb_min, 0.0,
+            c.x_mass, kValidSig, nullptr);
+        sync_device();
+        const auto mask = to_host(mask_d);
+        std::vector<SizeType> kept_gpu;
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            if (mask[i] != 0U) {
+                kept_gpu.push_back(i);
+            }
+        }
+        CHECK(kept == c.kept);
+        CHECK(kept_gpu == kept);
     }
 }
 #endif // LOKI_ENABLE_CUDA
