@@ -159,7 +159,7 @@ public:
                 /*show=*/true, progress::ProgressBar::Kind::kPruning);
         }
 
-        initialize_run(ref_seg);
+        initialize_run(ffa_fold, ref_seg);
         if (n_slices == 1) {
             initialize(ffa_fold, ref_seg, actual_log_file, std::nullopt);
             prune_seeds(ffa_fold, ascend_levels, actual_log_file, bar.get(),
@@ -267,13 +267,18 @@ private:
         return m_seed_edges.empty() ? 1 : m_seed_edges.size() - 1;
     }
 
-    /// Per-run state, shared by the run's seed slices: the snail scheme and
+    /// Per-run state, shared by the run's seed slices: the snail scheme, the
+    /// seeds of every coordinate (each slice adds its own to the tree) and
     /// the RFI state (the mask grows with harvests across slices).
-    void initialize_run(SizeType ref_seg) {
-        const auto& world_tree = get_workspace().world_tree;
+    void initialize_run(std::span<const FoldType> ffa_fold, SizeType ref_seg) {
+        auto& ws               = get_workspace();
+        const auto& world_tree = ws.world_tree;
         const auto nsegments   = m_ffa_plan.get_nsegments_active();
         const auto tseg        = m_ffa_plan.get_tsegments().back();
         m_snail_scheme = psr_utils::MiddleOutScheme(nsegments, ref_seg, tseg);
+        m_prune_funcs->seed(
+            m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx()),
+            ws.seed_leaves, ws.seed_scores, m_snail_scheme.get_coord(0));
 
         // Per-run RFI state: start from the shared static mask
         m_mask.assign(*m_mask_base);
@@ -297,13 +302,11 @@ private:
         m_prune_level    = 0;
         m_prune_complete = false;
 
-        // Initialize the world tree with the first segment
+        // Initialize the world tree with the first segment (seeded once per
+        // run by initialize_run)
         const auto fold_segment =
             m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx());
-        const auto coord_init = m_snail_scheme.get_coord(m_prune_level);
-        auto n_leaves         = m_ffa_plan.get_ncoords().back();
-        m_prune_funcs->seed(fold_segment, ws.seed_leaves, ws.seed_scores,
-                            coord_init);
+        auto n_leaves           = m_ffa_plan.get_ncoords().back();
         SizeType n_seeds_masked = 0;
         if (slice) {
             // The slice's seeds, less the masked ones (the mask may have

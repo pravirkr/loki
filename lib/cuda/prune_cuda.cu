@@ -306,12 +306,19 @@ public:
         std::filesystem::path actual_result_file = result_file.value_or(
             outdir / fmt::format("tmp_{}_results.h5", run_name));
 
-        initialize_run(ref_seg);
+        initialize_run(ffa_fold, ref_seg, m_stream);
         const auto n_slices = get_n_seed_slices();
+        // The tree restarts with every slice: its largest live count and its
+        // overload trims over the run.
+        const auto& world_tree = get_workspace().world_tree;
+        SizeType peak_live     = 0;
+        SizeType n_overloads   = 0;
         if (n_slices == 1) {
             initialize(ffa_fold, ref_seg, m_stream, std::nullopt);
             spdlog::debug("Pruning run {:03d}: initialized", ref_seg);
             prune_seeds(ffa_fold, ascend_levels);
+            peak_live   = world_tree.peak_live();
+            n_overloads = world_tree.overload_count();
             // Write results (after transforming to middle of the data)
             RunResults results;
             collect_survivors(results);
@@ -326,6 +333,8 @@ public:
                            search::SeedSlice{.f_begin = m_seed_edges[s],
                                              .f_end   = m_seed_edges[s + 1]});
                 prune_seeds(ffa_fold, ascend_levels);
+                peak_live = std::max(peak_live, world_tree.peak_live());
+                n_overloads += world_tree.overload_count();
                 collect_survivors(results);
                 // Resolved leaves are not counted on the GPU.
                 results.stats.merge_slice(m_pstats, /*sum_resolved=*/false);
@@ -347,8 +356,7 @@ public:
 
         spdlog::debug(
             "Pruning run {:03d}: complete (peak live {}, overload trims {})",
-            ref_seg, get_workspace().world_tree.peak_live(),
-            get_workspace().world_tree.overload_count());
+            ref_seg, peak_live, n_overloads);
         spdlog::debug("Pruning run {:03d}: stats: {}", ref_seg,
                       m_pstats.get_stats_summary_cuda(timer.stop()));
     }
@@ -662,7 +670,20 @@ private:
                       cuda::std::span<const float> seed_scores,
                       cudaStream_t stream) {
         std::vector<uint32_t> keep_u32(keep.begin(), keep.begin() + n_keep);
-        m_seed_keep_d.resize(std::max<SizeType>(n_keep, 1));
+        // Room for the largest slice's seeds (every seed without slices), so
+        // a later slice with more unmasked seeds allocates nothing.
+        if (m_seed_keep_d.size() < std::max<SizeType>(n_keep, 1)) {
+            SizeType room = m_ffa_plan.get_ncoords().back();
+            if (!m_seed_edges.empty()) {
+                SizeType widest = 0;
+                for (SizeType e = 0; e + 1 < m_seed_edges.size(); ++e) {
+                    widest =
+                        std::max(widest, m_seed_edges[e + 1] - m_seed_edges[e]);
+                }
+                room = get_n_accel() * widest;
+            }
+            m_seed_keep_d.resize(std::max({room, n_keep, SizeType{1}}));
+        }
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(thrust::raw_pointer_cast(m_seed_keep_d.data()),
                             keep_u32.data(), n_keep * sizeof(uint32_t),
@@ -676,13 +697,31 @@ private:
                                     "EP seed upload wait failed");
     }
 
-    /// Per-run state, shared by the run's seed slices: the snail scheme and
+    /// The seeds of this chunk's coordinates in the workspace (a sweep
+    /// workspace is sized for the largest chunk in its group).
+    [[nodiscard]] std::pair<cuda::std::span<double>, cuda::std::span<float>>
+    seed_buffers() {
+        auto& ws            = get_workspace();
+        const auto n_coords = m_ffa_plan.get_ncoords().back();
+        return {cuda_utils::as_span(ws.seed_leaves_d)
+                    .first(n_coords * ws.world_tree.get_leaves_stride()),
+                cuda_utils::as_span(ws.seed_scores_d).first(n_coords)};
+    }
+
+    /// Per-run state, shared by the run's seed slices: the snail scheme, the
+    /// seeds of every coordinate (each slice adds its own to the tree) and
     /// the RFI state (the mask grows with harvests across slices).
-    void initialize_run(SizeType ref_seg) {
+    void initialize_run(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                        SizeType ref_seg,
+                        cudaStream_t stream) {
         const auto& world_tree = get_workspace().world_tree;
         const auto nsegments   = m_ffa_plan.get_nsegments_active();
         const auto tseg        = m_ffa_plan.get_tsegments().back();
         m_snail_scheme = psr_utils::MiddleOutScheme(nsegments, ref_seg, tseg);
+        const auto [seed_leaves, seed_scores] = seed_buffers();
+        m_prune_funcs->seed(
+            m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx()),
+            seed_leaves, seed_scores, m_snail_scheme.get_coord(0), stream);
 
         // Per-run RFI state: start from the chunk's static mask.
         m_mask_on_device = false;
@@ -712,21 +751,13 @@ private:
         m_prune_level    = 0;
         m_prune_complete = false;
 
-        // Initialize the world tree with the first segment
+        // Initialize the world tree with the first segment (seeded once per
+        // run by initialize_run)
         const auto fold_segment =
             m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx());
-        const auto coord_init = m_snail_scheme.get_coord(m_prune_level);
-        auto n_leaves         = m_ffa_plan.get_ncoords().back();
-        // A sweep workspace is sized for the largest chunk in its group.
-        // Seed only this chunk's active coordinates, not the whole allocation.
-        const auto seed_leaves =
-            cuda_utils::as_span(ws.seed_leaves_d)
-                .first(n_leaves * world_tree.get_leaves_stride());
-        const auto seed_scores =
-            cuda_utils::as_span(ws.seed_scores_d).first(n_leaves);
-        m_prune_funcs->seed(fold_segment, seed_leaves, seed_scores, coord_init,
-                            stream);
-        SizeType n_seeds_masked = 0;
+        auto n_leaves                         = m_ffa_plan.get_ncoords().back();
+        const auto [seed_leaves, seed_scores] = seed_buffers();
+        SizeType n_seeds_masked               = 0;
         if (slice) {
             // The slice's seeds, less the masked ones (the mask may have
             // grown by harvests in earlier slices of this run).
