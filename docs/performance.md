@@ -635,6 +635,16 @@ loses smoothly; the circular one keeps eta 1 sensitivity to 1.25 and loses
 the signal at 2. Pick eta from such a curve, measured on the search's own
 configuration.
 
+Counting circular leaves by basis (`level_stats_circular`): on that chunk,
+CUDA, 4 runs of 127 stages, a pass over each stage's survivors after the
+stage cost 0.27 s of 15.4 s (1.8 %), whether it used Thrust counts or one
+kernel with warp ballots: the cost is the extra strided read of every leaf.
+Counting in the transform kernel, which already holds each leaf and its
+class, costs nothing measurable (15.43 vs 15.46 s, three pairs, run-to-run
+spread 0.1 s), and the per-level counts copy back once per prune instead of
+syncing every stage. Writing the basis code into the leaf costs nothing
+measurable either (0.3 %, inside the spread).
+
 Reserve of a slice (docs/memory.md): on the 495 Hz chunk above, which holds a
 bright pulsar, the busiest slice held 65-100 cells' worth of leaves beyond
 its noise forecast at 32 and 64 slices (the room for one CUDA batch covered

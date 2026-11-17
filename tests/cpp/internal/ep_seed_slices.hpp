@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -35,6 +36,8 @@ struct RunResults {
     std::string name;
     std::vector<SliceLeaf> leaves;
     std::vector<search::PruneStats> stats;
+    /// level_stats_circular rows (level, snap, crackle); circular runs only.
+    std::vector<std::array<std::uint64_t, 3>> circular;
     SizeType n_harvested_total{0};
     /// The per-run reduction's counts, when the run was reduced:
     /// n_final_leaves, n_leaves_above_snr_min, n_cell_dropped, n_dominated,

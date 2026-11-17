@@ -391,8 +391,22 @@ std::vector<Candidate> read_candidates(const HighFive::File& file,
                 .read_raw(errors.data());
         }
     }
+    // Columns added later; older files lack them.
+    std::vector<std::uint8_t> bases;
+    std::vector<float> periods;
+    if (file.exist("leaf_basis") && file.exist("p_orb")) {
+        bases   = read_rows<std::uint8_t>(file, "leaf_basis", start, count);
+        periods = read_rows<float>(file, "p_orb", start, count);
+    }
     for (std::size_t i = 0; i < count; ++i) {
         auto& c = records[i];
+        if (!bases.empty()) {
+            if (!search::is_known_leaf_basis(bases[i])) {
+                throw std::invalid_argument("unknown candidate leaf basis");
+            }
+            c.leaf_basis = static_cast<search::LeafBasis>(bases[i]);
+            c.p_orb      = periods[i];
+        }
         if (!errors.empty()) {
             c.has_parameter_errors = error_valid[i] != 0;
             std::copy_n(errors.begin() +
@@ -700,6 +714,9 @@ public:
         create<std::uint8_t>("selected");
         create<std::uint8_t>("has_parameter_errors");
         create<std::uint8_t>("outside_prior");
+        create<std::uint8_t>("leaf_basis");
+        create<float>("p_orb");
+        m_group.getDataSet("p_orb").createAttribute("units", std::string("s"));
         HighFive::DataSetCreateProps props;
         props.add(HighFive::Chunking({batch_size, nparams}));
         props.add(HighFive::Shuffle());
@@ -778,6 +795,11 @@ public:
         column<std::uint8_t>("outside_prior", [](const auto& c) {
             return c.representative.outside_prior ? 1 : 0;
         });
+        column<std::uint8_t>("leaf_basis", [](const auto& c) {
+            return static_cast<std::uint8_t>(c.representative.leaf_basis);
+        });
+        column<float>("p_orb",
+                      [](const auto& c) { return c.representative.p_orb; });
         append_column("cluster_id", m_ids);
         std::vector<double> params;
         params.reserve(m_batch.size() * m_nparams);

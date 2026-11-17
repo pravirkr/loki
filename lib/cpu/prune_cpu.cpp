@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -49,6 +50,9 @@ namespace {
 // Number of individual harvests echoed to the log at info level per run;
 // beyond this only per-level summaries are emitted.
 constexpr SizeType kMaxHarvestLogLines = 16;
+
+// Parameters of a circular-orbit search (crackle, snap, jerk, accel, freq).
+constexpr SizeType kCircularParams = 5;
 
 template <SupportedFoldType FoldType> class PruneImpl {
 public:
@@ -725,7 +729,14 @@ private:
         const auto n_branches  = world_tree.get_size_old();
         const auto n_overloads = world_tree.get_n_overloads();
 
+        // A circular stage's transforms count its leaves by basis.
+        std::array<SizeType, 2> basis_counts{};
+        const bool circular = m_cfg.get_nparams() == kCircularParams;
+        if (circular) {
+            m_prune_funcs->set_basis_counts(&basis_counts);
+        }
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats);
+        m_prune_funcs->set_basis_counts(nullptr);
         if (world_tree.get_n_overloads() > n_overloads) {
             spdlog::debug(
                 "Pruning level {:3d}: the world tree overflowed in {} "
@@ -760,6 +771,12 @@ private:
         log << pstats_cur.get_summary();
         log.close();
         m_pstats.update_stats(pstats_cur, stats.batch_timers);
+        if (circular) {
+            m_pstats.update_circular(search::CircularStageCounts{
+                .level            = m_prune_level,
+                .n_leaves_snap    = basis_counts[0],
+                .n_leaves_crackle = basis_counts[1]});
+        }
         if (stats.n_harvested > 0) {
             spdlog::debug("Pruning level {:3d}: harvested {} candidate(s) "
                           "(run total {}, recorded {}, mask cells {})",

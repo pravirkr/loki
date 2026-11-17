@@ -102,6 +102,16 @@ struct PruneStats {
     [[nodiscard]] std::string get_summary() const;
 };
 
+/// Leaves a circular-orbit pruning stage propagated, by leaf basis (the
+/// `level_stats_circular` table): those its transform moved as resolved
+/// orbits (search::LeafBasis); the rest went through the Taylor channel.
+/// Without an overload trim they are the stage's survivors.
+struct CircularStageCounts {
+    SizeType level{};
+    SizeType n_leaves_snap{};    ///< Resolved by snap and acceleration
+    SizeType n_leaves_crackle{}; ///< Resolved by crackle and jerk (the hole)
+};
+
 struct PruneTimerStatsPacked {
     float branch{};
     float validate{};
@@ -169,6 +179,12 @@ public:
 
     void update_stats(const PruneStats& stats, const PruneTimerStats& timers);
     void update_stats(const PruneStats& stats);
+    /// Record a circular-orbit stage's survivors by basis.
+    void update_circular(const CircularStageCounts& counts);
+    [[nodiscard]] const std::vector<CircularStageCounts>&
+    get_circular_counts() const noexcept {
+        return m_circular_list;
+    }
     /**
      * @brief Add the stats of another seed slice of the same run.
      *
@@ -201,6 +217,7 @@ public:
 
 private:
     std::vector<PruneStats> m_stats_list;
+    std::vector<CircularStageCounts> m_circular_list;
     PruneTimerStats m_accumulated_timers;
 };
 

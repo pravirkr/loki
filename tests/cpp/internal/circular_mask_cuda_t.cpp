@@ -219,16 +219,24 @@ TEST_CASE("CUDA circular transform classes leaves as the CPU does",
     auto leaves_cpu = leaves;
     std::vector<SizeType> indices(n_leaves);
     std::iota(indices.begin(), indices.end(), SizeType{0});
+    std::array<SizeType, 2> counts_cpu{};
     loki::core::circ_taylor_transform_batch(leaves_cpu, indices, kCoordAdd,
                                             kCoordCur, n_leaves, false,
-                                            kSignificance);
+                                            kSignificance, &counts_cpu);
 
     thrust::device_vector<double> leaves_d(leaves);
     const thrust::device_vector<uint8_t> mask_d(n_leaves, 1);
+    thrust::device_vector<unsigned long long> counts_d(2, 0);
     loki::core::circ_taylor_transform_batch_cuda(
         loki::cuda_utils::as_span(leaves_d), loki::cuda_utils::as_span(mask_d),
-        kCoordAdd, kCoordCur, n_leaves, false, kSignificance, nullptr);
+        kCoordAdd, kCoordCur, n_leaves, false, kSignificance, nullptr,
+        thrust::raw_pointer_cast(counts_d.data()));
     sync_device();
+    // Both backends count the leaves they propagate as orbits alike.
+    const auto counts_gpu = to_host(counts_d);
+    CHECK(counts_gpu[0] == counts_cpu[0]);
+    CHECK(counts_gpu[1] == counts_cpu[1]);
+    CHECK(counts_cpu[0] + counts_cpu[1] > 0);
     const auto leaves_gpu = to_host(leaves_d);
     for (SizeType i = 0; i < leaves_cpu.size(); ++i) {
         INFO("leaf " << i / kLeavesStride << ", slot " << i % kLeavesStride);

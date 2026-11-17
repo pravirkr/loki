@@ -1,6 +1,7 @@
 #include "lib/core/circular.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+#include "loki/search/leaf_basis.hpp"
 
 #include "lib/core/branching.hpp"
 #include "lib/core/transforms.hpp"
@@ -826,7 +828,8 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,
                                  bool use_conservative_tile,
-                                 double propagator_significance) {
+                                 double propagator_significance,
+                                 std::array<SizeType, 2>* basis_counts) {
     constexpr SizeType kParams       = 5;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -850,6 +853,19 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
         get_circ_taylor_mask_scattered(leaves_tree, indices_tree, n_leaves,
                                        kParams, propagator_significance);
+    if (basis_counts != nullptr) {
+        (*basis_counts)[0] += idx_circular_snap.size();
+        (*basis_counts)[1] += idx_circular_crackle.size();
+    }
+    // Each leaf records the basis this stage propagates it in (its basis
+    // slot, after f0).
+    constexpr SizeType kBasisSlot = kLeavesStride - 1;
+    constexpr double kTaylorBasis =
+        search::leaf_basis_value(search::LeafBasis::kPolynomial);
+    constexpr double kSnapBasis =
+        search::leaf_basis_value(search::LeafBasis::kCircularSnap);
+    constexpr double kCrackleBasis =
+        search::leaf_basis_value(search::LeafBasis::kCircularCrackle);
 
     // Process circular indices
     for (SizeType const i : idx_circular_snap) {
@@ -881,12 +897,13 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
         const double d0_j     = d_circ_j + (d0_i - d_circ_i) + (d1_diff * dt);
 
         // Write back transformed values
-        leaves_tree[lo + 0]  = d5_j;
-        leaves_tree[lo + 2]  = d4_j;
-        leaves_tree[lo + 4]  = d3_j;
-        leaves_tree[lo + 6]  = d2_j;
-        leaves_tree[lo + 8]  = d1_j;
-        leaves_tree[lo + 10] = d0_j;
+        leaves_tree[lo + 0]          = d5_j;
+        leaves_tree[lo + 2]          = d4_j;
+        leaves_tree[lo + 4]          = d3_j;
+        leaves_tree[lo + 6]          = d2_j;
+        leaves_tree[lo + 8]          = d1_j;
+        leaves_tree[lo + 10]         = d0_j;
+        leaves_tree[lo + kBasisSlot] = kSnapBasis;
     }
 
     // Process circular crackle indices
@@ -918,12 +935,13 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
         const double d0_j     = d_circ_j + (d0_i - d_circ_i) + (d1_diff * dt);
 
         // Write back transformed values
-        leaves_tree[lo + 0]  = d5_j;
-        leaves_tree[lo + 2]  = d4_j;
-        leaves_tree[lo + 4]  = d3_j;
-        leaves_tree[lo + 6]  = d2_j;
-        leaves_tree[lo + 8]  = d1_j;
-        leaves_tree[lo + 10] = d0_j;
+        leaves_tree[lo + 0]          = d5_j;
+        leaves_tree[lo + 2]          = d4_j;
+        leaves_tree[lo + 4]          = d3_j;
+        leaves_tree[lo + 6]          = d2_j;
+        leaves_tree[lo + 8]          = d1_j;
+        leaves_tree[lo + 10]         = d0_j;
+        leaves_tree[lo + kBasisSlot] = kCrackleBasis;
     }
 
     // Process normal indices
@@ -949,6 +967,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                (d2_val_i * half_dt2) + (d3_val_i * sixth_dt3) +
                                (d4_val_i * twenty_fourth_dt4) +
                                (d5_val_i * onehundred_twenty_dt5);
+        leaves_tree[lo + kBasisSlot] = kTaylorBasis;
     }
 
     // Process error leaves

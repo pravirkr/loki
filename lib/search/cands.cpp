@@ -109,6 +109,14 @@ HighFive::CompoundType create_compound_prune_stats() {
     };
 }
 
+HighFive::CompoundType create_compound_circular_stage_counts() {
+    return {
+        {"level", HighFive::create_datatype<SizeType>()},
+        {"n_leaves_snap", HighFive::create_datatype<SizeType>()},
+        {"n_leaves_crackle", HighFive::create_datatype<SizeType>()},
+    };
+}
+
 HighFive::CompoundType create_compound_prune_timer_stats() {
     return {
         {"branch", HighFive::create_datatype<float>()},
@@ -375,7 +383,23 @@ void PruneStatsCollection::merge_slice(const PruneStatsCollection& other,
         it->n_overloads += row.n_overloads;
     }
     std::ranges::sort(m_stats_list, {}, &PruneStats::level);
+    for (const auto& row : other.m_circular_list) {
+        const auto it =
+            std::ranges::find_if(m_circular_list, [&row](const auto& c) {
+                return c.level == row.level;
+            });
+        if (it == m_circular_list.end()) {
+            m_circular_list.push_back(row);
+            continue;
+        }
+        it->n_leaves_snap += row.n_leaves_snap;
+        it->n_leaves_crackle += row.n_leaves_crackle;
+    }
+    std::ranges::sort(m_circular_list, {}, &CircularStageCounts::level);
     m_accumulated_timers += other.m_accumulated_timers;
+}
+void PruneStatsCollection::update_circular(const CircularStageCounts& counts) {
+    m_circular_list.push_back(counts);
 }
 std::optional<PruneStats>
 PruneStatsCollection::get_stats(SizeType level) const {
@@ -1154,6 +1178,12 @@ void PruneResultWriter::write_run_results(
             "level_stats", level_stats,
             io::detail::small_table_props({level_stats.size()}));
     }
+    if (!pstats.get_circular_counts().empty()) {
+        const auto& circular = pstats.get_circular_counts();
+        run_group.createDataSet(
+            "level_stats_circular", circular,
+            io::detail::small_table_props({circular.size()}));
+    }
     if (!timer_stats.empty()) {
         run_group.createDataSet("timer_stats", timer_stats);
     }
@@ -1383,3 +1413,5 @@ HIGHFIVE_REGISTER_TYPE(loki::search::PruneStats,
                        loki::search::create_compound_prune_stats)
 HIGHFIVE_REGISTER_TYPE(loki::search::PruneTimerStatsPacked,
                        loki::search::create_compound_prune_timer_stats)
+HIGHFIVE_REGISTER_TYPE(loki::search::CircularStageCounts,
+                       loki::search::create_compound_circular_stage_counts)

@@ -171,6 +171,11 @@ public:
                            SizeType n_leaves,
                            cudaStream_t stream) const = 0;
 
+    /// Circular-orbit bases: device counters (two) to which every later
+    /// transform adds the leaves it propagates as snap- and as
+    /// crackle-resolved orbits; nullptr stops counting. Other bases ignore it.
+    virtual void set_basis_counts(unsigned long long* /*counts_d*/) noexcept {}
+
     virtual void ascend(
         cuda::std::span<const FoldTypeCUDA> folds_ffa,
         cuda::std::span<const double> leaves_tree,
@@ -501,8 +506,13 @@ class PruneCircTaylorDPFunctsCUDA final
     : public BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA> {
 private:
     using Base = BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA>;
+    unsigned long long* m_basis_counts_d{nullptr};
 
 public:
+    void set_basis_counts(unsigned long long* counts_d) noexcept override {
+        m_basis_counts_d = counts_d;
+    }
+
     PruneCircTaylorDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,
                                 std::span<const double> dparams_init,
                                 SizeType nseg_ffa,

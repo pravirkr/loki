@@ -1,10 +1,12 @@
 #include <array>
+#include <numeric>
 #include <span>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "loki/common/types.hpp"
+#include "loki/search/leaf_basis.hpp"
 
 #include "lib/core/circular.hpp"
 #include "lib/detail/psr_utils.hpp"
@@ -96,4 +98,31 @@ TEST_CASE("The middle child of a crackle split around zero is classed Taylor",
     // Child 0 (negative crackle) is physical with positive jerk, child 2 with
     // negative jerk; child 1, at zero or its round-off, never is.
     CHECK(classes(leaves) == std::vector<int>{2, 0, 0, 0, 0, 2});
+}
+
+TEST_CASE("The circular transform records each leaf's basis in its slot",
+          "[circular]") {
+    using loki::search::leaf_basis_value;
+    using loki::search::LeafBasis;
+    auto real                      = kHole;
+    real.crackle                   = -kHole.dcrackle / 2.0;
+    auto snap                      = kHole;
+    snap.snap                      = -10.0 * kHole.dsnap;
+    const std::array leaves        = {kHole, real, snap};
+    auto batch                     = make_leaves(leaves);
+    constexpr loki::SizeType kSlot = kLeavesStride - 1;
+    // A leaf a previous stage propagated as an orbit can fall back to Taylor.
+    batch[kSlot] = leaf_basis_value(LeafBasis::kCircularSnap);
+    std::vector<loki::SizeType> indices(leaves.size());
+    std::iota(indices.begin(), indices.end(), loki::SizeType{0});
+    std::array<loki::SizeType, 2> counts{1, 0}; // the transform adds to them
+    loki::core::circ_taylor_transform_batch(batch, indices, {412.3, 100.0},
+                                            {0.0, 400.0}, leaves.size(), false,
+                                            kSignificance, &counts);
+    CHECK(counts == std::array<loki::SizeType, 2>{2, 1});
+    CHECK(batch[kSlot] == leaf_basis_value(LeafBasis::kPolynomial));
+    CHECK(batch[kLeavesStride + kSlot] ==
+          leaf_basis_value(LeafBasis::kCircularCrackle));
+    CHECK(batch[(2 * kLeavesStride) + kSlot] ==
+          leaf_basis_value(LeafBasis::kCircularSnap));
 }

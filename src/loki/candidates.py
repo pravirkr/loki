@@ -169,6 +169,8 @@ class CandidateFile:
                     "param_errors",
                     "has_parameter_errors",
                     "outside_prior",
+                    "leaf_basis",
+                    "p_orb",
                 ):
                     if name in group:
                         rows[name] = group[name][start:stop]

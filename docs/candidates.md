@@ -153,8 +153,41 @@ Completed Taylor runs already report their kinematic parameters at the full
 observation midpoint, independent of the starting reference segment. The
 adapter normalizes these reported terms to frequency derivatives without
 applying a second epoch shift. Native value/scale pairs are retained in the
-run diagnostics; their scales are not labeled as statistical uncertainties.
-The common `has_parameter_errors` flag remains false.
+run diagnostics. Each EP detection carries its leaf's scales as
+`param_errors`, with `has_parameter_errors` set: the width of the leaf's
+cell in each parameter (its grid step), a grid resolution and not a
+statistical uncertainty. `|value| / error` says how many cells from zero a parameter is,
+which is how the search itself decides when a derivative is resolved.
+
+The second value of a leaf's last row (`param_sets[..., -1, 1]` in a run
+group) is its basis code (`loki::search::LeafBasis`), copied to the
+`leaf_basis` column:
+
+| Code | Basis |
+| --- | --- |
+| 0 | polynomial: every polynomial search, and the Taylor channel of a circular-orbit search |
+| 1 | circular orbit resolved by snap and acceleration, omega^2 = -snap / acceleration |
+| 2 | circular orbit resolved by crackle and jerk (the crackle hole), omega^2 = -crackle / jerk |
+
+A circular-orbit search records the code at every stage, when it moves the
+leaf to the next reference time, so it names the basis of the leaf's last
+propagation. Once a leaf is propagated as an orbit, its snap and crackle are
+computed from omega (snap = -omega^2 acceleration, crackle = -omega^2 jerk),
+so `-snap / acceleration` equals `-crackle / jerk` for codes 1 and 2 by
+construction and is no evidence of a resolved orbit; the code is. `p_orb`
+(seconds) is 2 pi / omega for codes 1 and 2 from the pair that resolved the
+orbit, and 0 otherwise. Codes are never renumbered; 3 and above are reserved
+for future bases, and loki rejects a code it does not know.
+
+Each run group of a circular-orbit search also holds `level_stats_circular`,
+one row per pruning stage: `level`, `n_leaves_snap` and `n_leaves_crackle`,
+the leaves the stage propagated (those that passed its threshold) as code 1
+and code 2; the rest went through the Taylor channel. Unless the stage
+overloaded and trimmed its tree, these are its survivors
+(`level_stats.n_leaves_surv`), and the last row matches the codes of the
+run's final leaves before the per-run reduction (a reduced run group keeps
+only its retained leaves). Seed slices add up by level. Other searches do not write
+the table.
 
 `/search/sources/run_path` and `chunk_id` map each `source_region` to its
 original run. `source_index` is the original final-leaf row, and the uint64
@@ -576,12 +609,13 @@ grids or chunk plans.
 `param_sets` is `(N, len(param_names))` in native Loki parameter order
 `[..., jerk, accel, freq]`. Higher derivatives remain in this array.
 `param_errors` has the same shape, with validity indicated by
-`has_parameter_errors`; neither FFA nor Taylor EP currently supplies statistical
-parameter uncertainties.
+`has_parameter_errors`. FFA supplies none; EP gives each parameter's cell
+width (a grid resolution, not a statistical uncertainty).
 `f0`, `f1`, `f2` are frequency, frequency derivative and second frequency
 derivative in Hz, Hz/s and Hz/s². Other columns include `snr`, `width`, `nbins`,
 `duty_cycle`, `member_count`, `phase_extent`, `parent_cluster_id`, `harmonic_numerator`,
-`harmonic_denominator`, `selected` and `outside_prior`. Nonapplicable relationship fields are
+`harmonic_denominator`, `selected`, `outside_prior`, `leaf_basis` and `p_orb` (both
+0 outside circular-orbit searches). Nonapplicable relationship fields are
 zero/-1. On raw detection rows, only `cluster_id` encodes membership; `phase_extent` is zero and cluster
 counts, relationships and selection must be read from `/clusters`.
 
@@ -956,6 +990,11 @@ Existing flat FFA files remain readable through `loki.candidates.CandidateFile`;
 missing observational metadata can be supplied during export. Readers must
 check `schema_version` rather than assume the root names still mean all
 passing trials.
+
+EP products written before `leaf_basis` and `p_orb` existed lack those
+columns and have all-zero `param_errors` with `has_parameter_errors` 0;
+loki reads them as polynomial leaves without errors. Publishing such a spool
+again fills both from its final leaves (their basis slot is 0 there).
 
 Legacy EP files without saved winning widths are not accepted as common
 candidate products. Width identity is required for duty-aware grouping and

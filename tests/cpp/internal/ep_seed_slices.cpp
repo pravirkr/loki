@@ -247,8 +247,21 @@ std::vector<RunResults> read_run_results(const std::filesystem::path& dir) {
         RunResults out{.name   = name,
                        .leaves = make_leaves(params, scores, scores_ep, widths),
                        .stats = read_level_stats(run.getDataSet("level_stats")),
+                       .circular          = {},
                        .n_harvested_total = 0,
                        .reduction         = {}};
+        if (run.exist("level_stats_circular")) {
+            const auto ds = run.getDataSet("level_stats_circular");
+            const auto level =
+                read_member<std::uint64_t>(ds, "level", H5T_NATIVE_UINT64);
+            const auto snap    = read_member<std::uint64_t>(ds, "n_leaves_snap",
+                                                            H5T_NATIVE_UINT64);
+            const auto crackle = read_member<std::uint64_t>(
+                ds, "n_leaves_crackle", H5T_NATIVE_UINT64);
+            for (std::size_t i = 0; i < level.size(); ++i) {
+                out.circular.push_back({level[i], snap[i], crackle[i]});
+            }
+        }
         for (const char* attr :
              {"n_final_leaves", "n_leaves_above_snr_min", "n_cell_dropped",
               "n_dominated", "n_leaves_retained"}) {
@@ -267,11 +280,23 @@ std::vector<RunResults> read_run_results(const std::filesystem::path& dir) {
     return runs;
 }
 
+namespace {
+std::vector<std::array<std::uint64_t, 3>>
+circular_rows(const search::PruneStatsCollection& stats) {
+    std::vector<std::array<std::uint64_t, 3>> rows;
+    for (const auto& c : stats.get_circular_counts()) {
+        rows.push_back({c.level, c.n_leaves_snap, c.n_leaves_crackle});
+    }
+    return rows;
+}
+} // namespace
+
 RunResults to_run_results(const pipelines::detail::EPResultPayload& payload) {
     return {.name              = payload.run_name,
             .leaves            = make_leaves(payload.leaves, payload.scores,
                                              payload.scores_ep, payload.widths),
             .stats             = payload.stats.get_packed_data().first,
+            .circular          = circular_rows(payload.stats),
             .n_harvested_total = payload.n_harvested_total,
             .reduction         = {}};
 }
@@ -286,6 +311,7 @@ void check_same_runs(const std::vector<RunResults>& a,
         CHECK(a[r].reduction == b[r].reduction);
         REQUIRE(a[r].n_leaves() == b[r].n_leaves());
         CHECK(a[r].leaves == b[r].leaves);
+        CHECK(a[r].circular == b[r].circular);
         REQUIRE(a[r].stats.size() == b[r].stats.size());
         for (std::size_t i = 0; i < a[r].stats.size(); ++i) {
             check_same_stats(a[r].stats[i], b[r].stats[i]);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -90,13 +91,19 @@ void circ_taylor_ascend_resolve_batch(
     SizeType n_segments,
     double propagator_significance);
 
-void circ_taylor_transform_batch(std::span<double> leaves_tree,
-                                 std::span<SizeType> indices_tree,
-                                 std::pair<double, double> coord_next,
-                                 std::pair<double, double> coord_cur,
-                                 SizeType n_leaves,
-                                 bool use_conservative_tile,
-                                 double propagator_significance);
+/// Transforms the leaves to @p coord_next and writes each one's basis code
+/// (search::LeafBasis) into its basis slot. When @p basis_counts is set, adds
+/// the leaves propagated as snap- and as crackle-resolved orbits to
+/// (*basis_counts)[0] and [1].
+void circ_taylor_transform_batch(
+    std::span<double> leaves_tree,
+    std::span<SizeType> indices_tree,
+    std::pair<double, double> coord_next,
+    std::pair<double, double> coord_cur,
+    SizeType n_leaves,
+    bool use_conservative_tile,
+    double propagator_significance,
+    std::array<SizeType, 2>* basis_counts = nullptr);
 
 // mean is the weighted average of the d4..d1 products (including the
 // snap-occupancy factor). max_children is the largest child count of any

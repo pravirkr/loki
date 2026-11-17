@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <numbers>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -315,6 +316,10 @@ void Candidate::validate() const {
         throw std::invalid_argument(
             "candidate uncertainties must be finite and nonnegative");
     }
+    if (!is_known_leaf_basis(static_cast<std::uint8_t>(leaf_basis)) ||
+        !utils::is_finite(p_orb) || p_orb < 0) {
+        throw std::invalid_argument("invalid candidate leaf basis or p_orb");
+    }
     if (width == 0 || nbins == 0 || width > nbins || !utils::is_finite(snr) ||
         !std::ranges::all_of(derivatives,
                              [](double x) { return utils::is_finite(x); }) ||
@@ -539,13 +544,39 @@ Candidate ep_leaf_candidate(std::span<const double> leaf,
     c.width         = width;
     c.nbins         = nbins;
     c.snr           = score;
+    // Each parameter's uncertainty is the width of the leaf's cell (its
+    // grid step in that parameter).
     for (std::size_t k = 0; k < nparams; ++k) {
-        c.parameters[k] = leaf[2 * k];
+        c.parameters[k]       = leaf[2 * k];
+        c.parameter_errors[k] = std::abs(leaf[(2 * k) + 1]);
     }
-    c.derivatives[0] = c.parameters[nparams - 1];
+    c.has_parameter_errors = true;
+    c.derivatives[0]       = c.parameters[nparams - 1];
     for (std::size_t k = 1; k < nparams; ++k) {
         c.derivatives[k] =
             -c.derivatives[0] * c.parameters[nparams - 1 - k] * utils::kInvCval;
+    }
+    // Only circular-orbit searches (five parameters, Taylor basis) write the
+    // basis slot (after f0); other layouts may use that position otherwise.
+    // Circular parameters are [crackle, snap, jerk, acceleration, frequency].
+    if (nparams == 5) {
+        const double basis_value = leaf[(2 * (nparams + 1)) + 1];
+        if (!(basis_value >= 0.0 && basis_value <= 255.0) ||
+            basis_value != std::floor(basis_value) ||
+            !is_known_leaf_basis(static_cast<std::uint8_t>(basis_value))) {
+            throw std::invalid_argument("unknown EP leaf basis code");
+        }
+        c.leaf_basis = static_cast<LeafBasis>(basis_value);
+    }
+    if (c.leaf_basis != LeafBasis::kPolynomial) {
+        const bool from_snap  = c.leaf_basis == LeafBasis::kCircularSnap;
+        const double num      = from_snap ? c.parameters[1] : c.parameters[0];
+        const double den      = from_snap ? c.parameters[3] : c.parameters[2];
+        const double omega_sq = den != 0.0 ? -num / den : 0.0;
+        if (omega_sq > 0.0 && utils::is_finite(omega_sq)) {
+            c.p_orb = static_cast<float>(2.0 * std::numbers::pi /
+                                         std::sqrt(omega_sq));
+        }
     }
     c.validate();
     return c;

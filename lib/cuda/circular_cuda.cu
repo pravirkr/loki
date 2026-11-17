@@ -11,6 +11,7 @@
 #include <thrust/sequence.h>
 
 #include "loki/common/types.hpp"
+#include "loki/search/leaf_basis.hpp"
 
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
@@ -21,7 +22,15 @@ namespace loki::core {
 
 namespace {
 
-// 0: Taylor, 1: Circular Snap, 2: Circular Crackle
+// The leaf basis codes (search::LeafBasis) as the masks return them.
+constexpr uint32_t kMaskTaylor =
+    static_cast<uint32_t>(search::LeafBasis::kPolynomial);
+constexpr uint32_t kMaskSnap =
+    static_cast<uint32_t>(search::LeafBasis::kCircularSnap);
+constexpr uint32_t kMaskCrackle =
+    static_cast<uint32_t>(search::LeafBasis::kCircularCrackle);
+
+// kMaskTaylor, kMaskSnap or kMaskCrackle
 __device__ __forceinline__ uint32_t
 get_circ_taylor_mask_device(double crackle,
                             double dcrackle,
@@ -36,7 +45,7 @@ get_circ_taylor_mask_device(double crackle,
     const bool is_sig_accel = fabs(accel) > (propagator_significance * daccel);
     const bool is_physical_snap = (-snap * accel) > 0.0;
     if (is_sig_snap && is_sig_accel && is_physical_snap) {
-        return 1;
+        return kMaskSnap;
     }
     const bool is_sig_jerk = fabs(jerk) > (propagator_significance * djerk);
     const bool is_physical_crackle = (-crackle * jerk) > 0.0;
@@ -44,9 +53,9 @@ get_circ_taylor_mask_device(double crackle,
     // Taylor case, as in get_circ_taylor_mask_scattered.
     const bool is_zero_crackle = fabs(crackle) <= (utils::kFloatEps * dcrackle);
     if (is_sig_jerk && is_physical_crackle && !is_zero_crackle) {
-        return 2;
+        return kMaskCrackle;
     }
-    return 0;
+    return kMaskTaylor;
 }
 
 __device__ __forceinline__ bool
@@ -427,7 +436,7 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
     const uint32_t mask_circular = get_circ_taylor_mask_device(
         c_t_cur, dc_t_cur, s_t_cur, ds_t_cur, j_t_cur, dj_t_cur, a_t_cur,
         da_t_cur, propagator_significance);
-    if (mask_circular == 0) {
+    if (mask_circular == kMaskTaylor) {
         a_new   = a_t_cur + (j_t_cur * dt_add) + (s_t_cur * half_dt2_add) +
                   (c_t_cur * sixth_dt3_add);
         delta_v = (a_t_cur * dt) + (j_t_cur * half_dt2) +
@@ -436,9 +445,10 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
                   (j_t_cur * sixth_dt3) + (s_t_cur * twenty_fourth_dt4) +
                   (c_t_cur * onehundred_twenty_dt5);
     } else {
-        const double omega_orb_sq =
-            mask_circular == 1 ? -s_t_cur / a_t_cur : -c_t_cur / j_t_cur;
-        const double omega_orb = std::sqrt(omega_orb_sq);
+        const double omega_orb_sq = mask_circular == kMaskSnap
+                                        ? -s_t_cur / a_t_cur
+                                        : -c_t_cur / j_t_cur;
+        const double omega_orb    = std::sqrt(omega_orb_sq);
         // Evolve the phase to the new time t_j = t_i + delta_t
         const double omega_dt_add = omega_orb * dt_add;
         const double cos_odt_add  = std::cos(omega_dt_add);
@@ -520,7 +530,7 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
     const uint32_t mask_circular =
         get_circ_taylor_mask_device(c_cur, dc_cur, s_cur, ds_cur, j_cur, dj_cur,
                                     a_cur, da_cur, propagator_significance);
-    if (mask_circular == 0) {
+    if (mask_circular == kMaskTaylor) {
         a_new = a_cur + (j_cur * dt) + (s_cur * half_dt2) + (c_cur * sixth_dt3);
         v_new = v_cur + (a_cur * dt) + (j_cur * half_dt2) +
                 (s_cur * sixth_dt3) + (c_cur * twenty_fourth_dt4);
@@ -529,7 +539,7 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
                 (c_cur * onehundred_twenty_dt5);
     } else {
         const double omega_orb_sq =
-            mask_circular == 1 ? -s_cur / a_cur : -c_cur / j_cur;
+            mask_circular == kMaskSnap ? -s_cur / a_cur : -c_cur / j_cur;
         const double omega_orb = std::sqrt(omega_orb_sq);
         // Evolve the phase to the new time t_j = t_i + delta_t
         const double omega_dt = omega_orb * dt;
@@ -560,13 +570,14 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
 }
 
 template <bool UseConservativeTile>
-__global__ void
-kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
-                                   const uint8_t* __restrict__ validation_mask,
-                                   uint32_t n_leaves,
-                                   cuda::std::pair<double, double> coord_next,
-                                   cuda::std::pair<double, double> coord_cur,
-                                   double propagator_significance) {
+__global__ void kernel_circ_taylor_transform_batch(
+    double* __restrict__ leaves_tree,
+    const uint8_t* __restrict__ validation_mask,
+    uint32_t n_leaves,
+    cuda::std::pair<double, double> coord_next,
+    cuda::std::pair<double, double> coord_cur,
+    double propagator_significance,
+    unsigned long long* __restrict__ basis_counts) {
     constexpr uint32_t kLeavesStride = 14;
 
     const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -601,8 +612,29 @@ kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
     const uint32_t mask_circular = get_circ_taylor_mask_device(
         d5_val_i, d5_err_i, d4_val_i, d4_err_i, d3_val_i, d3_err_i, d2_val_i,
         d2_err_i, propagator_significance);
+    // Record the basis this stage propagates the leaf in (its basis slot).
+    leaves_tree[lo + 13] = static_cast<double>(mask_circular);
+    if (basis_counts != nullptr) {
+        // Count the leaves propagated as orbits: one atomic per warp group.
+        const unsigned int active = __activemask();
+        const unsigned int n_snap =
+            __popc(__ballot_sync(active, mask_circular == kMaskSnap));
+        const unsigned int n_crackle =
+            __popc(__ballot_sync(active, mask_circular == kMaskCrackle));
+        if ((threadIdx.x % 32U) ==
+            static_cast<unsigned int>(__ffs(static_cast<int>(active)) - 1)) {
+            if (n_snap != 0U) {
+                atomicAdd(&basis_counts[0],
+                          static_cast<unsigned long long>(n_snap));
+            }
+            if (n_crackle != 0U) {
+                atomicAdd(&basis_counts[1],
+                          static_cast<unsigned long long>(n_crackle));
+            }
+        }
+    }
 
-    if (mask_circular == 0) {
+    if (mask_circular == kMaskTaylor) {
         leaves_tree[lo + 0] = d5_val_i;
         leaves_tree[lo + 2] = d4_val_i + (d5_val_i * dt);
         leaves_tree[lo + 4] =
@@ -617,12 +649,13 @@ kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
                                (d4_val_i * twenty_fourth_dt4) +
                                (d5_val_i * onehundred_twenty_dt5);
     } else {
-        const double omega_orb_sq =
-            mask_circular == 1 ? -d4_val_i / d2_val_i : -d5_val_i / d3_val_i;
-        const double omega_orb = std::sqrt(omega_orb_sq);
-        const double omega_dt  = omega_orb * dt;
-        const double cos_odt   = std::cos(omega_dt);
-        const double sin_odt   = std::sin(omega_dt);
+        const double omega_orb_sq = mask_circular == kMaskSnap
+                                        ? -d4_val_i / d2_val_i
+                                        : -d5_val_i / d3_val_i;
+        const double omega_orb    = std::sqrt(omega_orb_sq);
+        const double omega_dt     = omega_orb * dt;
+        const double cos_odt      = std::cos(omega_dt);
+        const double sin_odt      = std::sin(omega_dt);
         // Pin-down {s, j, a}
         const double d2_j =
             (d2_val_i * cos_odt) + (d3_val_i * sin_odt / omega_orb);
@@ -954,7 +987,8 @@ void circ_taylor_transform_batch_cuda(
     SizeType n_leaves,
     bool use_conservative_tile,
     double propagator_significance,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    unsigned long long* basis_counts) {
     constexpr SizeType kThreadsPerBlock = 256;
     const SizeType blocks_per_grid =
         (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
@@ -966,12 +1000,12 @@ void circ_taylor_transform_batch_cuda(
         kernel_circ_taylor_transform_batch<true>
             <<<grid_dim, block_dim, 0, stream>>>(
                 leaves_tree.data(), validation_mask.data(), n_leaves,
-                coord_next, coord_cur, propagator_significance);
+                coord_next, coord_cur, propagator_significance, basis_counts);
     } else {
         kernel_circ_taylor_transform_batch<false>
             <<<grid_dim, block_dim, 0, stream>>>(
                 leaves_tree.data(), validation_mask.data(), n_leaves,
-                coord_next, coord_cur, propagator_significance);
+                coord_next, coord_cur, propagator_significance, basis_counts);
     }
     cuda_utils::check_last_cuda_error(
         "Circular Taylor transform kernel launch failed");

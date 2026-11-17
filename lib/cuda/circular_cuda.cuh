@@ -80,6 +80,10 @@ void circ_taylor_ascend_resolve_batch_cuda(
     double propagator_significance,
     cudaStream_t stream);
 
+/// Transforms the valid leaves to @p coord_next and writes each one's basis
+/// code (search::LeafBasis) into its basis slot. When @p basis_counts (device
+/// memory, two counters) is set, adds the leaves propagated as snap- and as
+/// crackle-resolved orbits to basis_counts[0] and [1].
 void circ_taylor_transform_batch_cuda(
     cuda::std::span<double> leaves_tree,
     cuda::std::span<const uint8_t> validation_mask,
@@ -88,6 +92,7 @@ void circ_taylor_transform_batch_cuda(
     SizeType n_leaves,
     bool use_conservative_tile,
     double propagator_significance,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    unsigned long long* basis_counts = nullptr);
 
 } // namespace loki::core

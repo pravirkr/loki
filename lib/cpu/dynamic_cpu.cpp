@@ -725,10 +725,10 @@ void PruneCircTaylorDPFuncts<FoldType>::transform(
     std::pair<double, double> coord_next,
     std::pair<double, double> coord_cur,
     SizeType n_leaves) const {
-    circ_taylor_transform_batch(leaves_tree, indices_tree, coord_next,
-                                coord_cur, n_leaves,
-                                this->m_cfg.get_use_conservative_tile(),
-                                this->m_cfg.get_propagator_significance());
+    circ_taylor_transform_batch(
+        leaves_tree, indices_tree, coord_next, coord_cur, n_leaves,
+        this->m_cfg.get_use_conservative_tile(),
+        this->m_cfg.get_propagator_significance(), m_basis_counts);
 }
 
 template <SupportedFoldType FoldType>

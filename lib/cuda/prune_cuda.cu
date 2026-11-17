@@ -48,6 +48,9 @@ namespace loki::algorithms {
 
 namespace {
 
+// Parameters of a circular-orbit search (crackle, snap, jerk, accel, freq).
+constexpr SizeType kCircularParams = 5;
+
 struct ExecutionStream {
     cudaStream_t stream{nullptr};
     bool owns{false};
@@ -362,6 +365,28 @@ public:
     }
 
 private:
+    // Record the per-level circular counts of the prune just finished (one
+    // copy per prune, not one per stage): the leaves each stage propagated as
+    // snap- and as crackle-resolved orbits.
+    void flush_circular_counts(cudaStream_t stream) {
+        std::vector<unsigned long long> counts_h(m_basis_counts_d.size());
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(counts_h.data(),
+                            thrust::raw_pointer_cast(m_basis_counts_d.data()),
+                            counts_h.size() * sizeof(unsigned long long),
+                            cudaMemcpyDeviceToHost, stream),
+            "circular basis counter copy failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "circular basis count sync failed");
+        for (SizeType level = 1; level <= m_prune_level; ++level) {
+            m_pstats.update_circular(search::CircularStageCounts{
+                .level         = level,
+                .n_leaves_snap = static_cast<SizeType>(counts_h[2 * level]),
+                .n_leaves_crackle =
+                    static_cast<SizeType>(counts_h[(2 * level) + 1])});
+        }
+    }
+
     // The observer pointer that always points to the active workspace.
     memory::EPWorkspaceCUDA<FoldTypeCUDA>* m_workspace_ptr{nullptr};
 
@@ -397,6 +422,8 @@ private:
     thrust::device_vector<uint32_t> m_seed_keep_d;
     // [0]: leaves masked in the level, [1]: scratch count
     thrust::device_vector<unsigned long long> m_counters_d;
+    /// Survivors by circular basis (snap, crackle) of the current stage.
+    thrust::device_vector<unsigned long long> m_basis_counts_d;
     thrust::device_vector<double> m_harvest_leaves_d;
     thrust::device_vector<float> m_harvest_scores_d;
     thrust::device_vector<FoldTypeCUDA> m_harvest_folds_d;
@@ -794,6 +821,16 @@ private:
 
         // Initialize the prune stats
         m_pstats = search::PruneStatsCollection();
+        if (m_cfg.get_nparams() == kCircularParams) {
+            // Survivors by circular basis, (snap, crackle) per level.
+            m_basis_counts_d.resize(2 * (m_total_levels + 1));
+            cuda_utils::check_cuda_call(
+                cudaMemsetAsync(
+                    thrust::raw_pointer_cast(m_basis_counts_d.data()), 0,
+                    m_basis_counts_d.size() * sizeof(unsigned long long),
+                    stream),
+                "circular basis counter reset failed");
+        }
         const search::PruneStats pstats_cur{
             .level           = m_prune_level,
             .seg_idx         = m_snail_scheme.get_segment_idx(m_prune_level),
@@ -845,6 +882,9 @@ private:
             std::ranges::find(ascend_levels, m_prune_level) ==
                 ascend_levels.end()) {
             ascend_survivors_batched(ffa_fold, m_stream);
+        }
+        if (m_cfg.get_nparams() == kCircularParams) {
+            flush_circular_counts(m_stream);
         }
     }
 
@@ -1252,8 +1292,15 @@ private:
                                 0, sizeof(unsigned long long), stream),
                 "EP RFI counter reset failed");
         }
+        if (m_cfg.get_nparams() == kCircularParams) {
+            // This stage's transforms count its leaves by circular basis.
+            m_prune_funcs->set_basis_counts(
+                thrust::raw_pointer_cast(m_basis_counts_d.data()) +
+                (2 * m_prune_level));
+        }
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats,
                                   stream);
+        m_prune_funcs->set_basis_counts(nullptr);
         if (m_rfi != nullptr) {
             unsigned long long n_masked = 0;
             cuda_utils::check_cuda_call(
