@@ -560,16 +560,15 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
         const auto sin_odt_init  = std::sin(omega_dt_init);
         const auto a_t_init =
             (a_t_cur * cos_odt_init) + ((j_t_cur / omega_orb) * sin_odt_init);
-        const auto j_t_init =
-            (j_t_cur * cos_odt_init) - ((a_t_cur * omega_orb) * sin_odt_init);
 
         const auto a_new = a_t_add;
-        const auto delta_v =
-            (-j_t_add / omega_orb_sq) - (-j_t_init / omega_orb_sq);
+        // The added segment's absolute velocity: on the moving grid f0 stays
+        // the seed's, so the leaf's frequency offset lives in its velocity.
+        const auto v_add     = v_t_cur + ((j_t_cur - j_t_add) / omega_orb_sq);
         const auto delta_d   = (-a_t_add / omega_orb_sq) -
                                (-a_t_init / omega_orb_sq) +
                                ((v_t_cur + (j_t_cur / omega_orb_sq)) * dt);
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase
@@ -608,16 +607,15 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
         const auto sin_odt_init  = std::sin(omega_dt_init);
         const auto a_t_init =
             (a_t_cur * cos_odt_init) + ((j_t_cur / omega_orb) * sin_odt_init);
-        const auto j_t_init =
-            (j_t_cur * cos_odt_init) - ((a_t_cur * omega_orb) * sin_odt_init);
 
         const auto a_new = a_t_add;
-        const auto delta_v =
-            (-j_t_add / omega_orb_sq) - (-j_t_init / omega_orb_sq);
+        // The added segment's absolute velocity: on the moving grid f0 stays
+        // the seed's, so the leaf's frequency offset lives in its velocity.
+        const auto v_add     = v_t_cur + ((j_t_cur - j_t_add) / omega_orb_sq);
         const auto delta_d   = (-a_t_add / omega_orb_sq) -
                                (-a_t_init / omega_orb_sq) +
                                ((v_t_cur + (j_t_cur / omega_orb_sq)) * dt);
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase
@@ -641,15 +639,16 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
         const auto f0      = leaves_tree[lo + 12];
         const auto a_new = a_t_cur + (j_t_cur * dt_add) +
                            (s_t_cur * half_dt2_add) + (c_t_cur * sixth_dt3_add);
-        const auto delta_v = (a_t_cur * dt) + (j_t_cur * half_dt2) +
-                             (s_t_cur * sixth_dt3) +
-                             (c_t_cur * twenty_fourth_dt4);
+        const auto v_add = v_t_cur + (a_t_cur * dt_add) +
+                           (j_t_cur * half_dt2_add) +
+                           (s_t_cur * sixth_dt3_add) +
+                           (c_t_cur * sixth_dt3_add * dt_add / 4.0);
         const auto delta_d =
             (v_t_cur * dt) + (a_t_cur * half_dt2) + (j_t_cur * sixth_dt3) +
             (s_t_cur * twenty_fourth_dt4) + (c_t_cur * onehundred_twenty_dt5);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase

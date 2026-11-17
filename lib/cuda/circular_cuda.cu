@@ -444,15 +444,16 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
     const double v_t_cur  = leaves_tree[lo + 8];
     const double f0       = leaves_tree[lo + 12];
 
-    double a_new, delta_v, delta_d;
+    double a_new, v_add, delta_d;
     const uint32_t mask_circular = get_circ_taylor_mask_device(
         c_t_cur, dc_t_cur, s_t_cur, ds_t_cur, j_t_cur, dj_t_cur, a_t_cur,
         da_t_cur, propagator_significance);
     if (mask_circular == kMaskTaylor) {
         a_new   = a_t_cur + (j_t_cur * dt_add) + (s_t_cur * half_dt2_add) +
                   (c_t_cur * sixth_dt3_add);
-        delta_v = (a_t_cur * dt) + (j_t_cur * half_dt2) +
-                  (s_t_cur * sixth_dt3) + (c_t_cur * twenty_fourth_dt4);
+        v_add   = v_t_cur + (a_t_cur * dt_add) + (j_t_cur * half_dt2_add) +
+                  (s_t_cur * sixth_dt3_add) +
+                  (c_t_cur * sixth_dt3_add * dt_add / 4.0);
         delta_d = (v_t_cur * dt) + (a_t_cur * half_dt2) +
                   (j_t_cur * sixth_dt3) + (s_t_cur * twenty_fourth_dt4) +
                   (c_t_cur * onehundred_twenty_dt5);
@@ -475,14 +476,13 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
         const double sin_odt_init  = std::sin(omega_dt_init);
         const double a_t_init =
             (a_t_cur * cos_odt_init) + ((j_t_cur / omega_orb) * sin_odt_init);
-        const double j_t_init =
-            (j_t_cur * cos_odt_init) - ((a_t_cur * omega_orb) * sin_odt_init);
-        a_new   = a_t_add;
-        delta_v = (-j_t_add / omega_orb_sq) - (-j_t_init / omega_orb_sq);
+        a_new = a_t_add;
+        // The added segment's absolute velocity (see the CPU resolver).
+        v_add   = v_t_cur + ((j_t_cur - j_t_add) / omega_orb_sq);
         delta_d = (-a_t_add / omega_orb_sq) - (-a_t_init / omega_orb_sq) +
                   ((v_t_cur + (j_t_cur / omega_orb_sq)) * dt);
     }
-    const double f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+    const double f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
     const double delay_rel = delta_d * utils::kInvCval;
 
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(

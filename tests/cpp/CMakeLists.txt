@@ -85,6 +85,7 @@ if(CMAKE_CUDA_COMPILER)
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/branch_capacity_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/circ_branch_bound_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/circular_mask_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/moving_resolve_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/prune_transform_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_seed_slices_cuda_t.cpp
     PROPERTIES LANGUAGE CUDA

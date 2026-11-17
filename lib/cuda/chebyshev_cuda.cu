@@ -774,11 +774,12 @@ resolve_chebyshev_accel(const double* __restrict__ leaves_tree,
     const double alpha_1 = leaves_tree[lo + 2];
     const double f0      = leaves_tree[lo + 6];
 
-    const double a_new   = 4.0 * alpha_2 * inv_ts2;
-    const double delta_v = 4.0 * alpha_2 * inv_ts2 * dt;
+    const double a_new = 4.0 * alpha_2 * inv_ts2;
+    const double v_add =
+        (alpha_1 * inv_ts) + (4.0 * alpha_2 * inv_ts2 * dt_add);
     const double delta_d =
         (alpha_1 * inv_ts * dt) + (2.0 * alpha_2 * inv_ts2 * dt2);
-    const double f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+    const double f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
     const double delay_rel = delta_d * utils::kInvCval;
 
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
@@ -833,12 +834,13 @@ resolve_chebyshev_jerk(const double* __restrict__ leaves_tree,
 
     const double a_new =
         (4.0 * alpha_2 * inv_ts2) + (24.0 * alpha_3 * dt_add * inv_ts3);
-    const double delta_v =
-        ((4.0 * alpha_2 * inv_ts2) * dt) + ((12.0 * alpha_3 * inv_ts3) * dt2);
+    const double v_add     = ((alpha_1 - (3.0 * alpha_3)) * inv_ts) +
+                             ((4.0 * alpha_2 * inv_ts2) * dt_add) +
+                             ((12.0 * alpha_3 * inv_ts3) * dt2_add);
     const double delta_d   = ((alpha_1 - (3.0 * alpha_3)) * inv_ts * dt) +
                              ((2.0 * alpha_2 * inv_ts2) * dt2) +
                              ((4.0 * alpha_3 * inv_ts3) * dt3);
-    const double f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+    const double f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
     const double delay_rel = delta_d * utils::kInvCval;
 
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
@@ -897,15 +899,17 @@ resolve_chebyshev_snap(const double* __restrict__ leaves_tree,
     const double a_new = (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2) +
                          (24.0 * alpha_3 * dt_add * inv_ts3) +
                          (96.0 * alpha_4 * dt2_add * inv_ts4);
-    const double delta_v =
-        (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2 * dt) +
-        ((12.0 * alpha_3 * inv_ts3) * dt2) + ((32.0 * alpha_4 * inv_ts4) * dt3);
+    const double v_add =
+        ((alpha_1 - (3.0 * alpha_3)) * inv_ts) +
+        (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2 * dt_add) +
+        ((12.0 * alpha_3 * inv_ts3) * dt2_add) +
+        ((32.0 * alpha_4 * inv_ts4) * dt2_add * dt_add);
 
     const double delta_d =
         ((alpha_1 - (3.0 * alpha_3)) * inv_ts * dt) +
         (((2.0 * alpha_2) - (8.0 * alpha_4)) * inv_ts2 * dt2) +
         ((4.0 * alpha_3 * inv_ts3) * dt3) + ((8.0 * alpha_4 * inv_ts4) * dt4);
-    const double f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+    const double f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
     const double delay_rel = delta_d * utils::kInvCval;
 
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(

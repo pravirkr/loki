@@ -92,11 +92,14 @@ std::vector<double> make_leaves() {
         leaf.jerk = -leaf.jerk;
         leaves.push_back(leaf);
     }
+    // A non-zero velocity: the moving-grid resolve picks the frequency cell
+    // from the leaf's absolute velocity, which both backends must agree on.
+    constexpr double kVelocity = 750.0;
     std::vector<double> out;
     for (const auto& l : leaves) {
         const std::array<double, kLeavesStride> row = {
             l.crackle, l.dcrackle, l.snap, l.dsnap, l.jerk, l.djerk, l.accel,
-            l.daccel,  0.0,        1.0e3,  0.0,     0.0,    100.0,   0.0};
+            l.daccel,  kVelocity,  1.0e3,  0.0,     0.0,    100.0,   0.0};
         out.insert(out.end(), row.begin(), row.end());
     }
     return out;

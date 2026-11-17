@@ -691,11 +691,48 @@ as much as removing them does (same best score in all 32 cases). From
 1.1 `p_orb_min` the widening changes no best score. Most of the loss of
 compact orbits is elsewhere: without an orbit the same search finds the
 signal in 14 of 16 runs (median best score 18.9); with the heavy companion
-at P_orb = T, even without the checks, in 4-9 runs (median 0-8.5). In
-stage-by-stage traces of such lost runs (CPU) the leaf nearest the true
-orbit drifts by more than a cell width from the 18th-33rd of 128 stages and
-the orbit leaves the tree by the 41st-43rd, the same with and without the
-checks.
+at P_orb = T, even without the checks, in 4-9 runs (median 0-8.5). Traces of
+lost runs (CPU, no checks, every leaf of every stage against the true orbit,
+frequency included) show two losses, the same with and without the checks:
+
+- a run referenced at the series edge moves its reference epoch by a
+  segment (4.2 s) every stage; while the snap cell is unsplit its leaves
+  carry the box-centre snap, the transforms shift the jerk by the snap
+  error each stage and the aggressive tile does not widen cells, so the
+  orbit leaves its cells from about stage 15 and the run loses it by
+  stage 41 (traced before the resolve fix below). Without the checks, runs
+  referenced at segments 0-16 or 110-127 find this orbit in 5 of 24, the
+  others in 25 of 40 (after the fix). Accepted as the cost of the
+  aggressive tile: the remedies (mid-only references, holding the
+  reference epoch, more snap cells, widening) cost run independence, a
+  start-independent volume or more volume.
+- a mid-series run (reference segment 42 of 128, after the resolve fix
+  below) has no drift: a leaf whose phase matches the orbit to 0.2-0.9 of
+  16 bins rms over the span survives to stage 33, but scores only 0.1-0.8
+  above the thresholds (5.22 at stage 33 against 5.09) and falls below at
+  stage 34, a stage without branching. The no-orbit control's leaf, matching
+  to 0.3-0.5 bins, scores 9.0 there. Already at stages 2-5 the matched
+  orbit leaf scores 4.0 falling to 2.6 against the control's 4.0-4.6 at the
+  same match, so the deficit is not in the leaf's own parameters; whether it
+  is the score kept from coarser ancestors (earlier segments are not
+  refolded) or the folding of orbit leaves is not yet known.
+
+Frequency of the moving-grid resolve (2026-11-18): on the moving grid a leaf
+keeps its seed's f0 and carries its own frequency offset in its velocity,
+but the pruning-stage resolves took the added segment's frequency from the
+velocity change since t_init, dropping the leaf's offset there, so a fold
+could use a neighbouring frequency cell; its phase was right. Resolving from
+the leaf's absolute velocity at the added segment (every basis, CPU and
+CUDA; the ascend resolves were right) changes no FFA output, and recovery
+only within run-to-run jitter. On the 32 injections above, with the checks
+as they are: runs scoring 8 or more 341 -> 350 of 512 (16 cases up, 9 down;
+best score 10 up, 8 down), leaves +8 %. On the real 280 Hz signal at eta 1
+(one chunk, 32 runs): jerk 29 of 32 before and after (median 18.21; 1 run
+gained, 1 lost, 3 lower), circular 31 -> 32 (median 18.06), wall time 128 s
+both. Results earlier in this file were measured before this fix, except the
+mid-series trace and the edge counts above. Leaves on the real chunk:
+unchanged (jerk +0.9 %, circular -0.02 %); on the injections they rise or
+fall per case.
 
 Reserve of a slice (docs/memory.md): on the 495 Hz chunk above, which holds a
 bright pulsar, the busiest slice held 65-100 cells' worth of leaves beyond
