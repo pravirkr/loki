@@ -667,7 +667,10 @@ scheduling, not search results, and change from run to run:
 The reduction has no S/N floor (it keeps the strongest leaves of every
 frequency cell, whatever their S/N), so there is no `snr_floor_used`;
 `max_cell_dropped_snr` says how strong the strongest dropped leaf was. Per-run
-overload counts stay in each run's `level_stats` (`n_overloads`).
+overload counts stay in each run's `level_stats` (`n_overloads`). When any run
+overloaded, writing `/run_stats` also logs one warning that lists the
+overloaded chunks (nominal band, nbins, overloads and runs), worst first, with
+the usual remedies: birdies, an `[ep.rfi]` pulsar mask, or `--harvest`.
 
 With a `/detections` table, `detections_per_nbins/nbins` and `count` give
 the detections per profile bin count, which is one row per search region.

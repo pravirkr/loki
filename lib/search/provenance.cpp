@@ -14,6 +14,7 @@
 #include <hdf5.h>
 #include <highfive/H5File.hpp>
 #include <highfive/highfive.hpp>
+#include <spdlog/spdlog.h>
 
 #include "lib/generated/git_commit.hpp"
 #include "lib/io/h5_layout.hpp"
@@ -50,6 +51,47 @@ std::uint64_t sum_level_stat(const HighFive::DataSet& level_stats,
     return total;
 }
 
+/// One EP chunk whose runs overloaded the tree (for the end-of-run summary).
+struct OverloadedChunk {
+    double f_start{0.0};
+    double f_end{0.0};
+    std::uint64_t nbins{0};
+    std::uint64_t n_runs{0};
+    std::uint64_t n_runs_overloaded{0};
+    std::uint64_t n_overloads{0};
+};
+
+/// Warns once per run of the search with the chunks whose tree overloaded
+/// (an overload trims leaves at that level), worst first, and what removes
+/// the usual causes. Log only: the counts are in /run_stats and level_stats.
+void log_ep_overloads(std::vector<OverloadedChunk> chunks,
+                      std::uint64_t n_overloads) {
+    if (chunks.empty()) {
+        return;
+    }
+    constexpr std::size_t kMaxListed = 10;
+    std::ranges::stable_sort(chunks, [](const auto& a, const auto& b) {
+        return a.n_overloads > b.n_overloads;
+    });
+    std::string text;
+    for (std::size_t i = 0; i < std::min(chunks.size(), kMaxListed); ++i) {
+        const auto& c = chunks[i];
+        text +=
+            fmt::format("{}{:.3f}-{:.3f} Hz (nbins {}): {} in {} of {} runs",
+                        text.empty() ? "" : "; ", c.f_start, c.f_end, c.nbins,
+                        c.n_overloads, c.n_runs_overloaded, c.n_runs);
+    }
+    if (chunks.size() > kMaxListed) {
+        text += fmt::format("; {} more chunk(s)", chunks.size() - kMaxListed);
+    }
+    spdlog::warn(
+        "EP tree overloads: {} in {} chunk(s), trimmed at the levels in "
+        "level_stats.n_overloads: {}. Lines or a bright source usually cause "
+        "them: zap them (birdies), mask them ([ep.rfi] pulsar_mask), or use "
+        "--harvest.",
+        n_overloads, chunks.size(), text);
+}
+
 void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
     if (!file.exist("chunks")) {
         return;
@@ -68,7 +110,8 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
     bool any_rfi           = false;
     std::uint64_t n_masked = 0;
     std::uint64_t n_vetoed = 0;
-    const auto chunks      = file.getGroup("chunks");
+    std::vector<OverloadedChunk> overloaded;
+    const auto chunks = file.getGroup("chunks");
     for (const auto& chunk_name : chunks.listObjectNames()) {
         const auto chunk = chunks.getGroup(chunk_name);
         if (chunk.hasAttribute("chunk_memory_gb")) {
@@ -81,10 +124,20 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
         if (!chunk.exist("runs")) {
             continue;
         }
+        OverloadedChunk this_chunk;
+        if (chunk.hasAttribute("nominal_f_start") &&
+            chunk.hasAttribute("nominal_f_end")) {
+            chunk.getAttribute("nominal_f_start").read(this_chunk.f_start);
+            chunk.getAttribute("nominal_f_end").read(this_chunk.f_end);
+        }
+        if (chunk.hasAttribute("nbins")) {
+            chunk.getAttribute("nbins").read(this_chunk.nbins);
+        }
         const auto runs = chunk.getGroup("runs");
         for (const auto& run_name : runs.listObjectNames()) {
             const auto run = runs.getGroup(run_name);
             ++n_runs;
+            ++this_chunk.n_runs;
             if (run.exist("harvest")) {
                 const auto harvest  = run.getGroup("harvest");
                 std::uint64_t total = 0;
@@ -107,12 +160,18 @@ void write_ep_run_counts(HighFive::File& file, HighFive::Group& out) {
             const auto overloads   = sum_level_stat(level_stats, "n_overloads");
             n_overloads += overloads;
             n_overloaded += overloads > 0 ? 1 : 0;
+            this_chunk.n_overloads += overloads;
+            this_chunk.n_runs_overloaded += overloads > 0 ? 1 : 0;
             if (chunk_rfi) {
                 n_masked += sum_level_stat(level_stats, "n_leaves_masked");
                 n_vetoed += sum_level_stat(level_stats, "n_leaves_vetoed");
             }
         }
+        if (this_chunk.n_overloads > 0) {
+            overloaded.push_back(this_chunk);
+        }
     }
+    log_ep_overloads(std::move(overloaded), n_overloads);
     out.createAttribute("n_runs", n_runs);
     out.createAttribute("n_runs_overloaded", n_overloaded);
     out.createAttribute("n_overloads", n_overloads);
