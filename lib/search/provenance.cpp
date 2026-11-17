@@ -13,6 +13,7 @@
 #include <fmt/format.h>
 #include <hdf5.h>
 #include <highfive/H5File.hpp>
+#include <highfive/H5Utility.hpp>
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
@@ -32,14 +33,33 @@ std::uint64_t sum_level_stat(const HighFive::DataSet& level_stats,
     if (n == 0) {
         return 0;
     }
-    const hid_t member = H5Tcreate(H5T_COMPOUND, sizeof(std::uint64_t));
-    if (member < 0 || H5Tinsert(member, name, 0, H5T_NATIVE_UINT64) < 0) {
+    // The member type, closed on every path.
+    struct MemberType {
+        hid_t id;
+        explicit MemberType(hid_t type) : id(type) {}
+        MemberType(const MemberType&)            = delete;
+        MemberType& operator=(const MemberType&) = delete;
+        MemberType(MemberType&&)                 = delete;
+        MemberType& operator=(MemberType&&)      = delete;
+        ~MemberType() {
+            if (id >= 0) {
+                H5Tclose(id);
+            }
+        }
+    };
+    const MemberType member(H5Tcreate(H5T_COMPOUND, sizeof(std::uint64_t)));
+    if (member.id < 0 || H5Tinsert(member.id, name, 0, H5T_NATIVE_UINT64) < 0) {
         throw std::runtime_error("write_run_stats: cannot build HDF5 type");
     }
     std::vector<std::uint64_t> values(n);
-    const herr_t status = H5Dread(level_stats.getId(), member, H5S_ALL, H5S_ALL,
-                                  H5P_DEFAULT, values.data());
-    H5Tclose(member);
+    herr_t status = -1;
+    {
+        // A table without the member (an older file) fails here: report it
+        // as the exception below, without the HDF5 error stack.
+        const HighFive::SilenceHDF5 silence;
+        status = H5Dread(level_stats.getId(), member.id, H5S_ALL, H5S_ALL,
+                         H5P_DEFAULT, values.data());
+    }
     if (status < 0) {
         throw std::runtime_error(
             fmt::format("write_run_stats: cannot read level_stats.{}", name));

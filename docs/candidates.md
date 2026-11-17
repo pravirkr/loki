@@ -651,7 +651,7 @@ scheduling, not search results, and change from run to run:
 
 | Attribute | Meaning |
 | --- | --- |
-| `timing_<stage>_s` | Wall time of `load`, `preprocess`, `plan`, `search`, `postprocess` and `total` (FFA: `search_and_postprocess`) |
+| `timing_<stage>_s` | Wall time of `load`, `preprocess`, `plan`, `search`, `postprocess` and `total` (FFA: `search_and_postprocess`); `publish` in a product of `loki publish` |
 | `peak_rss_gb` | Peak resident set size of the process, GB of 2^30 bytes (`getrusage` `ru_maxrss`) |
 | `n_runs`, `n_runs_overloaded`, `n_overloads` | EP: runs, runs with at least one world-tree overload, and overloads summed over `level_stats` |
 | `n_harvested`, `n_harvests_recorded`, `max_harvested_per_run` | EP with `[ep.rfi]` harvesting only: harvests over all runs (including those beyond `max_harvests`), the records kept, and the most harvests of one run |
@@ -671,6 +671,13 @@ overload counts stay in each run's `level_stats` (`n_overloads`). When any run
 overloaded, writing `/run_stats` also logs one warning that lists the
 overloaded chunks (nominal band, nbins, overloads and runs), worst first, with
 the usual remedies: birdies, an `[ep.rfi]` pulsar mask, or `--harvest`.
+
+`loki publish` writes `/run_stats` into the product it publishes: the
+`timing_<stage>_s` the source recorded (a `--no-candidates` result has them,
+a spool kept after a failed postprocessing has none), `timing_publish_s`,
+and the counts from the copied runs, with the same overload warning. It
+writes no `peak_rss_gb`: the publishing process did not search. A search
+whose postprocessing fails writes no `/run_stats`; publishing its spool does.
 
 With a `/detections` table, `detections_per_nbins/nbins` and `count` give
 the detections per profile bin count, which is one row per search region.

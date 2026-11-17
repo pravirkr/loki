@@ -202,6 +202,20 @@ TEST_CASE("publish CLI publishes a kept spool as the search would", "[cli]") {
         CHECK(std::filesystem::exists(spool));
         check_same(read_product(dir / "kept" / "run_ep_results.h5"),
                    read_product(dir / "ok" / "run_ep_results.h5"));
+        {
+            // Run statistics: the copied runs' counts and the publish time,
+            // not the publishing process's RSS.
+            const HighFive::File file(
+                (dir / "kept" / "run_ep_results.h5").string(),
+                HighFive::File::ReadOnly);
+            REQUIRE(file.exist("run_stats"));
+            const auto stats = file.getGroup("run_stats");
+            CHECK(stats.hasAttribute("timing_publish_s"));
+            CHECK_FALSE(stats.hasAttribute("peak_rss_gb"));
+            REQUIRE(stats.hasAttribute("n_runs"));
+            CHECK(stats.getAttribute("n_runs").read<std::uint64_t>() > 0);
+            CHECK(stats.hasAttribute("n_overloads"));
+        }
         // The product is not overwritten.
         const auto [exists, exists_log] =
             run_cli(fmt::format(R"(publish "{}")", spool.string()), log);
@@ -316,5 +330,12 @@ TEST_CASE("publish CLI publishes a kept spool as the search would", "[cli]") {
         CHECK(std::filesystem::exists(file));
         check_same(read_product(output),
                    read_product(dir / "ok" / "run_ffa_results.h5"));
+        // The search's timings carry over, next to the publish time.
+        const HighFive::File published(output.string(),
+                                       HighFive::File::ReadOnly);
+        REQUIRE(published.exist("run_stats"));
+        const auto stats = published.getGroup("run_stats");
+        CHECK(stats.hasAttribute("timing_total_s"));
+        CHECK(stats.hasAttribute("timing_publish_s"));
     }
 }
