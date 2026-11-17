@@ -1,21 +1,15 @@
 #include "ep_seed_slices.hpp"
 
 #include <algorithm>
-#include <cmath>
+#include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <optional>
-#include <random>
 #include <set>
-#include <string>
-#include <tuple>
-#include <utility>
+#include <stdexcept>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
-#include <hdf5.h>
-#include <highfive/highfive.hpp>
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/plans.hpp"
@@ -364,7 +358,7 @@ TEST_CASE("CPU EP: seed slices are exact under a static pulsar mask",
 }
 
 TEST_CASE("CPU EP: seed slices are exact in jerk and circular searches",
-          "[ep][seed_slices]") {
+          "[ep][seed_slices][slow]") {
     for (const SizeType nparams : {SizeType{3}, SizeType{5}}) {
         CAPTURE(nparams);
         const auto cfg = loki::test::seed_slice_config(nparams,
@@ -401,4 +395,44 @@ TEST_CASE("CPU EP: an early harvest carries across the slices of a run",
     for (SizeType r = 0; r < whole.size(); ++r) {
         CHECK(sliced[r].n_harvested_total == whole[r].n_harvested_total);
     }
+}
+
+TEST_CASE("CPU EP: seed slices are exact over several acceleration cells",
+          "[ep][seed_slices][slow]") {
+    // Seeds on more than one acceleration row: a slice takes the same
+    // frequency cells from every row (strided, not one contiguous range).
+    const auto cfg          = loki::test::seed_slice_config(/*nparams=*/2,
+                                                            /*fourier=*/false,
+                                                            /*nthreads=*/2,
+                                                            /*accel_max=*/3.0e5,
+                                                            /*nsegments=*/8);
+    const auto [ts_e, ts_v] = loki::test::seed_slice_series(cfg);
+    const loki::plans::FFAPlan<float> plan(cfg);
+    const auto n_accel = plan.get_param_counts().back().front();
+    const auto n_freq  = n_freq_cells(cfg);
+    REQUIRE(n_accel >= 3);
+    constexpr SizeType kMaxSugg = 1U << 20U;
+    const auto whole = run_cpu_edges(cfg, ts_e, ts_v, {}, {}, {}, kMaxSugg);
+    REQUIRE(whole.size() == 2);
+    for (const auto& run : whole) {
+        REQUIRE(run.n_leaves() > 0);
+        REQUIRE(run.total_overloads() == 0);
+    }
+    loki::test::check_same_runs(
+        whole, run_cpu_edges(cfg, ts_e, ts_v,
+                             loki::search::even_seed_slice_edges(5, n_freq), {},
+                             {}, kMaxSugg));
+    loki::test::check_same_runs(
+        whole,
+        run_cpu_edges(cfg, ts_e, ts_v, {0, 1, n_freq / 3, n_freq - 1, n_freq},
+                      {}, {}, kMaxSugg));
+    // A pulsar mask removes the same cells from every row.
+    PruneRFIConfig rfi;
+    rfi.pulsar_mask   = {ParamWindow{.f_lo = 150.0, .f_hi = 152.0}};
+    const auto masked = run_cpu_edges(cfg, ts_e, ts_v, {}, rfi, {}, kMaxSugg);
+    REQUIRE(masked.front().total_masked() > 0);
+    loki::test::check_same_runs(
+        masked, run_cpu_edges(cfg, ts_e, ts_v,
+                              loki::search::even_seed_slice_edges(7, n_freq),
+                              rfi, {}, kMaxSugg));
 }

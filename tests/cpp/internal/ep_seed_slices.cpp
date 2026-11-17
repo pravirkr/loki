@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <random>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -99,7 +101,10 @@ std::vector<SliceLeaf> make_leaves(const std::vector<double>& params,
             .score_ep = scores_ep[i],
             .width    = widths.empty() ? 0U : widths[i]};
     }
-    std::ranges::sort(leaves);
+    std::ranges::sort(leaves, [](const SliceLeaf& a, const SliceLeaf& b) {
+        return std::tie(a.params, a.score, a.score_ep, a.width) <
+               std::tie(b.params, b.score, b.score_ep, b.width);
+    });
     return leaves;
 }
 
@@ -124,6 +129,8 @@ void check_same_stats(const search::PruneStats& a,
 
 } // namespace
 
+bool SliceLeaf::operator==(const SliceLeaf& other) const = default;
+
 SizeType RunResults::total_overloads() const noexcept {
     SizeType n = 0;
     for (const auto& s : stats) {
@@ -140,9 +147,12 @@ SizeType RunResults::total_masked() const noexcept {
     return n;
 }
 
-search::PulsarSearchConfig
-seed_slice_config(SizeType nparams, bool fourier, int nthreads) {
-    std::vector<ParamLimit> limits{{.min = -30.0, .max = 30.0},
+search::PulsarSearchConfig seed_slice_config(SizeType nparams,
+                                             bool fourier,
+                                             int nthreads,
+                                             double accel_max,
+                                             SizeType nsegments) {
+    std::vector<ParamLimit> limits{{.min = -accel_max, .max = accel_max},
                                    {.min = 140.0, .max = 160.0}};
     if (nparams >= 3) {
         limits.insert(limits.begin(),
@@ -169,7 +179,7 @@ seed_slice_config(SizeType nparams, bool fourier, int nthreads) {
             /*nbins_max=*/1024,
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
-            /*nsegments=*/16,
+            nsegments,
             /*snr_min=*/5.0,
             /*max_passing_candidates=*/1U << 22U,
             /*prune_poly_order=*/nparams,

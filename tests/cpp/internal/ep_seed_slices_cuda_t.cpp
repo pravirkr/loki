@@ -190,6 +190,36 @@ TEST_CASE("CUDA EP: seed slices give the leaves and stats of one prune",
     }
 }
 
+TEST_CASE("CUDA EP: seed slices are exact over several acceleration cells",
+          "[ep][seed_slices][cuda]") {
+    // Seeds on more than one acceleration row: a slice takes the same
+    // frequency cells from every row (strided, not one contiguous range).
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("CUDA backend not built");
+    }
+    const loki::cuda_utils::CudaSetDeviceGuard guard(0);
+    const auto cfg          = loki::test::seed_slice_config(/*nparams=*/2,
+                                                            /*fourier=*/true,
+                                                            /*nthreads=*/1,
+                                                            /*accel_max=*/3.0e5,
+                                                            /*nsegments=*/8);
+    const auto [ts_e, ts_v] = loki::test::seed_slice_series(cfg);
+    REQUIRE(loki::plans::FFAPlan<ComplexType>(cfg)
+                .get_param_counts()
+                .back()
+                .front() >= 3);
+    constexpr SizeType kMaxSugg = 1U << 20U;
+    const auto whole            = run_engine(cfg, ts_e, ts_v, 1, kMaxSugg);
+    REQUIRE(whole.size() == 2);
+    REQUIRE(whole.front().n_leaves() > 0);
+    REQUIRE(whole.front().total_overloads() == 0);
+    // One prune repeats exactly, so slices can be compared exactly.
+    loki::test::check_same_runs(whole,
+                                run_engine(cfg, ts_e, ts_v, 1, kMaxSugg));
+    loki::test::check_same_runs(whole,
+                                run_engine(cfg, ts_e, ts_v, 5, kMaxSugg));
+}
+
 TEST_CASE("CUDA EP: seed slices fit a tree smaller than the seeds",
           "[ep][seed_slices][cuda]") {
     // A planner that slices sizes the tree for the largest slice: with a

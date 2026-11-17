@@ -1,6 +1,5 @@
 #pragma once
 
-#include <compare>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -26,7 +25,9 @@ struct SliceLeaf {
     float score{};
     float score_ep{};
     std::uint32_t width{};
-    auto operator<=>(const SliceLeaf&) const = default;
+    /// Defined (defaulted) in ep_seed_slices.cpp, which the host compiler
+    /// builds: no C++20 comparison in a header that nvcc reads.
+    [[nodiscard]] bool operator==(const SliceLeaf& other) const;
 };
 
 /// One run of a result: leaves sorted (slices change their order), stats.
@@ -45,11 +46,15 @@ struct RunResults {
     [[nodiscard]] SizeType total_masked() const noexcept;
 };
 
-/// 2^18 samples in 16 segments over 140-160 Hz, nbins 32, with @p nparams
-/// parameters (2: acceleration, 3: jerk, 5: circular), wide enough that the
-/// higher derivatives branch.
-search::PulsarSearchConfig
-seed_slice_config(SizeType nparams, bool fourier, int nthreads);
+/// 2^18 samples in @p nsegments segments over 140-160 Hz, nbins 32, with
+/// @p nparams parameters (2: acceleration, 3: jerk, 5: circular), wide
+/// enough that the higher derivatives branch. Acceleration within
+/// +-@p accel_max m/s^2 (the default gives one acceleration cell of seeds).
+search::PulsarSearchConfig seed_slice_config(SizeType nparams,
+                                             bool fourier,
+                                             int nthreads,
+                                             double accel_max   = 30.0,
+                                             SizeType nsegments = 16);
 
 /// Unit-variance noise and one bright pulsar near 143 Hz.
 std::pair<std::vector<float>, std::vector<float>>
