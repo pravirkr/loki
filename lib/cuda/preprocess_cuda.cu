@@ -212,6 +212,8 @@ compact(Load load, SizeType len, float* out, BlockScan::TempStorage& scan) {
     return base;
 }
 
+/// min_valid() on a time-domain grid, whose blocks hold at least 16 samples:
+/// the floor min(block, 3) is always 3.
 __device__ SizeType min_valid_dev(double min_good, SizeType len) {
     const auto need =
         static_cast<SizeType>(ceil(min_good * static_cast<double>(len)));

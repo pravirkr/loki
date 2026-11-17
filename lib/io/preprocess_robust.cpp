@@ -106,14 +106,10 @@ SizeType blocks_per_window(SizeType window, SizeType block) {
     return k % 2 == 0 ? k + 1 : k;
 }
 
-SizeType min_valid(double min_good, SizeType len) {
-    if (len == 0) {
-        return 1;
-    }
+SizeType min_valid(double min_good, SizeType len, SizeType block) {
     const auto need =
         static_cast<SizeType>(std::ceil(min_good * static_cast<double>(len)));
-    const SizeType floor = std::min<SizeType>(len, 3);
-    return std::max(need, floor);
+    return std::max(need, std::min<SizeType>(block, 3));
 }
 
 double median_of(std::vector<double> v) {
