@@ -674,6 +674,29 @@ and 2.0 % (wall time 128, 128, 126 s against 128 s). At such settings the
 limit is nearly inert; restricting the children at branching with the same
 margin would remove the same leaves earlier, so it would be as inert.
 
+The validation's orbit checks prune hard but lose orbits at the period
+limit. Injections (2^24 samples, T = 1074 s = `p_orb_min`, 100 Hz, S/N 25,
+crackle order, m_c_max 5, eta 1, 16 runs, CUDA) at P_orb = 1.0, 1.1, 1.3
+and 2.0 T, four orbital phases, with a light (0.3 M_sun) companion and with
+m_c = m_c_max, m_p = m_p_min (the mass limit), were searched with the
+`p_orb_min` and mass checks as they are (the point estimate
+`omega^2 = -snap / accel`), with both widened by `validation_significance`
+cell widths (kill only if `|snap| - k dsnap > omega_max^2 (|accel| +
+k daccel)`, or if `|accel| - k daccel` exceeds the mass limit at the cell's
+largest `omega^2`), and with both removed (a scratch build). Removing them
+leaves 1.3-2.8 times as many leaves; widening them, 1.09-1.31 times. At
+P_orb = `p_orb_min` the checks as they are lower the best score in 6 of the 8
+cases (by 2.1-5.5) and lose runs scoring 8 or more in 5; widened, they recover
+as much as removing them does (same best score in all 32 cases). From
+1.1 `p_orb_min` the widening changes no best score. Most of the loss of
+compact orbits is elsewhere: without an orbit the same search finds the
+signal in 14 of 16 runs (median best score 18.9); with the heavy companion
+at P_orb = T, even without the checks, in 4-9 runs (median 0-8.5). In
+stage-by-stage traces of such lost runs (CPU) the leaf nearest the true
+orbit drifts by more than a cell width from the 18th-33rd of 128 stages and
+the orbit leaves the tree by the 41st-43rd, the same with and without the
+checks.
+
 Reserve of a slice (docs/memory.md): on the 495 Hz chunk above, which holds a
 bright pulsar, the busiest slice held 65-100 cells' worth of leaves beyond
 its noise forecast at 32 and 64 slices (the room for one CUDA batch covered
