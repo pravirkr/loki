@@ -363,20 +363,35 @@ private:
     }
 
     ChunkPlan plan_sweep(std::span<const RegionDesign> designs) {
-        auto state = run_pass(designs, std::nullopt);
-        while (state.failure && !state.failure->outside_cap &&
-               m_memory.kind == EPMemoryKind::kCuda &&
-               m_memory.batch_size > 1) {
+        // On CUDA a smaller batch leaves more room: halve it until a pass
+        // places every chunk and its plan (replanned with the shared FFA size
+        // fixed if needed) fits.
+        std::optional<ChunkPlan> first;
+        while (!first) {
+            auto state = run_pass(designs, std::nullopt);
+            const bool can_halve =
+                m_memory.kind == EPMemoryKind::kCuda && m_memory.batch_size > 1;
+            std::string failure;
+            if (!state.failure) {
+                try {
+                    first = plan_from_pass(designs, std::move(state));
+                    break;
+                } catch (const std::runtime_error& e) {
+                    if (!can_halve) {
+                        throw;
+                    }
+                    failure = e.what();
+                }
+            } else if (state.failure->outside_cap || !can_halve) {
+                throw std::runtime_error(state.failure->message);
+            }
             m_memory.batch_size /= 2;
-            spdlog::warn("EPRegionPlanner: minimum chunk does not fit; "
-                         "retrying with CUDA batch={}",
+            spdlog::warn("EPRegionPlanner: {}; retrying with CUDA batch={}",
+                         failure.empty() ? "minimum chunk does not fit"
+                                         : "the sweep does not fit",
                          m_memory.batch_size);
-            state = run_pass(designs, std::nullopt);
         }
-        if (state.failure) {
-            throw std::runtime_error(state.failure->message);
-        }
-        auto plan = plan_from_pass(designs, std::move(state));
+        auto plan = std::move(*first);
         if (m_memory.kind != EPMemoryKind::kCuda) {
             return plan;
         }
