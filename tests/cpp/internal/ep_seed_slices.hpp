@@ -12,6 +12,7 @@
 
 #include "lib/pipelines/ep_sweep_common.hpp"
 #include "lib/search/cands.hpp"
+#include "lib/search/slice_scratch.hpp"
 
 // Shared by the seed-slice tests of both backends (ep_seed_slices_t.cpp and
 // ep_seed_slices_cuda_t.cpp): a small EP search, and its final leaves and
@@ -78,5 +79,23 @@ RunResults to_run_results(const pipelines::detail::EPResultPayload& payload);
 /// level stats, exactly.
 void check_same_runs(const std::vector<RunResults>& a,
                      const std::vector<RunResults>& b);
+
+/// Sets the rows a sliced run holds in memory before it spills to disk,
+/// and restores the old value when it goes out of scope.
+class SpillRowsGuard {
+public:
+    explicit SpillRowsGuard(SizeType rows)
+        : m_old(search::detail::slice_spill_rows()) {
+        search::detail::set_slice_spill_rows(rows);
+    }
+    ~SpillRowsGuard() { search::detail::set_slice_spill_rows(m_old); }
+    SpillRowsGuard(const SpillRowsGuard&)            = delete;
+    SpillRowsGuard& operator=(const SpillRowsGuard&) = delete;
+    SpillRowsGuard(SpillRowsGuard&&)                 = delete;
+    SpillRowsGuard& operator=(SpillRowsGuard&&)      = delete;
+
+private:
+    SizeType m_old;
+};
 
 } // namespace loki::test

@@ -185,6 +185,16 @@ void SliceScratch::read(SizeType begin,
     read_column(m_widths, begin, widths, m_stem);
 }
 
+namespace {
+std::atomic<SizeType> g_slice_spill_rows{SizeType{1} << 20U};
+} // namespace
+
+SizeType slice_spill_rows() noexcept { return g_slice_spill_rows.load(); }
+
+void set_slice_spill_rows(SizeType rows) noexcept {
+    g_slice_spill_rows.store(rows);
+}
+
 std::filesystem::path
 slice_scratch_stem(const std::filesystem::path& result_file,
                    std::string_view run_name) {

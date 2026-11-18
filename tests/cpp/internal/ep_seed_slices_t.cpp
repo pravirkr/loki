@@ -282,11 +282,18 @@ TEST_CASE("CPU EP: seed slices give the leaves and stats of one prune",
         REQUIRE(run.n_leaves() > 0);
         CHECK(run.total_overloads() == 0);
     }
-    // Slices that do not divide the cells, and more slices than cells.
-    for (const SizeType k : {SizeType{3}, SizeType{7}, n_freq + 5}) {
-        CAPTURE(k);
-        const auto sliced = run_cpu(cfg, ts_e, ts_v, k);
-        loki::test::check_same_runs(whole, sliced);
+    // Slices that do not divide the cells, and more slices than cells; the
+    // final leaves held in memory, all on disk, or spilled mid-run.
+    const auto n_run = whole.front().n_leaves();
+    for (const SizeType spill :
+         {loki::search::detail::slice_spill_rows(), SizeType{0}, n_run / 2}) {
+        CAPTURE(spill);
+        const loki::test::SpillRowsGuard guard(spill);
+        for (const SizeType k : {SizeType{3}, SizeType{7}, n_freq + 5}) {
+            CAPTURE(k);
+            const auto sliced = run_cpu(cfg, ts_e, ts_v, k);
+            loki::test::check_same_runs(whole, sliced);
+        }
     }
     // Uneven slices, as a planner balancing the tree of each slice sets.
     loki::test::check_same_runs(
@@ -343,12 +350,18 @@ TEST_CASE("CPU EP: seed slices keep the per-run leaf reduction",
     REQUIRE(whole.front().reduction.size() == 5);
     REQUIRE(whole.front().reduction[2] > 0); // cells dropped leaves
     // The same retained leaves and counts (leaf order differs, so an exact
-    // tie could pick another representative; this input has none).
-    loki::test::check_same_runs(
-        whole,
-        run_cpu_edges(cfg, ts_e, ts_v,
-                      loki::search::even_seed_slice_edges(7, n_freq_cells(cfg)),
-                      {}, spec));
+    // tie could pick another representative; this input has none), from
+    // memory and from disk.
+    for (const SizeType spill :
+         {loki::search::detail::slice_spill_rows(), SizeType{0}}) {
+        CAPTURE(spill);
+        const loki::test::SpillRowsGuard guard(spill);
+        loki::test::check_same_runs(
+            whole, run_cpu_edges(cfg, ts_e, ts_v,
+                                 loki::search::even_seed_slice_edges(
+                                     7, n_freq_cells(cfg)),
+                                 {}, spec));
+    }
 }
 
 TEST_CASE("CPU EP: seed slices are exact in the Fourier domain",
@@ -396,6 +409,9 @@ TEST_CASE("CPU EP: seed slices are exact in jerk and circular searches",
         // Circular runs count their leaves by basis at every stage.
         CHECK(whole.front().circular.empty() == (nparams != 5));
         loki::test::check_same_runs(whole, run_cpu(cfg, ts_e, ts_v, 5));
+        // The wider rows of these bases through the scratch.
+        const loki::test::SpillRowsGuard guard(0);
+        loki::test::check_same_runs(whole, run_cpu(cfg, ts_e, ts_v, 5));
     }
 }
 
@@ -418,10 +434,15 @@ TEST_CASE("CPU EP: an early harvest carries across the slices of a run",
     // One slice per cell: the pulsar's seeds sit in several slices, but the
     // mask its first harvest widened keeps the later slices from harvesting
     // it again.
-    const auto sliced = run_cpu(cfg, ts_e, ts_v, n_freq_cells(cfg), rfi);
-    REQUIRE(sliced.size() == whole.size());
-    for (SizeType r = 0; r < whole.size(); ++r) {
-        CHECK(sliced[r].n_harvested_total == whole[r].n_harvested_total);
+    for (const SizeType spill :
+         {loki::search::detail::slice_spill_rows(), SizeType{0}}) {
+        CAPTURE(spill);
+        const loki::test::SpillRowsGuard guard(spill);
+        const auto sliced = run_cpu(cfg, ts_e, ts_v, n_freq_cells(cfg), rfi);
+        REQUIRE(sliced.size() == whole.size());
+        for (SizeType r = 0; r < whole.size(); ++r) {
+            CHECK(sliced[r].n_harvested_total == whole[r].n_harvested_total);
+        }
     }
 }
 

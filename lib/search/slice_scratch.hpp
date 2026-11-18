@@ -20,8 +20,9 @@ namespace loki::search::detail {
  * @brief Row store of one run's final leaves, one raw file per column:
  * leaf rows (`leaves_stride` doubles), scores, scores_ep and widths.
  *
- * A run pruned in K seed slices appends each finished slice's rows, so the
- * host holds at most what the caller passes to one append(); the run is
+ * A run pruned in K seed slices whose final leaves outgrow
+ * slice_spill_rows() moves them here and appends each further slice's rows,
+ * so the host holds at most what the caller passes to one append(); the run is
  * written from the files afterwards (PruneResultWriter::write_run_results
  * with a scratch). Rows keep the order they were appended in. The files
  * live beside the run's result file and are removed by the destructor, on
@@ -82,6 +83,16 @@ private:
     bool m_sealed{false};
     double m_write_seconds{};
 };
+
+/// Final leaves a run pruned in seed slices holds in memory before it moves
+/// them to a SliceScratch: 2^20 by default (about 0.1 GB of leaf rows). Real
+/// searches stay far below it (production runs: at most tens of thousands);
+/// only a bright source that survived zapping, masking and harvesting spills
+/// to disk.
+[[nodiscard]] SizeType slice_spill_rows() noexcept;
+/// Sets slice_spill_rows() for the process (tests lower it to reach the
+/// disk path).
+void set_slice_spill_rows(SizeType rows) noexcept;
 
 /// A new scratch stem for run @p run_name, beside its @p result_file:
 /// unique within the process.

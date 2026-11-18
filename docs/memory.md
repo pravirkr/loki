@@ -655,18 +655,23 @@ make the slices' forecasts as equal as possible (`seed_slice_edges`, stored in
 the plan cache). A chunk that needs slices may widen only while its own FFA
 buffers take at most a quarter of the limit: those buffers are shared by the
 whole sweep, and wider sliced chunks would hand them the room the slices
-free. A run's finished slices' final leaves go to a scratch on disk beside
-the run's result file (`lib/search/slice_scratch.hpp`: one raw file per
-column, in the sweep's temporary directory, removed on every exit), and the
-run is written from it in batches of 2^16 rows, with the same datasets, bit
-for bit, as when they stayed in memory. The per-run reduction streams over the
-scratch twice: once into the cell cap, once to gather the rows it keeps. So
-the host holds no slice: the CPU writes a slice straight from the tree, and
-the CUDA engine copies it to the scratch in pieces of one batch. A bright
-source or RFI that is not zapped, masked or harvested can still fill every
-slice's tree, up to K times `max_sugg` final leaves per run; they now cost
-disk instead of host memory, and a run that writes more than 1 GB of scratch
-says so. Where a tree overflowed, the overload summary at the end of a
+free. A run's finished slices' final leaves stay on the host up to
+`slice_spill_rows()` rows (2^20, about 0.1 GB for a circular search). Real
+searches end far below that: runs of a few tens of final leaves are typical
+and about 45,000 the most seen. A run whose slices would go past
+the cap moves all its rows to a scratch on disk beside the run's result file
+(`lib/search/slice_scratch.hpp`: one raw file per column, in the sweep's
+temporary directory, removed on every exit) and appends every later slice
+there. It is then written from the scratch in batches of 2^16 rows, with the
+same datasets, bit for bit, as from memory. The per-run reduction streams
+over the scratch twice: once into the cell cap, once to gather the rows it
+keeps. Past the cap the host holds no slice: the CPU writes a slice straight
+from the tree, and the CUDA engine copies it to the scratch in pieces of one
+batch. The scratch is a fail-safe, not a working mode: only a bright source
+or RFI that is not zapped, masked or harvested fills every slice's tree, up
+to K times `max_sugg` final leaves per run. That costs disk instead of host
+memory, and a run that writes more than 1 GB of scratch says so; zap, mask or
+harvest the source, or search it at a higher threshold. Where a tree overflowed, the overload summary at the end of a
 search names the chunk. The planner still counts `L_final` final leaves per
 worker (`held_final_leaves`, the noise forecast) on the CPU: a conservative
 term now, kept so that plans do not change. A run of one slice holds its

@@ -330,14 +330,11 @@ public:
         } else {
             // Prune the seeds slice by slice over the same FFA output and
             // report one merged result for the run.
-            // Each finished slice's final leaves go to a scratch beside the
-            // result file in batch-sized pieces, so the host never holds a
-            // slice.
+            // The slices' final leaves stay on the host up to
+            // slice_spill_rows() rows. Beyond it all of them go to a scratch
+            // beside the result file, in batch-sized pieces, so the host
+            // never holds a large slice.
             RunResults results;
-            results.scratch = std::make_unique<search::detail::SliceScratch>(
-                search::detail::slice_scratch_stem(actual_result_file,
-                                                   run_name),
-                world_tree.get_leaves_stride());
             SizeType prune_level = 0;
             for (SizeType s = 0; s < n_slices; ++s) {
                 initialize(ffa_fold, ref_seg, m_stream,
@@ -346,7 +343,7 @@ public:
                 prune_seeds(ffa_fold, ascend_levels);
                 peak_live = std::max(peak_live, world_tree.peak_live());
                 n_overloads += world_tree.overload_count();
-                collect_survivors_to(*results.scratch);
+                collect_slice(results, actual_result_file, run_name);
                 // Resolved leaves are not counted on the GPU.
                 results.stats.merge_slice(m_pstats, /*sum_resolved=*/false);
                 prune_level = std::max(prune_level, m_prune_level);
@@ -999,8 +996,8 @@ private:
                        scores_ep_cv.second);
     }
 
-    /// Final leaves of a run: on the host (one prune), or on disk (seed
-    /// slices, one slice after another).
+    /// Final leaves of a run: on the host, or on disk once seed slices
+    /// outgrow slice_spill_rows() rows.
     struct RunResults {
         std::vector<double> leaves;
         std::vector<float> scores;
@@ -1010,6 +1007,34 @@ private:
         /// The merged level stats of the slices (unused with one slice).
         search::PruneStatsCollection stats;
     };
+
+    /// Appends the tree's final leaves to @p results: to its host vectors
+    /// while they stay within slice_spill_rows() rows, else to its scratch,
+    /// which first takes the rows held so far.
+    void collect_slice(RunResults& results,
+                       const std::filesystem::path& result_file,
+                       std::string_view run_name) {
+        const auto& world_tree = get_workspace().world_tree;
+        if (!results.scratch && results.scores.size() + world_tree.get_size() <=
+                                    search::detail::slice_spill_rows()) {
+            collect_survivors(results);
+            return;
+        }
+        if (!results.scratch) {
+            results.scratch = std::make_unique<search::detail::SliceScratch>(
+                search::detail::slice_scratch_stem(result_file, run_name),
+                world_tree.get_leaves_stride());
+            results.scratch->append_leaves(results.leaves);
+            results.scratch->append_scores(results.scores);
+            results.scratch->append_scores_ep(results.scores_ep);
+            results.scratch->append_widths(results.widths);
+            std::vector<double>().swap(results.leaves);
+            std::vector<float>().swap(results.scores);
+            std::vector<float>().swap(results.scores_ep);
+            std::vector<std::uint32_t>().swap(results.widths);
+        }
+        collect_survivors_to(*results.scratch);
+    }
 
     /// Appends the tree's final leaves to @p scratch, as collect_survivors()
     /// does to host vectors, but through host buffers of m_batch_size rows:

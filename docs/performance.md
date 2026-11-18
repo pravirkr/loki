@@ -629,6 +629,25 @@ one run, one chunk of 10 seed slices, CUDA, 30 GB; outputs on local disk:
   error. Put the output directory on a disk with room for such runs, or zap,
   mask or harvest the line.
 
+**Final leaves in memory up to a cap.** The scratch above is a fail-safe:
+real runs end with tens of final leaves (about 45,000 the most seen), and
+writing them through a file only adds work. A sliced run now holds its final
+leaves on the host up to 2^20 rows (`slice_spill_rows()`) and moves them to
+the scratch only when a slice would pass that. The reader also reads the
+series straight into its buffer and closes the file before the variance is
+allocated. The same setup as above:
+
+| Series | Peak host RSS | Scratch | Search | Postprocess |
+|---|---|---|---|---|
+| noise | 0.64 GB (0.77 before) | none | 33.5 s | 0.0 s |
+| line, 0.02 | 0.64 GB | 8.8 GB, 76.5 M leaves, 15.9 s to write | 89.0 s | 5.4 s |
+
+- The 0.77 GB peak was at the end of loading: the samples, the file pages the
+  reader had mapped and the variance, 12 bytes per sample. The peak is now
+  during preprocessing on the GPU: the samples and the variance (8 bytes per
+  sample) and the CUDA context (about 0.12 GB). The search holds 0.15 GB.
+- A run below the cap writes from memory, bit for bit as from the scratch.
+
 Whole searches, plan only (2^26 samples, CUDA, 32 runs):
 
 | Search | Before | After |

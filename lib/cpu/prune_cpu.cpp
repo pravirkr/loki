@@ -176,14 +176,9 @@ public:
             // write one merged result for the run. Each finished slice's
             // final leaves go to a scratch beside the result file, so the
             // host never holds more than the tree.
-            SliceResults merged{
-                .scratch = std::make_unique<search::detail::SliceScratch>(
-                    search::detail::slice_scratch_stem(actual_result_file,
-                                                       run_name),
-                    get_workspace().world_tree.get_leaves_stride()),
-                .stats       = {},
-                .prune_level = 0,
-            };
+            SliceResults merged;
+            merged.scratch_stem = search::detail::slice_scratch_stem(
+                actual_result_file, run_name);
             for (SizeType s = 0; s < n_slices; ++s) {
                 std::ofstream slice_log(actual_log_file, std::ios::app);
                 slice_log << fmt::format("Seed slice {} of {}\n", s + 1,
@@ -423,8 +418,16 @@ private:
 
     /// The final leaves of a run pruned in seed slices (on disk), and its
     /// stats.
+    /// Final leaves of the run's slices: in memory up to
+    /// search::detail::slice_spill_rows() rows, then all on disk.
     struct SliceResults {
+        std::vector<double> leaves;
+        std::vector<float> scores;
+        std::vector<float> scores_ep;
+        std::vector<std::uint32_t> widths;
+        /// Set once the rows outgrow the memory cap.
         std::unique_ptr<search::detail::SliceScratch> scratch;
+        std::filesystem::path scratch_stem;
         search::PruneStatsCollection stats;
         /// Deepest level any slice reached.
         SizeType prune_level{0};
@@ -466,17 +469,43 @@ private:
     void collect_slice(SliceResults& merged) {
         const auto widths      = finalize_survivors();
         const auto& world_tree = get_workspace().world_tree;
-        auto& scratch          = *merged.scratch;
         const auto leaves      = world_tree.get_leaves_circular_view();
         const auto scores      = world_tree.get_scores_circular_view();
         const auto scores_ep   = world_tree.get_scores_ep_circular_view();
-        scratch.append_leaves(leaves.first);
-        scratch.append_leaves(leaves.second);
-        scratch.append_scores(scores.first);
-        scratch.append_scores(scores.second);
-        scratch.append_scores_ep(scores_ep.first);
-        scratch.append_scores_ep(scores_ep.second);
-        scratch.append_widths(widths);
+        if (!merged.scratch && merged.scores.size() + world_tree.get_size() <=
+                                   search::detail::slice_spill_rows()) {
+            const auto append = [](auto& dst, const auto& view) {
+                dst.insert(dst.end(), view.first.begin(), view.first.end());
+                dst.insert(dst.end(), view.second.begin(), view.second.end());
+            };
+            append(merged.leaves, leaves);
+            append(merged.scores, scores);
+            append(merged.scores_ep, scores_ep);
+            merged.widths.insert(merged.widths.end(), widths.begin(),
+                                 widths.end());
+        } else {
+            if (!merged.scratch) {
+                // Over the cap: the rows held so far go first, in order.
+                merged.scratch = std::make_unique<search::detail::SliceScratch>(
+                    merged.scratch_stem, world_tree.get_leaves_stride());
+                merged.scratch->append_leaves(merged.leaves);
+                merged.scratch->append_scores(merged.scores);
+                merged.scratch->append_scores_ep(merged.scores_ep);
+                merged.scratch->append_widths(merged.widths);
+                std::vector<double>().swap(merged.leaves);
+                std::vector<float>().swap(merged.scores);
+                std::vector<float>().swap(merged.scores_ep);
+                std::vector<std::uint32_t>().swap(merged.widths);
+            }
+            auto& scratch = *merged.scratch;
+            scratch.append_leaves(leaves.first);
+            scratch.append_leaves(leaves.second);
+            scratch.append_scores(scores.first);
+            scratch.append_scores(scores.second);
+            scratch.append_scores_ep(scores_ep.first);
+            scratch.append_scores_ep(scores_ep.second);
+            scratch.append_widths(widths);
+        }
         merged.stats.merge_slice(m_pstats);
         merged.prune_level = std::max(merged.prune_level, m_prune_level);
     }
@@ -491,10 +520,21 @@ private:
         const auto total_pruning_gflops = compute_total_prune_gflops();
         auto result_writer              = search::PruneResultWriter(
             actual_result_file, search::PruneResultWriter::Mode::kAppend);
-        search::detail::log_scratch_volume(*merged.scratch, run_name);
-        result_writer.write_run_results(
-            run_name, m_snail_scheme.get_data(), *merged.scratch,
-            total_pruning_gflops, m_cfg.get_nparams(), m_pstats, m_reduction);
+        if (merged.scratch) {
+            search::detail::log_scratch_volume(*merged.scratch, run_name);
+            result_writer.write_run_results(
+                run_name, m_snail_scheme.get_data(), *merged.scratch,
+                total_pruning_gflops, m_cfg.get_nparams(), m_pstats,
+                m_reduction);
+        } else {
+            result_writer.write_run_results(
+                run_name, m_snail_scheme.get_data(),
+                {std::span<double>(merged.leaves), {}},
+                {std::span<float>(merged.scores), {}},
+                {std::span<float>(merged.scores_ep), {}}, total_pruning_gflops,
+                merged.scores.size(), m_cfg.get_nparams(), m_pstats,
+                merged.widths, m_reduction);
+        }
         if (m_rfi->has_harvest()) {
             result_writer.write_run_harvest(
                 run_name, m_harvest, m_cfg.get_nparams(), m_n_harvested_total);
