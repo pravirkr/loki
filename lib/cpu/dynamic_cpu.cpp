@@ -402,6 +402,21 @@ void BaseChebyshevPruneDPFuncts<FoldType>::seed(
     this->score_folds(fold_segment, seed_scores, n_leaves);
 }
 
+namespace {
+
+// Only the circular-orbit resolve looks up the FFA's jerk planes: the Taylor
+// and Chebyshev bases fold over acceleration and frequency alone
+void check_single_jerk_point(std::span<const SizeType> param_grid_count_init) {
+    const auto n_params = param_grid_count_init.size();
+    if (n_params > 2) {
+        error_check::check_equal(param_grid_count_init[n_params - 3],
+                                 SizeType{1},
+                                 "FFA jerk grid needs the circular basis");
+    }
+}
+
+} // namespace
+
 // Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldType FoldType>
 PrunePolyTaylorDPFuncts<FoldType>::PrunePolyTaylorDPFuncts(
@@ -418,7 +433,9 @@ PrunePolyTaylorDPFuncts<FoldType>::PrunePolyTaylorDPFuncts(
            tseg_ffa,
            std::move(cfg),
            batch_size,
-           branch_max) {}
+           branch_max) {
+    check_single_jerk_point(param_grid_count_init);
+}
 
 template <SupportedFoldType FoldType>
 SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
@@ -541,7 +558,9 @@ PrunePolyChebyshevDPFuncts<FoldType>::PrunePolyChebyshevDPFuncts(
            tseg_ffa,
            std::move(cfg),
            batch_size,
-           branch_max) {}
+           branch_max) {
+    check_single_jerk_point(param_grid_count_init);
+}
 
 template <SupportedFoldType FoldType>
 SizeType PrunePolyChebyshevDPFuncts<FoldType>::branch(
@@ -709,12 +728,13 @@ void PruneCircTaylorDPFuncts<FoldType>::resolve(
     std::pair<double, double> coord_init,
     SizeType n_leaves) const {
     const auto n_params     = this->m_cfg.get_nparams();
+    const auto n_jerk_init  = this->m_param_grid_count_init[n_params - 3];
     const auto n_accel_init = this->m_param_grid_count_init[n_params - 2];
     const auto n_freq_init  = this->m_param_grid_count_init[n_params - 1];
     circ_taylor_resolve_batch(leaves_branch, param_indices, phase_shift,
                               this->m_cfg.get_param_limits(), coord_add,
-                              coord_cur, coord_init, n_accel_init, n_freq_init,
-                              this->m_cfg.get_nbins(), n_leaves,
+                              coord_cur, coord_init, n_jerk_init, n_accel_init,
+                              n_freq_init, this->m_cfg.get_nbins(), n_leaves,
                               this->m_cfg.get_propagator_significance());
 }
 
@@ -745,6 +765,7 @@ void PruneCircTaylorDPFuncts<FoldType>::ascend(
     std::span<float> scratch_phase_shift,
     SizeType n_leaves) {
     const auto n_params     = this->m_cfg.get_nparams();
+    const auto n_jerk_init  = this->m_param_grid_count_init[n_params - 3];
     const auto n_accel_init = this->m_param_grid_count_init[n_params - 2];
     const auto n_freq_init  = this->m_param_grid_count_init[n_params - 1];
     const auto nbins        = this->m_cfg.get_nbins();
@@ -753,9 +774,9 @@ void PruneCircTaylorDPFuncts<FoldType>::ascend(
 
     circ_taylor_ascend_resolve_batch(
         leaves_tree, scratch_param_indices, scratch_phase_shift,
-        this->m_cfg.get_param_limits(), coord_segments, coord_cur, n_accel_init,
-        n_freq_init, this->m_cfg.get_nbins(), n_leaves, n_segments,
-        this->m_cfg.get_propagator_significance());
+        this->m_cfg.get_param_limits(), coord_segments, coord_cur, n_jerk_init,
+        n_accel_init, n_freq_init, this->m_cfg.get_nbins(), n_leaves,
+        n_segments, this->m_cfg.get_propagator_significance());
 
     // Copy scores to scores_ep for future backup
     std::ranges::copy(scores_tree, scores_ep_tree.begin());

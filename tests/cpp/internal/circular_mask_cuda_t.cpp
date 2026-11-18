@@ -147,7 +147,7 @@ TEST_CASE("CUDA circular resolve classes leaves as the CPU does",
     std::vector<float> phase_cpu(n_leaves);
     loki::core::circ_taylor_resolve_batch(
         leaves, idx_cpu, phase_cpu, kLimits, kCoordAdd, kCoordCur, kCoordInit,
-        kNAccel, kNFreq, kNbins, n_leaves, kSignificance);
+        1, kNAccel, kNFreq, kNbins, n_leaves, kSignificance);
 
     const thrust::device_vector<double> leaves_d(leaves);
     const thrust::device_vector<uint8_t> mask_d(n_leaves, 1);
@@ -184,7 +184,7 @@ TEST_CASE("CUDA circular ascend resolve classes leaves as the CPU does",
     std::vector<SizeType> idx_cpu(n_out);
     std::vector<float> phase_cpu(n_out);
     loki::core::circ_taylor_ascend_resolve_batch(
-        leaves, idx_cpu, phase_cpu, kLimits, segments, kCoordCur, kNAccel,
+        leaves, idx_cpu, phase_cpu, kLimits, segments, kCoordCur, 1, kNAccel,
         kNFreq, kNbins, n_leaves, segments.size(), kSignificance);
 
     const thrust::device_vector<double> leaves_d(leaves);

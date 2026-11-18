@@ -181,8 +181,8 @@ TEST_CASE("leaf_phase matches the circular ascend resolve", "[leaf_phase]") {
     std::vector<SizeType> indices(n_leaves * segments.size());
     std::vector<float> phase_shift(n_leaves * segments.size());
     loki::core::circ_taylor_ascend_resolve_batch(
-        leaves, indices, phase_shift, limits, segments, coord_cur, kGrid, kGrid,
-        kNbins, n_leaves, segments.size(), kSignificant);
+        leaves, indices, phase_shift, limits, segments, coord_cur, 1, kGrid,
+        kGrid, kNbins, n_leaves, segments.size(), kSignificant);
     const auto models = check_against_resolve(leaves, kParams, phase_shift,
                                               segments, coord_cur);
     for (SizeType i = 0; i < models.size(); ++i) {

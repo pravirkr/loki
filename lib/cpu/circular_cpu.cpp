@@ -130,6 +130,48 @@ inline bool is_in_hole(double snap,
     return (!mask_circular_snap) && is_sig_jerk;
 }
 
+// Adds each leaf's FFA jerk plane to its fold index: the plane of its jerk dt
+// after its coordinate, propagated by its class (the circular classes' orbit,
+// the Taylor class's polynomial). Kept apart from the acceleration and
+// frequency lookups, so that a one-point jerk grid resolves as before.
+void add_jerk_planes(std::span<const double> leaves_tree,
+                     std::span<SizeType> param_indices,
+                     std::span<const SizeType> idx_circular_snap,
+                     std::span<const SizeType> idx_circular_crackle,
+                     std::span<const SizeType> idx_taylor,
+                     double dt,
+                     const ParamLimit& lim_jerk,
+                     SizeType n_jerk_init,
+                     SizeType plane_size) {
+    constexpr SizeType kLeavesStride = (5 + 2) * 2;
+    const auto add_plane             = [&](SizeType i, double j_new) {
+        param_indices[i] += psr_utils::get_nearest_idx_analytical(
+                                j_new, lim_jerk, n_jerk_init) *
+                            plane_size;
+    };
+    for (const auto i : idx_circular_snap) {
+        const auto lo        = i * kLeavesStride;
+        const auto j_cur     = leaves_tree[lo + 4];
+        const auto a_cur     = leaves_tree[lo + 6];
+        const auto omega_orb = std::sqrt(-leaves_tree[lo + 2] / a_cur);
+        add_plane(i, (j_cur * std::cos(omega_orb * dt)) -
+                         (a_cur * omega_orb * std::sin(omega_orb * dt)));
+    }
+    for (const auto i : idx_circular_crackle) {
+        const auto lo        = i * kLeavesStride;
+        const auto j_cur     = leaves_tree[lo + 4];
+        const auto a_cur     = leaves_tree[lo + 6];
+        const auto omega_orb = std::sqrt(-leaves_tree[lo + 0] / j_cur);
+        add_plane(i, (j_cur * std::cos(omega_orb * dt)) -
+                         (a_cur * omega_orb * std::sin(omega_orb * dt)));
+    }
+    for (const auto i : idx_taylor) {
+        const auto lo = i * kLeavesStride;
+        add_plane(i, leaves_tree[lo + 4] + (leaves_tree[lo + 2] * dt) +
+                         (leaves_tree[lo + 0] * 0.5 * dt * dt));
+    }
+}
+
 } // namespace
 
 SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
@@ -471,6 +513,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                                std::pair<double, double> coord_add,
                                std::pair<double, double> coord_cur,
                                std::pair<double, double> coord_init,
+                               SizeType n_jerk_init,
                                SizeType n_accel_init,
                                SizeType n_freq_init,
                                SizeType nbins,
@@ -644,6 +687,12 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
             psr_utils::get_nearest_idx_analytical(f_new, lim_freq, n_freq_init);
         param_indices[i] = (idx_a * n_freq_init) + idx_f;
     }
+    if (n_jerk_init > 1) {
+        add_jerk_planes(leaves_tree, param_indices, idx_circular_snap,
+                        idx_circular_crackle, idx_taylor, dt_add,
+                        param_limits[2], n_jerk_init,
+                        n_accel_init * n_freq_init);
+    }
 }
 
 void circ_taylor_ascend_resolve_batch(
@@ -653,6 +702,7 @@ void circ_taylor_ascend_resolve_batch(
     std::span<const ParamLimit> param_limits,
     std::span<const std::pair<double, double>> coord_segments,
     std::pair<double, double> coord_cur,
+    SizeType n_jerk_init,
     SizeType n_accel_init,
     SizeType n_freq_init,
     SizeType nbins,
@@ -816,6 +866,12 @@ void circ_taylor_ascend_resolve_batch(
             const auto idx_f = psr_utils::get_nearest_idx_analytical(
                 f_new, lim_freq, n_freq_init);
             param_indices_seg[i] = (idx_a * n_freq_init) + idx_f;
+        }
+        if (n_jerk_init > 1) {
+            add_jerk_planes(leaves_tree, param_indices_seg, idx_circular_snap,
+                            idx_circular_crackle, idx_taylor, dt,
+                            param_limits[2], n_jerk_init,
+                            n_accel_init * n_freq_init);
         }
     }
 }

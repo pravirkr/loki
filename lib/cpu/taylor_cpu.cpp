@@ -1230,12 +1230,15 @@ SizeType poly_taylor_seed(std::span<const SizeType> param_grid_count_init,
     for (const auto count : param_grid_count_init) {
         n_leaves *= count;
     }
+    const auto n_jerk_init =
+        (n_params > 2) ? param_grid_count_init[n_params - 3] : SizeType{1};
     const auto n_accel_init = param_grid_count_init[n_params - 2];
     const auto n_freq_init  = param_grid_count_init[n_params - 1];
     const auto& lim_accel   = param_limits[n_params - 2];
     const auto& lim_freq    = param_limits[n_params - 1];
     const auto d_freq_cur   = dparams_init[n_params - 1];
-    error_check::check_equal(n_leaves, n_accel_init * n_freq_init,
+    // The FFA folds over jerk, acceleration and frequency only
+    error_check::check_equal(n_leaves, n_jerk_init * n_accel_init * n_freq_init,
                              "n_leaves mismatch");
 
     // Create parameter sets tensor: (n_param_sets, poly_order + 2, 2)
@@ -1270,7 +1273,23 @@ SizeType poly_taylor_seed(std::span<const SizeType> param_grid_count_init,
             ++leaf_idx;
         }
     }
-    error_check::check_equal(leaf_idx, n_leaves, "n_leaves mismatch");
+    // A multi-point jerk grid is the FFA's slowest index: each further jerk
+    // point repeats the plane above, and every leaf takes its point's jerk
+    // (one point keeps zero, the centre of symmetric limits)
+    const auto plane_size = leaf_idx * leaves_stride;
+    for (SizeType jerk_idx = 1; jerk_idx < n_jerk_init; ++jerk_idx) {
+        std::copy_n(seed_leaves.begin(), plane_size,
+                    seed_leaves.begin() + (jerk_idx * plane_size));
+    }
+    if (n_jerk_init > 1) {
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            seed_leaves[(i * leaves_stride) + ((n_params - 3) * kParamStride)] =
+                psr_utils::get_param_val_at_idx(param_limits[n_params - 3],
+                                                n_jerk_init, i / leaf_idx);
+        }
+    }
+    error_check::check_equal(leaf_idx * n_jerk_init, n_leaves,
+                             "n_leaves mismatch");
     return n_leaves;
 }
 
