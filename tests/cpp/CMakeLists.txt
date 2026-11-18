@@ -74,6 +74,7 @@ if(CMAKE_CUDA_COMPILER)
   set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/fft_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/fft_long_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/keyed_rng_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_memory_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_score_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_fused_cuda_t.cpp

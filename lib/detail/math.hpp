@@ -19,6 +19,8 @@
 
 #include "loki/common/types.hpp"
 
+#include "lib/detail/keyed_rng.hpp"
+
 namespace loki::math {
 
 /**
@@ -170,83 +172,6 @@ std::vector<double> compute_connection_matrix_s(SizeType k_max,
 
 using StatTables = StatLookupTables<float>;
 
-// A minimal PCG32 random number generator.
-class PCG32 {
-public:
-    using ResultType = uint32_t;
-    using StateType  = uint64_t;
-
-    static constexpr StateType kDefaultState  = 0x853c49e6748fea9bULL;
-    static constexpr StateType kDefaultStream = 0xda3e39cb94b95bdbULL;
-    static constexpr StateType kMult          = 0x5851f42d4c957f2dULL;
-
-    PCG32() { seed_seq(kDefaultState, kDefaultStream); }
-    explicit PCG32(StateType seed, StateType stream = kDefaultStream) {
-        seed_seq(seed, stream);
-    }
-
-    void seed_seq(StateType seed, StateType stream) {
-        m_state = 0U;
-        m_inc   = (stream << 1U) | 1U;
-        operator()();
-        m_state += seed;
-        operator()();
-    }
-
-    // Generates the next random number
-    ResultType operator()() {
-        const StateType oldstate = m_state;
-        m_state                  = (oldstate * kMult) + m_inc;
-        const auto xorshifted =
-            static_cast<ResultType>(((oldstate >> 18U) ^ oldstate) >> 27U);
-        const auto rot = static_cast<ResultType>(oldstate >> 59U);
-        return (xorshifted >> rot) | (xorshifted << ((~rot + 1U) & 31U));
-    }
-
-    static constexpr ResultType min() {
-        return std::numeric_limits<ResultType>::min();
-    }
-    static constexpr ResultType max() {
-        return std::numeric_limits<ResultType>::max();
-    }
-
-private:
-    StateType m_state{};
-    StateType m_inc{};
-};
-
-/// SplitMix64 finaliser: a strong 64-bit mix for deriving seeds.
-[[nodiscard]] constexpr uint64_t splitmix64(uint64_t x) noexcept {
-    x += 0x9e3779b97f4a7c15ULL;
-    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
-    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
-    return x ^ (x >> 31U);
-}
-
-/**
- * @brief Independent PCG32 stream for one keyed work item.
- *
- * Hashes the seed and the key fields (a purpose tag plus up to four item
- * coordinates) into both the PCG state and the stream selector, so distinct
- * keys give statistically independent streams, and the same key always
- * gives the same stream. Use it instead of per-thread generators: the draws
- * then depend only on (seed, key), never on threads or scheduling.
- * `branch` must be < 2^24; the other fields may use all 32 bits.
- */
-[[nodiscard]] inline PCG32 make_keyed_pcg32(uint64_t seed,
-                                            uint32_t purpose,
-                                            uint32_t stage,
-                                            uint32_t parent,
-                                            uint32_t branch,
-                                            uint32_t trial) {
-    uint64_t mixed = splitmix64(seed ^ (static_cast<uint64_t>(purpose) << 48U));
-    mixed          = splitmix64(mixed ^ (static_cast<uint64_t>(stage) << 32U));
-    mixed          = splitmix64(mixed ^ parent);
-    mixed =
-        splitmix64(mixed ^ ((static_cast<uint64_t>(branch) << 40U) ^ trial));
-    return PCG32(mixed, splitmix64(mixed ^ 0xda3e39cb94b95bdbULL));
-}
-
 /**
  * @brief Normal and bounded-uniform samples drawn from a caller-owned PCG32.
  *
@@ -266,20 +191,18 @@ public:
                          std::span<float> out,
                          float mean,
                          float stddev) noexcept {
-        std::call_once(s_lut_init_flag, &NormalSampler::init_lut);
-        const auto max_idx = static_cast<float>(s_lut.size() - 2);
-        const float* __restrict__ lut_ptr = s_lut.data();
+        const float* __restrict__ lut_ptr = lut().data();
         float* __restrict__ out_ptr       = out.data();
         for (SizeType i = 0; i < out.size(); ++i) {
-            // Uniform in [0, max_idx], split into index and fraction
-            const float u_scaled =
-                static_cast<float>(rng()) * kInvU32 * max_idx;
-            const auto idx   = static_cast<SizeType>(u_scaled);
-            const float frac = u_scaled - static_cast<float>(idx);
-            const float z =
-                std::fma(frac, lut_ptr[idx + 1] - lut_ptr[idx], lut_ptr[idx]);
-            out_ptr[i] = std::fma(z, stddev, mean);
+            out_ptr[i] = normal_from_lut(rng(), lut_ptr, mean, stddev);
         }
+    }
+
+    /// The inverse-CDF table (kNormalLutSize quantiles of N(0, 1)), for
+    /// device code that draws with normal_from_lut().
+    [[nodiscard]] static std::span<const float> lut() {
+        std::call_once(s_lut_init_flag, &NormalSampler::init_lut);
+        return s_lut;
     }
 
     /// Uniform index in [0, max_value] (Lemire's bounded method).
@@ -305,10 +228,8 @@ private:
     static inline std::vector<float> s_lut;
     static inline std::once_flag s_lut_init_flag;
 
-    static constexpr float kInvU32 =
-        1.0F / static_cast<float>(std::numeric_limits<uint32_t>::max());
     // 2^17 + 1 for high resolution for the lookup table
-    static constexpr SizeType kTableSize = 1U << 17U;
+    static constexpr SizeType kTableSize = kNormalLutSize - 1;
 
     /// Quantiles of N(0, 1) at linearly spaced probabilities in [0, 1].
     static void init_lut() {

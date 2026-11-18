@@ -706,7 +706,11 @@ public:
         copy_down(ptr(m_z), m_ts_v.data(), m_n);
     }
 
-    std::span<const float> ts_v() override { return m_ts_v; }
+    SizeType nsamps() const override { return m_n; }
+
+    SizeType longest_zero_run() override {
+        return detail::longest_zero_run(m_ts_v);
+    }
 
 private:
     struct BlockBuffers {

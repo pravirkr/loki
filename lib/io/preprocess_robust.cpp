@@ -275,7 +275,7 @@ void flag_decisions(const BlockGrid& g,
 
 PreprocessReport
 run_robust(RobustStages& s, double tsamp, const PreprocessOptions& o) {
-    const SizeType n = s.ts_v().size();
+    const SizeType n = s.nsamps();
     if (n < kMinRobustSamples) {
         throw std::invalid_argument(
             "preprocess: the robust method needs at least 16 samples");
@@ -368,7 +368,7 @@ run_robust(RobustStages& s, double tsamp, const PreprocessOptions& o) {
     if (rep.n_zapped > 0) {
         rep.zap_bands = s.zap_check(tsamp, o);
     }
-    rep.longest_masked_run = longest_zero_run(s.ts_v());
+    rep.longest_masked_run = s.longest_zero_run();
     rep.global_scale       = std::sqrt(st.median_var);
     rep.norm               = c;
     rep.block_mu           = std::move(st.mu);

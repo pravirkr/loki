@@ -395,7 +395,11 @@ public:
                    n_mask, m_nthreads);
     }
 
-    std::span<const float> ts_v() override { return m_z; }
+    SizeType nsamps() const override { return m_x.size(); }
+
+    SizeType longest_zero_run() override {
+        return detail::longest_zero_run(m_z);
+    }
 
 private:
     std::span<float> m_x;

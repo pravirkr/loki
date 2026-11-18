@@ -195,8 +195,10 @@ public:
                         bool mult,
                         std::span<SizeType> n_clip,
                         std::span<SizeType> n_mask) = 0;
-    /// Host view of ts_v after output() (copied from the device if needed).
-    [[nodiscard]] virtual std::span<const float> ts_v() = 0;
+    /// Number of samples of the series.
+    [[nodiscard]] virtual SizeType nsamps() const = 0;
+    /// Longest run of zero-weight samples of ts_v, after output().
+    [[nodiscard]] virtual SizeType longest_zero_run() = 0;
 };
 
 /// The robust method over the series held by @p stages.
