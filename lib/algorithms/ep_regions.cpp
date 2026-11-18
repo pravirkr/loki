@@ -41,6 +41,7 @@
 #include "lib/detection/thresholds_engine.hpp"
 #include "lib/search/ep_support.hpp"
 #include "lib/search/prune_mask.hpp"
+#include "lib/search/slice_scratch.hpp"
 
 namespace loki::algorithms {
 
@@ -251,6 +252,15 @@ ep_sweep_n_workers(int nthreads,
                    std::optional<SizeType> n_runs,
                    const std::optional<std::vector<SizeType>>& ref_segs) {
     return detail::compute_ep_n_workers(nthreads, n_runs, ref_segs);
+}
+
+EPCudaHostMemory ep_cuda_host_memory(SizeType nparams) {
+    // A leaf row is (nparams + 2) pairs of doubles; scores, scores_ep and
+    // the width are 4 bytes each.
+    return {.leaf_bytes     = ((nparams + 2) * 2 * sizeof(double)) +
+                              (2 * sizeof(float)) + sizeof(std::uint32_t),
+            .spill_leaves   = search::detail::slice_spill_rows(),
+            .runs_in_flight = 3};
 }
 
 template <SupportedFoldType FoldType> class EPRegionPlanner<FoldType>::Impl {

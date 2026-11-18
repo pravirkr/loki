@@ -135,8 +135,31 @@ another on one stream, so the model has one worker whatever `nthreads` is
 (`EPMemoryContext::kind == EPMemoryKind::kCuda`, `n_workers == 1`).
 
 **Which memory.** On CUDA, `max_process_memory_gb` means device memory only.
-Host memory is never checked. Result snapshots are bounded to one active write
-and one waiting payload, in addition to the producer snapshot and inputs.
+Result snapshots are bounded to one active write and one waiting payload, in
+addition to the producer snapshot and inputs.
+
+**Host memory.** The CLI forecasts the host memory of a CUDA EP search, logs
+it and prints it with the plan (`Host memory:`), and stops before it reads
+the samples when the forecast is above `performance.max_host_memory_gb`
+(`--max-host-memory-gb`; unset, nothing is checked). The forecast is the
+larger of two phases, each with the process and its CUDA context (0.15 GB,
+measured):
+
+- loading and preprocessing: the series and its variance, 8 bytes a sample
+  (16 with the z-score preprocessing, which runs on the host);
+- searching: the final leaves of three runs (the one the engine fills, the
+  one the writer writes and one waiting), at most `slice_spill_rows()` each
+  (`EPCudaHostMemory`, `ep_cuda_host_memory`), then the candidate budget
+  `candidates.memory_gb`, which starts once the writer has drained.
+
+A 2^26-sample circular search forecasts 0.65 GB loading (0.64 GB measured)
+and 0.51 GB searching without candidates (0.15 GB measured on noise). The
+forecast does not bound a run of one seed slice: it holds all of its tree's
+final leaves, up to the chunk's `max_sugg`, while it is written. Noise runs
+end with tens of them; a source that is not zapped, masked or harvested can
+fill the tree, and the plan prints how much host memory that would take. On
+the CPU the key is ignored with a warning: `max_process_memory_gb` already
+caps the host memory there.
 The model fits execution buffers. The threshold designs run before the sweep
 allocates, and their search pools are checked against the limit on their
 own; tail buffers and temporary peaks are covered by fixed reserves. As for `FFAFreqSweep`, the plan is fitted to
@@ -436,8 +459,8 @@ change, and before relying on very large thread counts.
 With `--backend cuda` the script also samples device memory
 (`cudaMemGetInfo`) for the whole sweep and reports that high-water mark
 against the model. On CUDA the host residual is not the quantity the limit
-checks: `max_process_memory_gb` means device memory, and host memory is not
-checked.
+checks: `max_process_memory_gb` means device memory, and host memory has its
+own forecast (CUDA backend, Host memory).
 
 ## Planning
 

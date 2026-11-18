@@ -323,6 +323,8 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    [](auto& c) -> auto& { return c.device; }),
         field<Cfg>("performance", "max_process_memory_gb",
                    [](auto& c) -> auto& { return c.max_process_memory_gb; }),
+        field<Cfg>("performance", "max_host_memory_gb",
+                   [](auto& c) -> auto& { return c.max_host_memory_gb; }),
         field<Cfg>("performance", "region_growth_factor",
                    [](auto& c) -> auto& { return c.region_growth_factor; }),
         field<Cfg>("performance", "nbins_max",
@@ -489,6 +491,12 @@ void check_ffa_fields(const FFATomlConfig& cfg) {
         throw std::invalid_argument(
             "performance.region_growth_factor must be finite and > 1.0");
     }
+    if (cfg.max_host_memory_gb.has_value() &&
+        (!utils::is_finite(*cfg.max_host_memory_gb) ||
+         *cfg.max_host_memory_gb <= 0.0)) {
+        throw std::invalid_argument(
+            "performance.max_host_memory_gb must be finite and > 0");
+    }
     cfg.candidates.validate();
     cfg.observation.validate();
 }
@@ -636,6 +644,10 @@ nthreads = 4
 
 # Maximum memory cap in GB used for chunk planning
 max_process_memory_gb = 8.0
+
+# Host memory cap in GB of a CUDA EP search (search ep only); FFA searches
+# ignore it.
+# max_host_memory_gb = 16.0
 
 # Geometric growth factor of the period range from one search region to the
 # next (2.0 = octaves). nbins and eta grow with it, so the phase tolerance
@@ -2494,6 +2506,11 @@ nthreads = 4
 
 # Maximum memory cap in GB: process RSS on CPU, device memory on CUDA
 max_process_memory_gb = 8.0
+
+# Host memory cap in GB of a CUDA search; unset = no cap. The search stops
+# before it loads the series when its host-memory forecast is above it.
+# Ignored on the CPU, where max_process_memory_gb caps host memory.
+# max_host_memory_gb = 16.0
 
 # Geometric growth factor of the period range from one search region to the
 # next (2.0 = octaves). nbins and eta grow with it, so the phase tolerance

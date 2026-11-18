@@ -74,6 +74,10 @@ struct FFATomlConfig {
     Backend backend{Backend::kCPU}; // "cpu" | "cuda"
     int device{0};                  // GPU ordinal, used by GPU backends
     double max_process_memory_gb{8.0};
+    /// Host memory cap in GB (2^30) of a CUDA EP search, where
+    /// max_process_memory_gb caps device memory; unset = no cap. The search
+    /// stops before it loads the series when its forecast is above it.
+    std::optional<double> max_host_memory_gb;
     double region_growth_factor{1.5};
     SizeType nbins_max{1024};
     SizeType nbins_min_lossy_bf{64};

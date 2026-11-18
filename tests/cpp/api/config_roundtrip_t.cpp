@@ -67,6 +67,7 @@ void set_non_defaults(FFATomlConfig& cfg) {
     cfg.nthreads                 = 3;
     cfg.device                   = 1;
     cfg.max_process_memory_gb    = 12.5;
+    cfg.max_host_memory_gb       = 20.0;
     cfg.region_growth_factor     = 1.5;
     cfg.nbins_max                = 512;
     cfg.nbins_min_lossy_bf       = 32;
@@ -155,6 +156,7 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(a.backend == b.backend);
     CHECK(a.device == b.device);
     CHECK(a.max_process_memory_gb == b.max_process_memory_gb);
+    CHECK(a.max_host_memory_gb == b.max_host_memory_gb);
     CHECK(a.region_growth_factor == b.region_growth_factor);
     CHECK(a.nbins_max == b.nbins_max);
     CHECK(a.nbins_min_lossy_bf == b.nbins_min_lossy_bf);
