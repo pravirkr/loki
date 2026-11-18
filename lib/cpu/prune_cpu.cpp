@@ -173,9 +173,9 @@ public:
             report_survivors(actual_result_file, run_name);
         } else {
             // Prune the seeds slice by slice over the same FFA output and
-            // write one merged result for the run. Each finished slice's
-            // final leaves go to a scratch beside the result file, so the
-            // host never holds more than the tree.
+            // write one merged result for the run. The finished slices'
+            // final leaves stay in memory up to slice_spill_rows() rows, then
+            // go to a scratch beside the result file.
             SliceResults merged;
             merged.scratch_stem = search::detail::slice_scratch_stem(
                 actual_result_file, run_name);

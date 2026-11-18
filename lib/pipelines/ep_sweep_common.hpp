@@ -85,8 +85,9 @@ struct EPResultPayload {
     std::vector<float> scores;
     std::vector<float> scores_ep;
     std::vector<std::uint32_t> widths;
-    /// A run pruned in seed slices: its final leaves are here instead of in
-    /// leaves .. widths (empty), and the files go with the payload.
+    /// A run pruned in seed slices whose final leaves outgrew
+    /// slice_spill_rows(): they are here instead of in leaves .. widths
+    /// (empty), and the files go with the payload.
     std::unique_ptr<search::detail::SliceScratch> scratch;
     double gflops{0.0};
     SizeType nparams{0};
