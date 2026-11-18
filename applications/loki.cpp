@@ -44,6 +44,7 @@
 #include "loki/common/types.hpp"
 #include "loki/io/candidate_file.hpp"
 #include "loki/io/preprocess.hpp"
+#include "loki/io/search_series.hpp"
 #include "loki/io/sift.hpp"
 #include "loki/io/timeseries.hpp"
 #include "loki/pipelines/ep_freq_sweep.hpp"
@@ -315,9 +316,13 @@ loki::Exec search_exec(const loki::search::FFATomlConfig& cfg) {
     return exec;
 }
 
-/// A search timeseries and the summary of its preprocessing.
+/// The folding inputs of a search, on its backend, and the summary of their
+/// preprocessing. The raw series is not kept.
 struct SearchTimeSeries {
-    loki::io::TimeSeries ts;
+    loki::io::SearchSeries series;
+    loki::io::ObservationMetadata observation;
+    loki::SizeType nsamps{};
+    double dt{};
     std::optional<loki::io::PreprocessReport> report;
     double load_s{};       ///< Wall time to read the series.
     double preprocess_s{}; ///< Wall time to preprocess it.
@@ -421,25 +426,32 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
     read_opts.nthreads   = nthreads;
     SPDLOG_INFO("Loading timeseries from: {}", ts_path.string());
     const auto load_start = SteadyClock::now();
-    SearchTimeSeries out{.ts = loki::io::TimeSeries::read(ts_path, read_opts),
-                         .report = std::nullopt};
-    out.load_s = seconds_since(load_start);
-    auto& ts   = out.ts;
+    const auto ts         = loki::io::TimeSeries::read(ts_path, read_opts);
+    SearchTimeSeries out;
+    out.load_s      = seconds_since(load_start);
+    out.observation = ts.get_observation();
+    out.nsamps      = ts.get_nsamps();
+    out.dt          = ts.get_dt();
     SPDLOG_INFO(
         "Loaded timeseries: nsamps = {}, dt = {:.6e} s, tobs = {:.2f} s",
         ts.get_nsamps(), ts.get_dt(), ts.get_tobs());
     if (!cfg.preprocess) {
+        out.series = loki::io::SearchSeries::from_host(
+            ts.get_ts_e(), ts.get_ts_v(), out.dt, exec);
         return out;
     }
     const auto options = cfg.to_preprocess_options();
     const bool robust  = options.method == loki::io::PreprocessMethod::kRobust;
-    // GPU searches preprocess on their device; the CPU thread count serves
-    // the z-score method, which the GPU runs on the host.
+    // A GPU search preprocesses on its device and keeps the result there;
+    // the CPU thread count serves the z-score method, which the GPU runs on
+    // the host.
     exec.nthreads               = nthreads;
     const auto preprocess_start = SteadyClock::now();
-    const auto rep              = ts.preprocess(options, exec);
-    out.preprocess_s            = seconds_since(preprocess_start);
-    const double dt             = ts.get_dt();
+    auto [series, rep]          = loki::io::SearchSeries::preprocess(
+        ts.get_ts_e(), out.dt, options, exec);
+    out.series       = std::move(series);
+    out.preprocess_s = seconds_since(preprocess_start);
+    const double dt  = out.dt;
     if (robust) {
         SPDLOG_INFO(
             "Preprocessing (robust): baseline window = {:.3f} s, variance "
@@ -580,13 +592,13 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     }
     const auto run_start = SteadyClock::now();
     auto loaded          = load_search_timeseries(toml_cfg, exec);
-    auto& ts             = loaded.ts;
     if (device_init.joinable()) {
         device_init.join();
     }
-    const loki::SizeType actual_nsamps = ts.get_nsamps();
+    const loki::SizeType actual_nsamps = loaded.nsamps;
+    const double dt                    = loaded.dt;
 
-    const auto ffa_cfg = toml_cfg.to_search_config(actual_nsamps, ts.get_dt());
+    const auto ffa_cfg = toml_cfg.to_search_config(actual_nsamps, dt);
     warn_long_masked_run(loaded.report, ffa_cfg.get_bseg_brute());
 
     const std::filesystem::path outdir_path = toml_cfg.outdir;
@@ -601,7 +613,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         SPDLOG_INFO("Using {} backend on device {}",
                     loki::to_string(exec.backend), exec.device);
     }
-    auto observation = ts.get_observation();
+    auto observation = loaded.observation;
     if (toml_cfg.observation.dm) {
         observation.dm = toml_cfg.observation.dm;
     }
@@ -618,17 +630,16 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     const auto search_start = SteadyClock::now();
     execute_recording_spool(
         [&] {
-            sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                          ts.get_ts_v().first(actual_nsamps), outdir_path,
-                          toml_cfg.prefix, config_toml, observation);
+            sweep.execute(loaded.series, outdir_path, toml_cfg.prefix,
+                          config_toml, observation);
         },
         outdir_path / fmt::format("{}_ffa_spool.h5", toml_cfg.prefix), toml_cfg,
-        actual_nsamps, ts.get_dt());
+        actual_nsamps, dt);
     const double search_s = seconds_since(search_start);
 
     const auto result_file =
         outdir_path / fmt::format("{}_ffa_results.h5", toml_cfg.prefix);
-    record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt());
+    record_provenance(result_file, toml_cfg, actual_nsamps, dt);
     record_run_stats(result_file,
                      {.timing_s    = {{"load", loaded.load_s},
                                       {"preprocess", loaded.preprocess_s},
@@ -1226,10 +1237,9 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
 
     const auto run_start               = SteadyClock::now();
     auto loaded                        = load_search_timeseries(toml_cfg, exec);
-    auto& ts                           = loaded.ts;
-    const loki::SizeType actual_nsamps = ts.get_nsamps();
-    const auto ep_cfg =
-        toml_cfg.to_ep_search_config(actual_nsamps, ts.get_dt());
+    const loki::SizeType actual_nsamps = loaded.nsamps;
+    const double dt                    = loaded.dt;
+    const auto ep_cfg = toml_cfg.to_ep_search_config(actual_nsamps, dt);
     if (clamp_default_runs && toml_cfg.n_runs.has_value()) {
         const loki::plans::FFAPlanBase plan_base(ep_cfg);
         toml_cfg.n_runs =
@@ -1267,7 +1277,7 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
         SPDLOG_WARN("Common EP candidates currently support polynomial Taylor "
                     "only; writing run diagnostics");
     }
-    auto observation = ts.get_observation();
+    auto observation = loaded.observation;
     if (toml_cfg.observation.dm) {
         observation.dm = toml_cfg.observation.dm;
     }
@@ -1281,18 +1291,16 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     const auto search_start = SteadyClock::now();
     execute_recording_spool(
         [&] {
-            sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                          ts.get_ts_v().first(actual_nsamps), outdir_path,
-                          toml_cfg.prefix, observation);
+            sweep.execute(loaded.series, outdir_path, toml_cfg.prefix,
+                          observation);
         },
         outdir_path / fmt::format("{}_ep_spool.h5", toml_cfg.prefix), toml_cfg,
-        actual_nsamps, ts.get_dt(), config_toml);
+        actual_nsamps, dt, config_toml);
     const double execute_s = seconds_since(search_start);
 
     const auto result_file =
         outdir_path / fmt::format("{}_ep_results.h5", toml_cfg.prefix);
-    record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt(),
-                      config_toml);
+    record_provenance(result_file, toml_cfg, actual_nsamps, dt, config_toml);
     record_run_stats(result_file,
                      ep_run_stats(result_file, loaded, plan_s, execute_s,
                                   seconds_since(run_start)));

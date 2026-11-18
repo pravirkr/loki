@@ -39,28 +39,38 @@ inline void check_ep_supported(const PulsarSearchConfig& cfg,
     }
 }
 
-/// The samples an EP search analyses: the leading cfg.get_nsamps() of a
-/// series of either that length or the length the config was built for
-/// (an EP config drops the tail that does not fill a whole segment).
+/// The number of samples an EP search analyses of inputs of @p n_e and
+/// @p n_v samples: cfg.get_nsamps(), from a series of either that length or
+/// the length the config was built for (an EP config drops the tail that
+/// does not fill a whole segment).
+inline SizeType ep_input_nsamps(const FFASearchConfig& cfg,
+                                SizeType n_e,
+                                SizeType n_v,
+                                std::string_view caller) {
+    const SizeType nsamps = cfg.get_nsamps();
+    if (n_e != n_v || (n_e != nsamps && n_e != cfg.get_nsamps_input())) {
+        throw std::invalid_argument(fmt::format(
+            "{}: ts_e and ts_v must have {} samples (or the {} the config was "
+            "built for), got {} and {}",
+            caller, nsamps, cfg.get_nsamps_input(), n_e, n_v));
+    }
+    if (n_e > nsamps) {
+        spdlog::info("{}: EP analyses the first {} of {} samples ({} segments "
+                     "of size {}); the last {} samples fill no brute segment",
+                     caller, nsamps, n_e, cfg.get_nsegments(),
+                     cfg.get_bseg_ffa(), n_e - nsamps);
+    }
+    return nsamps;
+}
+
+/// The samples an EP search analyses (see ep_input_nsamps()).
 inline std::pair<std::span<const float>, std::span<const float>>
 ep_input_series(const FFASearchConfig& cfg,
                 std::span<const float> ts_e,
                 std::span<const float> ts_v,
                 std::string_view caller) {
-    const SizeType nsamps = cfg.get_nsamps();
-    if (ts_e.size() != ts_v.size() ||
-        (ts_e.size() != nsamps && ts_e.size() != cfg.get_nsamps_input())) {
-        throw std::invalid_argument(fmt::format(
-            "{}: ts_e and ts_v must have {} samples (or the {} the config was "
-            "built for), got {} and {}",
-            caller, nsamps, cfg.get_nsamps_input(), ts_e.size(), ts_v.size()));
-    }
-    if (ts_e.size() > nsamps) {
-        spdlog::info("{}: EP analyses the first {} of {} samples ({} segments "
-                     "of size {}); the last {} samples fill no brute segment",
-                     caller, nsamps, ts_e.size(), cfg.get_nsegments(),
-                     cfg.get_bseg_ffa(), ts_e.size() - nsamps);
-    }
+    const SizeType nsamps =
+        ep_input_nsamps(cfg, ts_e.size(), ts_v.size(), caller);
     return {ts_e.first(nsamps), ts_v.first(nsamps)};
 }
 

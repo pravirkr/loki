@@ -16,11 +16,7 @@
 #include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
-
-namespace loki::detail {
-/// Library-internal accessor to a handle's backend storage.
-struct HandleAccess;
-} // namespace loki::detail
+#include "loki/utils/handle_access.hpp"
 
 namespace loki::memory {
 

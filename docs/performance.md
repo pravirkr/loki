@@ -315,6 +315,23 @@ preprocessing took 1.1 s instead of 24.5 s and the whole job 9.8 s instead
 of 33.4 s (peak host RSS 2.2 instead of 4.9 GB); the zapped bins, the
 self-check and the 117 candidates matched, S/N within 0.001.
 
+### Device-resident search input (`io::SearchSeries`)
+
+With the zap on the GPU, a CUDA search still copied the preprocessed
+`ts_e`, `ts_v` back to the host and the sweep uploaded them again. The CLI
+now keeps them on the device (`io::SearchSeries`) and drops the raw host
+series after preprocessing. Measured 2026-11-18, L40, CUDA EP searches,
+against the previous build: on the real 2^26-sample series above (all three
+zap modes) preprocessing took 0.5-0.6 s instead of 0.6-0.8 s and the peak
+host RSS fell from 1.15-1.19 to 0.77 GB, with bit-identical result files.
+On the real 2^27-sample series, preprocessing took 1.0 s instead of 1.2 s,
+the job 9.6-9.7 s instead of 9.9 s, and the peak host RSS fell from 2.23 to
+1.52 GB; preprocessing and the 117 candidates (top S/N 16.76) matched, and
+the result files differed only as much as two runs of the previous build
+differ from each other (Fourier-domain EP jitter, `docs/architecture.md`).
+The saving is host memory more than time: the round trip of 1 GB costs
+about 0.2 s.
+
 ### RFI control of the EP pruning (`[ep.rfi]`, CPU)
 
 A 2^24-sample series with a bright pulsar (S/N about 275) and four

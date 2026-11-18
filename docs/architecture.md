@@ -76,15 +76,17 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
 - Public headers include only `loki/...` public headers and the standard
   library.
 - Shared resources are opaque handles built with an `Exec`:
-  `memory::FFAWorkspace<T>`, `memory::EPWorkspace<T>` and `math::FFTManager`.
-  An algorithm that receives one checks that it was built for the same
-  backend and device.
+  `memory::FFAWorkspace<T>`, `memory::EPWorkspace<T>`, `math::FFTManager`
+  and `io::SearchSeries` (the folding inputs of a search, host or device
+  memory). An algorithm that receives one checks that it was built for the
+  same backend and device.
 - A handle's storage is private: `class Impl; Impl& impl();` sit under
   `private:`, with `friend struct loki::detail::HandleAccess;`. Library code
   reaches the concrete buffers only through the accessors built on
   `HandleAccess` (`memory::detail::cpu_workspace`, `cuda_workspace`,
-  `math::detail::cpu_fft`, `cuda_fft`). A new handle follows the same
-  pattern.
+  `math::detail::cpu_fft`, `cuda_fft`, `io::detail::host_series`,
+  `device_series`). The forward declaration of `HandleAccess` is
+  `loki/utils/handle_access.hpp`. A new handle follows the same pattern.
 
 ### 2. Signatures
 
@@ -234,7 +236,7 @@ The namespace follows the directory. Public headers:
 | `include/loki/pipelines/` | `loki::pipelines` |
 | `include/loki/detection/`, `io/`, `search/`, `simulation/` | `loki::<directory>` |
 | `include/loki/common/` | `loki`, except `plans.hpp` (`loki::plans`) and `coord.hpp` (`loki::coord`) |
-| `include/loki/utils/` | one namespace per header: `fft.hpp` uses `loki::math`, `workspace.hpp` uses `loki::memory`, `psr_utils.hpp` uses `loki::psr_utils` |
+| `include/loki/utils/` | one namespace per header: `fft.hpp` uses `loki::math`, `workspace.hpp` uses `loki::memory`, `psr_utils.hpp` uses `loki::psr_utils`, `handle_access.hpp` (one forward declaration) uses `loki::detail` |
 
 The `common/` and `utils/` exceptions are part of the frozen API. Do not add
 more: a new public header takes the namespace of its directory.

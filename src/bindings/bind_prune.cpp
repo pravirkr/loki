@@ -202,6 +202,18 @@ void bind_prune(py::module_& m) {
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir") = "./",
             py::arg("file_prefix") = "test", py::kw_only(),
             py::arg("observation") = io::ObservationMetadata{})
+        .def(
+            "execute",
+            [](EPFreqSweep& self, const io::SearchSeries& series,
+               const std::string& outdir, const std::string& file_prefix,
+               const io::ObservationMetadata& observation) {
+                long_call([&] {
+                    self.execute(series, outdir, file_prefix, observation);
+                });
+            },
+            py::arg("series"), py::arg("outdir") = "./",
+            py::arg("file_prefix") = "test", py::kw_only(),
+            py::arg("observation") = io::ObservationMetadata{})
         .def_static(
             "publish_candidates", &EPFreqSweep::publish_candidates,
             py::arg("spool"), py::arg("output"), py::kw_only(),

@@ -132,6 +132,59 @@ void bind_io(py::module_& m) {
         py::arg("nthreads") = 1, py::kw_only(), py::arg("backend") = "cpu",
         py::arg("device") = 0,
         "Build (ts_e, ts_v, report) from a raw timeseries.");
+    py::class_<io::SearchSeries>(m_io, "SearchSeries",
+                                 "The folding inputs (ts_e, ts_v) of a search, "
+                                 "held on one backend. Pass it to a sweep's "
+                                 "execute() to search it where it lives.")
+        .def_static(
+            "preprocess",
+            [](const PyArrayT<float>& raw, double tsamp, const PO& options,
+               int nthreads, std::string_view backend, int device) {
+                const auto in         = to_span<const float>(raw);
+                const auto exec       = make_exec(backend, device, nthreads);
+                auto [series, report] = long_call([&] {
+                    return io::SearchSeries::preprocess(in, tsamp, options,
+                                                        exec);
+                });
+                return py::make_tuple(py::cast(std::move(series)),
+                                      std::move(report));
+            },
+            py::arg("raw"), py::arg("tsamp"), py::arg("options") = PO{},
+            py::arg("nthreads") = 1, py::kw_only(), py::arg("backend") = "cpu",
+            py::arg("device") = 0,
+            "Preprocess a raw timeseries on the backend and keep the result "
+            "there. Returns (series, report).")
+        .def_static(
+            "from_host",
+            [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+               double tsamp, std::string_view backend, int device) {
+                const auto exec = make_exec(backend, device);
+                return io::SearchSeries::from_host(to_span<const float>(ts_e),
+                                                   to_span<const float>(ts_v),
+                                                   tsamp, exec);
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("tsamp"), py::kw_only(),
+            py::arg("backend") = "cpu", py::arg("device") = 0,
+            "Copy built folding inputs to the backend.")
+        .def("__len__", &io::SearchSeries::size)
+        .def_property_readonly("tsamp", &io::SearchSeries::tsamp)
+        .def_property_readonly("backend",
+                               [](const io::SearchSeries& s) {
+                                   return std::string(
+                                       to_string(s.exec().backend));
+                               })
+        .def_property_readonly(
+            "device", [](const io::SearchSeries& s) { return s.exec().device; })
+        .def(
+            "to_host",
+            [](const io::SearchSeries& s) {
+                std::vector<float> ts_e(s.size());
+                std::vector<float> ts_v(s.size());
+                s.copy_to_host(ts_e, ts_v);
+                return py::make_tuple(as_pyarray(std::move(ts_e)),
+                                      as_pyarray(std::move(ts_v)));
+            },
+            "Copy (ts_e, ts_v) to numpy arrays.");
     py::class_<io::ReadOptions>(m_io, "ReadOptions")
         .def(py::init<>())
         .def_readwrite("preprocess", &io::ReadOptions::preprocess)

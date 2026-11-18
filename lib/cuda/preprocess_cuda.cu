@@ -4,9 +4,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <cub/block/block_reduce.cuh>
@@ -19,6 +21,7 @@
 
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/fft_long_cuda.cuh"
+#include "lib/cuda/search_series_cuda.cuh"
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/detail/keyed_rng.hpp"
 #include "lib/io/preprocess_engine.hpp"
@@ -802,6 +805,39 @@ __global__ void kernel_zap_restore(float* __restrict__ x,
     }
 }
 
+/// Zero runs of each chunk of @p chunk samples of @p v: the leading and
+/// trailing zeros and the longest run inside (one thread per chunk, in
+/// index order; combined on the host).
+__global__ void kernel_zero_runs(const float* __restrict__ v,
+                                 SizeType n,
+                                 SizeType chunk,
+                                 SizeType nchunks,
+                                 SizeType* __restrict__ lead,
+                                 SizeType* __restrict__ trail,
+                                 SizeType* __restrict__ best) {
+    for (SizeType c = gtid(); c < nchunks; c += gstride()) {
+        const SizeType i0  = c * chunk;
+        const SizeType end = min(n, i0 + chunk);
+        SizeType run       = 0;
+        SizeType b         = 0;
+        SizeType first     = end - i0; // all zeros unless a nonzero is seen
+        for (SizeType i = i0; i < end; ++i) {
+            if (v[i] == 0.0F) {
+                ++run;
+                b = max(b, run);
+            } else {
+                if (first == end - i0) {
+                    first = i - i0;
+                }
+                run = 0;
+            }
+        }
+        lead[c]  = first;
+        trail[c] = run;
+        best[c]  = b;
+    }
+}
+
 /// zap_bands(): whitened power of every bin, -1 where the local mean is not
 /// positive (left out).
 __global__ void kernel_whiten_power(float* __restrict__ power,
@@ -878,6 +914,7 @@ public:
                     std::span<float> ts_v)
         : m_n(raw.size()),
           m_device(current_device()),
+          m_resident(ts_e.empty()),
           m_ts_e(ts_e),
           m_ts_v(ts_v),
           m_x(raw.size()),
@@ -1164,14 +1201,45 @@ public:
         cuda_utils::check_last_cuda_error("preprocess: output");
         copy_down(ptr(m_cnt), n_clip.data(), nb);
         copy_down(ptr(m_cnt) + nb, n_mask.data(), nb);
-        copy_down(ptr(m_x), m_ts_e.data(), m_n);
-        copy_down(ptr(m_z), m_ts_v.data(), m_n);
+        if (!m_resident) {
+            copy_down(ptr(m_x), m_ts_e.data(), m_n);
+            copy_down(ptr(m_z), m_ts_v.data(), m_n);
+        }
+    }
+
+    /// The output (ts_e, ts_v) of a resident engine, moved out after
+    /// run_robust().
+    std::pair<DVec<float>, DVec<float>> take_output() {
+        return {std::move(m_x), std::move(m_z)};
     }
 
     SizeType nsamps() const override { return m_n; }
 
     SizeType longest_zero_run() override {
-        return detail::longest_zero_run(m_ts_v);
+        // On the device (ts_v may stay there): per-chunk runs, combined in
+        // order on the host.
+        constexpr SizeType kChunk = 4096;
+        const SizeType nchunks    = (m_n + kChunk - 1) / kChunk;
+        DVec<SizeType> d(3 * nchunks);
+        kernel_zero_runs<<<grid_for(nchunks), 256, 0, m_stream>>>(
+            ptr(m_z), m_n, kChunk, nchunks, ptr(d), ptr(d) + nchunks,
+            ptr(d) + (2 * nchunks));
+        cuda_utils::check_last_cuda_error("preprocess: zero runs");
+        std::vector<SizeType> h(3 * nchunks);
+        copy_down(ptr(d), h.data(), 3 * nchunks);
+        SizeType best = 0;
+        SizeType run  = 0;
+        for (SizeType c = 0; c < nchunks; ++c) {
+            const SizeType len  = std::min(kChunk, m_n - (c * kChunk));
+            const SizeType lead = h[c];
+            if (lead == len) {
+                run += len;
+                continue;
+            }
+            best = std::max({best, run + lead, h[(2 * nchunks) + c]});
+            run  = h[nchunks + c];
+        }
+        return std::max(best, run);
     }
 
 private:
@@ -1191,6 +1259,7 @@ private:
 
     SizeType m_n;
     int m_device;
+    bool m_resident; ///< output stays on the device (take_output())
     std::span<float> m_ts_e;
     std::span<float> m_ts_v;
     DVec<float> m_x;
@@ -1555,6 +1624,20 @@ PreprocessReport preprocess_gpu(std::span<const float> raw,
     cuda_utils::CudaSetDeviceGuard device_guard(device_id);
     GpuRobustStages stages(raw, ts_e, ts_v);
     return run_robust(stages, tsamp, options);
+}
+
+std::pair<std::unique_ptr<SeriesDeviceStorage>, PreprocessReport>
+preprocess_gpu_resident(std::span<const float> raw,
+                        double tsamp,
+                        const PreprocessOptions& options,
+                        int device_id) {
+    cuda_utils::CudaSetDeviceGuard device_guard(device_id);
+    GpuRobustStages stages(raw, {}, {});
+    auto rep    = run_robust(stages, tsamp, options);
+    auto [e, v] = stages.take_output();
+    return {std::make_unique<CudaSeriesStorage>(std::move(e), std::move(v),
+                                                device_id),
+            std::move(rep)};
 }
 
 } // namespace loki::io::detail

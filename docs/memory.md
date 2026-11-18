@@ -391,7 +391,16 @@ cover the real workspace and the per-thread bounds of every chunk.
 
 ### Preprocessing on CUDA
 
-Preprocessing runs and frees its device memory before the sweep is
+A CUDA search preprocesses on its device and hands the result to the sweep
+as an `io::SearchSeries`, so the folding inputs (`ts_e`, `ts_v`: 8 bytes per
+sample) stay on the device through the sweep instead of being copied back
+and uploaded again. The EP sweep counts uploaded inputs in its
+device-memory check; resident ones are already out of the free memory it
+reads. The planner reads the free memory after the series is resident, so
+when the free memory rather than the user limit sets the budget, the budget
+is 8 bytes per sample smaller (1.07 GB at 2^27). In production the user
+limit binds (30 GB against 43 GB usable on an L40), and plans are the same.
+Everything else preprocessing allocates is freed before the sweep is
 planned, so it is not part of the plan. The robust passes hold the series
 three times (`x`, `z` as floats and a byte mask: 9 bytes per sample) plus
 block arrays. The spectral zap adds, per Fourier bin (`n / 2 + 1`), the

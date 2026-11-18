@@ -22,6 +22,7 @@
 #include "lib/common/dispatch.hpp"
 #include "lib/io/candidate_results.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
+#include "lib/pipelines/sweep_input.hpp"
 #include "lib/search/ep_support.hpp"
 
 namespace loki::pipelines {
@@ -68,6 +69,7 @@ public:
         : m_engine(std::move(engine)) {}
     std::unique_ptr<detail::EPFreqSweepEngine> m_engine;
     std::optional<search::CandidateOptions> candidates;
+    Exec exec;
 };
 
 EPFreqSweep::EPFreqSweep(
@@ -91,7 +93,9 @@ EPFreqSweep::EPFreqSweep(
                                                               plan_cache_file,
                                                               n_runs,
                                                               ref_segs,
-                                                              exec))) {}
+                                                              exec))) {
+    m_impl->exec = exec;
+}
 
 EPFreqSweep::EPFreqSweep(
     const search::PulsarSearchConfig& cfg,
@@ -109,9 +113,10 @@ EPFreqSweep::EPFreqSweep(
     candidates.validate();
     if (!candidates.enabled) {
         // Run diagnostics only, as the constructor without candidates.
-        m_impl = std::make_unique<Impl>(make_ep_freq_sweep_engine(
+        m_impl       = std::make_unique<Impl>(make_ep_freq_sweep_engine(
             cfg, show_progress, min_pd, poly_basis, ref_ducy, rfi_config,
             plan_cache_file, n_runs, std::move(ref_segs), exec));
+        m_impl->exec = exec;
         return;
     }
     if (poly_basis != "taylor" || cfg.get_nparams() < 2 ||
@@ -132,6 +137,7 @@ EPFreqSweep::EPFreqSweep(
     m_impl             = std::make_unique<Impl>(make_ep_freq_sweep_engine(
         search_cfg, show_progress, min_pd, poly_basis, ref_ducy, rfi_config,
         plan_cache_file, n_runs, ref_segs, exec));
+    m_impl->exec       = exec;
     m_impl->candidates = candidates;
     // The search reduces each run as it writes it, exactly as publication
     // would: the spool then holds only the retained leaves.
@@ -148,14 +154,19 @@ EPFreqSweep::~EPFreqSweep()                                       = default;
 EPFreqSweep::EPFreqSweep(EPFreqSweep&& other) noexcept            = default;
 EPFreqSweep& EPFreqSweep::operator=(EPFreqSweep&& other) noexcept = default;
 
-void EPFreqSweep::execute(std::span<const float> ts_e,
-                          std::span<const float> ts_v,
-                          const std::filesystem::path& outdir,
-                          std::string_view file_prefix,
-                          const io::ObservationMetadata& observation) {
+namespace {
+
+/// Searches @p input; with candidates, through a staging spool that is
+/// published, or kept for publish_candidates() when that fails.
+void run_ep(detail::EPFreqSweepEngine& engine,
+            const std::optional<search::CandidateOptions>& candidates,
+            const detail::SweepInput& input,
+            const std::filesystem::path& outdir,
+            std::string_view file_prefix,
+            const io::ObservationMetadata& observation) {
     observation.validate();
-    if (!m_impl->candidates) {
-        m_impl->m_engine->execute(ts_e, ts_v, outdir, file_prefix);
+    if (!candidates) {
+        engine.execute(input, outdir, file_prefix);
         return;
     }
     std::filesystem::create_directories(outdir);
@@ -180,7 +191,7 @@ void EPFreqSweep::execute(std::span<const float> ts_e,
         std::filesystem::remove_all(staging, error);
     };
     try {
-        m_impl->m_engine->execute(ts_e, ts_v, staging, "spool");
+        engine.execute(input, staging, "spool");
     } catch (...) {
         cleanup();
         throw;
@@ -210,9 +221,9 @@ void EPFreqSweep::execute(std::span<const float> ts_e,
         }
     };
     try {
-        publish_candidates(
+        EPFreqSweep::publish_candidates(
             spool, outdir / (std::string(file_prefix) + "_ep_results.h5"),
-            *m_impl->candidates, observation);
+            *candidates, observation);
     } catch (const loki::Interrupted&) {
         keep_spool("was interrupted");
         throw;
@@ -221,6 +232,27 @@ void EPFreqSweep::execute(std::span<const float> ts_e,
         throw;
     }
     cleanup();
+}
+
+} // namespace
+
+void EPFreqSweep::execute(std::span<const float> ts_e,
+                          std::span<const float> ts_v,
+                          const std::filesystem::path& outdir,
+                          std::string_view file_prefix,
+                          const io::ObservationMetadata& observation) {
+    run_ep(*m_impl->m_engine, m_impl->candidates,
+           detail::SweepInput::host(ts_e, ts_v), outdir, file_prefix,
+           observation);
+}
+
+void EPFreqSweep::execute(const io::SearchSeries& series,
+                          const std::filesystem::path& outdir,
+                          std::string_view file_prefix,
+                          const io::ObservationMetadata& observation) {
+    run_ep(*m_impl->m_engine, m_impl->candidates,
+           detail::sweep_input(series, m_impl->exec, "EPFreqSweep::execute"),
+           outdir, file_prefix, observation);
 }
 
 void EPFreqSweep::publish_candidates(const std::filesystem::path& spool,

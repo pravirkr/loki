@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -105,11 +106,13 @@ public:
     FFAFreqSweepCpuEngine(FFAFreqSweepCpuEngine&&)                 = delete;
     FFAFreqSweepCpuEngine& operator=(FFAFreqSweepCpuEngine&&)      = delete;
 
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
+    void execute(const detail::SweepInput& input,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
                  std::string_view config_toml) override {
+        std::span<const float> ts_e;
+        std::span<const float> ts_v;
+        std::tie(ts_e, ts_v) = input.host_spans("FFAFreqSweep::execute");
         timing::SimpleTimer sweep_timer;
         sweep_timer.start();
         timing::SimpleTimer timer;

@@ -19,9 +19,14 @@ These are the sufficient statistics of a matched filter under heteroscedastic
 Gaussian noise. Folding them with the existing kernels gives inverse-variance
 weighting and exact masking, with no change to the fold or score math.
 
-The search CLI runs it on the host CPU in `load_search_timeseries`. It reads
-the raw series, then calls `TimeSeries::preprocess` with the `[preprocessing]`
-table.
+The search CLI runs it in `load_search_timeseries`: it reads the raw series
+and calls `io::SearchSeries::preprocess` with the `[preprocessing]` table on
+the search's backend. On CUDA the raw series is uploaded once, preprocessed
+on the device and searched there; the folding inputs never return to the
+host. Library users get the same with `SearchSeries::preprocess` and the
+sweeps' `execute(const io::SearchSeries&, ...)` (Python:
+`io.SearchSeries.preprocess` and `sweep.execute(series, ...)`); `io::preprocess`
+and the span overloads of `execute` stay for host arrays.
 
 ## Methods
 

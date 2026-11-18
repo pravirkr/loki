@@ -169,8 +169,7 @@ public:
     FFAFreqSweepCudaEngine(FFAFreqSweepCudaEngine&&)                 = delete;
     FFAFreqSweepCudaEngine& operator=(FFAFreqSweepCudaEngine&&)      = delete;
 
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
+    void execute(const detail::SweepInput& input,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
                  std::string_view config_toml) override {
@@ -196,23 +195,39 @@ public:
             search::FFAResultMetadata(m_base_cfg, config_toml));
         writer.write_regions(m_region_planner.get_cfgs());
 
-        // Copy input data to device
+        // The input on the device: a resident series in place, host input
+        // copied once.
         cudaStream_t stream = m_stream;
-        m_ts_e_d.resize(ts_e.size());
-        m_ts_v_d.resize(ts_v.size());
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
-                            ts_e.data(), ts_e.size() * sizeof(float),
-                            cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync ts_e failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
-                            ts_v.data(), ts_v.size() * sizeof(float),
-                            cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync ts_v failed");
-        cuda_utils::check_cuda_call(
-            cudaStreamSynchronize(stream),
-            "Input data copy stream synchronization failed");
+        if (input.resident()) {
+            if (input.device_e.size() != input.device_v.size()) {
+                throw std::invalid_argument(
+                    "FFAFreqSweep::execute: ts_e and ts_v sizes differ");
+            }
+            m_in_e = {input.device_e.data(), input.device_e.size()};
+            m_in_v = {input.device_v.data(), input.device_v.size()};
+        } else {
+            const auto ts_e = input.host_e;
+            const auto ts_v = input.host_v;
+            m_ts_e_d.resize(ts_e.size());
+            m_ts_v_d.resize(ts_v.size());
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
+                                ts_e.data(), ts_e.size() * sizeof(float),
+                                cudaMemcpyHostToDevice, stream),
+                "cudaMemcpyAsync ts_e failed");
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
+                                ts_v.data(), ts_v.size() * sizeof(float),
+                                cudaMemcpyHostToDevice, stream),
+                "cudaMemcpyAsync ts_v failed");
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(stream),
+                "Input data copy stream synchronization failed");
+            m_in_e = {thrust::raw_pointer_cast(m_ts_e_d.data()),
+                      m_ts_e_d.size()};
+            m_in_v = {thrust::raw_pointer_cast(m_ts_v_d.data()),
+                      m_ts_v_d.size()};
+        }
         ffa_timer_stats_pipeline["io"] += timer.stop();
 
         double accumulated_flops     = 0.0;
@@ -326,6 +341,9 @@ private:
     // Persistent input/output buffers
     thrust::device_vector<float> m_ts_e_d;
     thrust::device_vector<float> m_ts_v_d;
+    /// The input the current execute() searches (own copy or resident).
+    cuda::std::span<const float> m_in_e;
+    cuda::std::span<const float> m_in_v;
     thrust::device_vector<float> m_fold_time_d;
     thrust::device_vector<uint32_t> m_widths_d;
 
@@ -409,9 +427,7 @@ private:
             reinterpret_cast<DeviceFoldT*>(
                 thrust::raw_pointer_cast(m_fold_time_d.data())),
             algorithms::detail::gpu_sweep_buffer_size(f.core->get_plan()));
-        f.core->execute_score(cuda_utils::as_span(m_ts_e_d),
-                              cuda_utils::as_span(m_ts_v_d), work, slot.args,
-                              stream);
+        f.core->execute_score(m_in_e, m_in_v, work, slot.args, stream);
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(slot.counter.h_ptr, slot.counter.d_ptr,
                             sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
@@ -526,9 +542,7 @@ private:
                     thrust::raw_pointer_cast(m_fold_time_d.data())),
                 algorithms::detail::gpu_sweep_buffer_size(ffa_plan));
             m_passing_counter.reset(stream);
-            the_ffa.execute_score(cuda_utils::as_span(m_ts_e_d),
-                                  cuda_utils::as_span(m_ts_v_d), work, args,
-                                  stream);
+            the_ffa.execute_score(m_in_e, m_in_v, work, args, stream);
             const SizeType n_passing  = m_passing_counter.value_sync(stream);
             const auto brutefold_time = the_ffa.get_brute_fold_timing();
             ffa_timer_stats["brutefold"] += brutefold_time;
@@ -554,14 +568,13 @@ private:
             "an unfused chunk");
         const auto fold_size_time = ffa_plan.get_fold_size_time();
         if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
-            the_ffa.execute(cuda_utils::as_span(m_ts_e_d),
-                            cuda_utils::as_span(m_ts_v_d),
+            the_ffa.execute(m_in_e, m_in_v,
                             cuda_utils::as_span(
                                 m_fold_time_d, ffa_plan.get_buffer_size_time()),
                             stream, /*normalize=*/false);
         } else {
             the_ffa.execute(
-                cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
+                m_in_e, m_in_v,
                 cuda_utils::as_span(m_fold_time_d, ffa_plan.get_buffer_size()),
                 stream);
         }
