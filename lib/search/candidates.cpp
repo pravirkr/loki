@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <numbers>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -298,6 +299,13 @@ void CandidateOptions::validate() const {
         throw std::invalid_argument(
             "harmonic Doppler minimum S/N must be finite and non-negative");
     }
+    for (const auto& w : zap_windows) {
+        if (!utils::is_finite(w.lo) || !utils::is_finite(w.hi) || w.lo < 0 ||
+            w.hi < w.lo) {
+            throw std::invalid_argument(
+                "candidate zap windows must be finite with 0 <= lo <= hi");
+        }
+    }
     positive(harmonic_phase_distance,
              "harmonic phase distance must be positive");
     positive(harmonic_snr_distance, "harmonic S/N distance must be positive");
@@ -314,6 +322,10 @@ void Candidate::validate() const {
         })) {
         throw std::invalid_argument(
             "candidate uncertainties must be finite and nonnegative");
+    }
+    if (!is_known_leaf_basis(static_cast<std::uint8_t>(leaf_basis)) ||
+        !utils::is_finite(p_orb) || p_orb < 0) {
+        throw std::invalid_argument("invalid candidate leaf basis or p_orb");
     }
     if (width == 0 || nbins == 0 || width > nbins || !utils::is_finite(snr) ||
         !std::ranges::all_of(derivatives,
@@ -539,16 +551,102 @@ Candidate ep_leaf_candidate(std::span<const double> leaf,
     c.width         = width;
     c.nbins         = nbins;
     c.snr           = score;
+    // Each parameter's uncertainty is the width of the leaf's cell (its
+    // grid step in that parameter).
     for (std::size_t k = 0; k < nparams; ++k) {
-        c.parameters[k] = leaf[2 * k];
+        c.parameters[k]       = leaf[2 * k];
+        c.parameter_errors[k] = std::abs(leaf[(2 * k) + 1]);
     }
-    c.derivatives[0] = c.parameters[nparams - 1];
+    c.has_parameter_errors = true;
+    c.derivatives[0]       = c.parameters[nparams - 1];
     for (std::size_t k = 1; k < nparams; ++k) {
         c.derivatives[k] =
             -c.derivatives[0] * c.parameters[nparams - 1 - k] * utils::kInvCval;
     }
+    // Only circular-orbit searches (five parameters, Taylor basis) write the
+    // basis slot (after f0); other layouts may use that position otherwise.
+    // Circular parameters are [crackle, snap, jerk, acceleration, frequency].
+    if (nparams == 5) {
+        const double basis_value = leaf[(2 * (nparams + 1)) + 1];
+        if (!(basis_value >= 0.0 && basis_value <= 255.0) ||
+            basis_value != std::floor(basis_value) ||
+            !is_known_leaf_basis(static_cast<std::uint8_t>(basis_value))) {
+            throw std::invalid_argument("unknown EP leaf basis code");
+        }
+        c.leaf_basis = static_cast<LeafBasis>(basis_value);
+    }
+    if (c.leaf_basis != LeafBasis::kPolynomial) {
+        // The report rotated the orbit to the reference epoch and set both
+        // snap = -omega^2 * accel and crackle = -omega^2 * jerk. Where the
+        // basis pair's denominator is exactly zero there, the other pair
+        // still holds omega^2.
+        bool from_snap = c.leaf_basis == LeafBasis::kCircularSnap;
+        if ((from_snap ? c.parameters[3] : c.parameters[2]) == 0.0) {
+            from_snap = !from_snap;
+        }
+        const double num      = from_snap ? c.parameters[1] : c.parameters[0];
+        const double den      = from_snap ? c.parameters[3] : c.parameters[2];
+        const double omega_sq = den != 0.0 ? -num / den : 0.0;
+        if (omega_sq > 0.0 && utils::is_finite(omega_sq)) {
+            c.p_orb = static_cast<float>(2.0 * std::numbers::pi /
+                                         std::sqrt(omega_sq));
+        }
+    }
     c.validate();
     return c;
+}
+
+RunLeafReducer::RunLeafReducer(const LeafReductionSpec& spec,
+                               std::size_t nparams)
+    : m_spec(&spec),
+      m_nparams(nparams),
+      m_cap(spec.options, spec.tobs) {}
+
+void RunLeafReducer::add(std::size_t index,
+                         std::span<const double> leaf,
+                         float score,
+                         std::uint32_t width) {
+    if (index > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error(
+            "EP leaf index exceeds detection identity capacity");
+    }
+    if (m_added++ % 65536 == 0) {
+        loki::check_interrupt();
+    }
+    if (!utils::is_finite(score)) {
+        throw std::invalid_argument("non-finite final EP score");
+    }
+    if (score < m_spec->snr_min) {
+        return;
+    }
+    ++m_above;
+    m_cap.add(ep_leaf_candidate(leaf, m_nparams, score, width, m_spec->nbins, 0,
+                                static_cast<std::uint32_t>(index)));
+}
+
+RunLeafReduction RunLeafReducer::finish(std::size_t n_leaves) {
+    RunLeafReduction out;
+    out.final_leaves         = n_leaves;
+    out.above_snr_min        = m_above;
+    out.max_cell_dropped_snr = m_cap.max_dropped_snr();
+    out.cell_dropped         = m_cap.dropped();
+    out.max_per_cell_used    = m_cap.max_per_cell_used();
+    if (out.max_per_cell_used < m_spec->options.max_per_cell) {
+        spdlog::warn("EP run cells kept {} leaves each instead of {} to fit "
+                     "candidate memory_gb",
+                     out.max_per_cell_used, m_spec->options.max_per_cell);
+    }
+    auto kept = m_cap.take();
+    if (m_spec->options.dominance_kappa > 0) {
+        out.dominated =
+            DominanceReducer(m_spec->tobs, m_spec->options).reduce(kept);
+    }
+    out.retained.reserve(kept.size());
+    for (const auto& c : kept) {
+        out.retained.push_back(c.source_index);
+    }
+    std::ranges::sort(out.retained);
+    return out;
 }
 
 RunLeafReduction reduce_run_leaves(
@@ -565,42 +663,11 @@ RunLeafReduction reduce_run_leaves(
         throw std::overflow_error(
             "EP leaf index exceeds detection identity capacity");
     }
-    CellCap cap(spec.options, spec.tobs);
-    RunLeafReduction out;
-    out.final_leaves = n_leaves;
+    RunLeafReducer reducer(spec, nparams);
     for (std::size_t i = 0; i < n_leaves; ++i) {
-        if (i % 65536 == 0) {
-            loki::check_interrupt();
-        }
-        const float s = score(i);
-        if (!utils::is_finite(s)) {
-            throw std::invalid_argument("non-finite final EP score");
-        }
-        if (s < spec.snr_min) {
-            continue;
-        }
-        ++out.above_snr_min;
-        cap.add(ep_leaf_candidate(leaf(i), nparams, s, widths[i], spec.nbins, 0,
-                                  static_cast<std::uint32_t>(i)));
+        reducer.add(i, leaf(i), score(i), widths[i]);
     }
-    out.max_cell_dropped_snr = cap.max_dropped_snr();
-    out.cell_dropped         = cap.dropped();
-    out.max_per_cell_used    = cap.max_per_cell_used();
-    if (out.max_per_cell_used < spec.options.max_per_cell) {
-        spdlog::warn("EP run cells kept {} leaves each instead of {} to fit "
-                     "candidate memory_gb",
-                     out.max_per_cell_used, spec.options.max_per_cell);
-    }
-    auto kept = cap.take();
-    if (spec.options.dominance_kappa > 0) {
-        out.dominated = DominanceReducer(spec.tobs, spec.options).reduce(kept);
-    }
-    out.retained.reserve(kept.size());
-    for (const auto& c : kept) {
-        out.retained.push_back(c.source_index);
-    }
-    std::ranges::sort(out.retained);
-    return out;
+    return reducer.finish(n_leaves);
 }
 
 std::vector<Candidate> CellCap::take() {

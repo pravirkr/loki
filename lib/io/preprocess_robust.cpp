@@ -2,13 +2,19 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <numbers>
 #include <span>
 #include <stdexcept>
 #include <vector>
 
 #include "loki/common/types.hpp"
+
+#include "lib/detail/keyed_rng.hpp"
+#include "lib/detail/math.hpp"
+#include "lib/utils/fft_impl.hpp"
 
 namespace loki::io::detail {
 
@@ -273,9 +279,111 @@ void flag_decisions(const BlockGrid& g,
     }
 }
 
+double exp_power_threshold(double sigma) {
+    // P(p > t) = exp(-t) for Exp(1) power, so t = -ln Q(sigma).
+    if (sigma < 30.0) {
+        return -std::log(0.5 * std::erfc(sigma / std::numbers::sqrt2));
+    }
+    // Asymptotic Gaussian tail: ln Q ~ -s^2/2 - ln(s sqrt(2 pi)).
+    return (0.5 * sigma * sigma) +
+           std::log(sigma * std::sqrt(2.0 * std::numbers::pi));
+}
+
+std::vector<BinRange>
+birdie_ranges(std::span<const Birdie> birdies, double t_obs, SizeType nf) {
+    std::vector<BinRange> out;
+    out.reserve(birdies.size());
+    for (const auto& bd : birdies) {
+        const double lo = (bd.freq - (0.5 * bd.width)) * t_obs;
+        const double hi = (bd.freq + (0.5 * bd.width)) * t_obs;
+        auto k_lo       = static_cast<SizeType>(std::max(std::ceil(lo), 1.0));
+        auto k_hi       = static_cast<SizeType>(std::max(std::floor(hi), 0.0));
+        if (k_lo > k_hi) { // narrower than a bin: the nearest bin
+            k_lo = k_hi = static_cast<SizeType>(
+                std::max(std::llround(bd.freq * t_obs), 1LL));
+        }
+        k_hi = std::min(k_hi, nf - 1);
+        if (k_lo <= k_hi) {
+            out.push_back({.lo = k_lo, .hi = k_hi});
+        }
+    }
+    return out;
+}
+
+std::vector<std::uint8_t>
+birdie_bins(std::span<const Birdie> birdies, double t_obs, SizeType nf) {
+    std::vector<std::uint8_t> in(nf, 0U);
+    for (const auto& r : birdie_ranges(birdies, t_obs, nf)) {
+        std::fill(in.begin() + static_cast<std::ptrdiff_t>(r.lo),
+                  in.begin() + static_cast<std::ptrdiff_t>(r.hi) + 1,
+                  std::uint8_t{1});
+    }
+    return in;
+}
+
+std::uint64_t combine_chunk_hashes(SizeType n,
+                                   std::span<const std::uint64_t> hashes) {
+    std::uint64_t seed = math::splitmix64(n);
+    for (const auto v : hashes) {
+        seed = math::splitmix64(seed ^ v);
+    }
+    return seed;
+}
+
+PowerGrid power_grid(SizeType whiten_bins, SizeType nf) {
+    const SizeType w     = std::min(whiten_bins, nf);
+    const SizeType block = std::max<SizeType>(w / 16, 1);
+    return {.block = block, .k = blocks_per_window(w, block)};
+}
+
+GapRetention::GapRetention(std::span<const float> fraction) {
+    const SizeType nd = fraction.size();
+    std::vector<ComplexType> spec((nd / 2) + 1);
+    math::rfft_batch(fraction, spec, 1, nd, 1);
+    const double norm =
+        1.0 / (static_cast<double>(nd) * static_cast<double>(nd));
+    m_s0.resize(spec.size() + 1, 0.0);
+    m_s1.resize(spec.size() + 1, 0.0);
+    for (SizeType q = 0; q < spec.size(); ++q) {
+        const double p = std::norm(spec[q]) * norm;
+        m_s0[q + 1]    = m_s0[q] + p;
+        m_s1[q + 1]    = m_s1[q] + (static_cast<double>(q) * p);
+    }
+    const double nyq = (nd % 2 == 0) ? (std::norm(spec.back()) * norm) : 0.0;
+    m_dc             = m_s0[1];
+    m_total = (2.0 * m_s0.back()) - m_dc - nyq; // Parseval: valid fraction
+}
+
+double GapRetention::operator()(SizeType width) const {
+    const SizeType qmax = m_s0.size() - 1;
+    if (width >= qmax) {
+        return m_total;
+    }
+    const auto w = static_cast<double>(width);
+    // q = 0 once, 0 < |q| < W twice.
+    const double s0 = m_s0[width] - m_dc;
+    const double s1 = m_s1[width];
+    return m_dc + (2.0 * (s0 - (s1 / w)));
+}
+
+std::span<const float> zap_noise_lut() { return math::NormalSampler::lut(); }
+
+std::vector<double> zap_band_edges(double f_nyq) {
+    std::vector<double> edges{0.0};
+    for (double decade = 10.0; edges.back() < f_nyq; decade *= 10.0) {
+        for (const double m : {1.0, 2.0, 5.0}) {
+            edges.push_back(std::min(m * decade, f_nyq));
+            if (edges.back() >= f_nyq) {
+                break;
+            }
+        }
+    }
+    return edges;
+}
+
 PreprocessReport
 run_robust(RobustStages& s, double tsamp, const PreprocessOptions& o) {
-    const SizeType n = s.ts_v().size();
+    const SizeType n = s.nsamps();
     if (n < kMinRobustSamples) {
         throw std::invalid_argument(
             "preprocess: the robust method needs at least 16 samples");
@@ -368,7 +476,7 @@ run_robust(RobustStages& s, double tsamp, const PreprocessOptions& o) {
     if (rep.n_zapped > 0) {
         rep.zap_bands = s.zap_check(tsamp, o);
     }
-    rep.longest_masked_run = longest_zero_run(s.ts_v());
+    rep.longest_masked_run = s.longest_zero_run();
     rep.global_scale       = std::sqrt(st.median_var);
     rep.norm               = c;
     rep.block_mu           = std::move(st.mu);

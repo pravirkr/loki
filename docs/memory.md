@@ -135,8 +135,32 @@ another on one stream, so the model has one worker whatever `nthreads` is
 (`EPMemoryContext::kind == EPMemoryKind::kCuda`, `n_workers == 1`).
 
 **Which memory.** On CUDA, `max_process_memory_gb` means device memory only.
-Host memory is never checked. Result snapshots are bounded to one active write
-and one waiting payload, in addition to the producer snapshot and inputs.
+Result snapshots are bounded to one active write and one waiting payload, in
+addition to the producer snapshot and inputs.
+
+**Host memory.** The CLI forecasts the host memory of a CUDA EP search, logs
+it and prints it with the plan (`Host memory:`), and stops before it reads
+the samples when the forecast is above `performance.max_host_memory_gb`
+(`--max-host-memory-gb`; unset, nothing is checked). The forecast is the
+larger of two phases, each with the process and its CUDA context (0.15 GB,
+measured):
+
+- loading and preprocessing: the series and its variance, 8 bytes a sample
+  (16 with the z-score preprocessing, which runs on the host);
+- searching: the final leaves of three runs (the one the engine fills, the
+  one the writer writes and one waiting), at most `slice_spill_rows()` each,
+  doubled for the growth of the vectors that collect them
+  (`EPCudaHostMemory`, `ep_cuda_host_memory`), then the candidate budget
+  `candidates.memory_gb`, which starts once the writer has drained.
+
+A 2^26-sample circular search forecasts 0.65 GB loading (0.64 GB measured)
+and 0.88 GB searching without candidates (0.15 GB measured on noise). The
+forecast does not bound a run of one seed slice: it holds all of its tree's
+final leaves, up to the chunk's `max_sugg`, while it is written. Noise runs
+end with tens of them; a source that is not zapped, masked or harvested can
+fill the tree, and the plan prints how much host memory that would take. On
+the CPU the key is ignored with a warning: `max_process_memory_gb` already
+caps the host memory there.
 The model fits execution buffers. The threshold designs run before the sweep
 allocates, and their search pools are checked against the limit on their
 own; tail buffers and temporary peaks are covered by fixed reserves. As for `FFAFreqSweep`, the plan is fitted to
@@ -389,6 +413,35 @@ Test hooks shrink the batches to exercise their edges (`ffa_memory_t.cpp`):
 `tests/cpp/internal/ffa_memory_t.cpp` also checks that the planner's terms
 cover the real workspace and the per-thread bounds of every chunk.
 
+### Preprocessing on CUDA
+
+A CUDA search preprocesses on its device and hands the result to the sweep
+as an `io::SearchSeries`, so the folding inputs (`ts_e`, `ts_v`: 8 bytes per
+sample) stay on the device through the sweep instead of being copied back
+and uploaded again. The EP sweep counts uploaded inputs in its
+device-memory check; resident ones are already out of the free memory it
+reads. The planner reads the free memory after the series is resident, so
+when the free memory rather than the user limit sets the budget, the budget
+is 8 bytes per sample smaller (1.07 GB at 2^27). A dry run plans before
+any series is resident, so in that case the plan cache it writes may need
+more than the search allows; the search then warns, replans and overwrites
+it. In production the user limit binds (30 GB against 43 GB usable on an
+L40), and plans are the same.
+Everything else preprocessing allocates is freed before the sweep is
+planned, so it is not part of the plan. The robust passes hold the series
+three times (`x`, `z` as floats and a byte mask: 9 bytes per sample) plus
+block arrays. The spectral zap adds, per Fourier bin (`n / 2 + 1`), the
+spectrum (8 bytes), the power and the local mean (4 + 4) and four flag bytes,
+plus the cuFFT work area (`LongRealFFT::workspace_bytes`, one spectrum: 0.54
+GB at 2^27), the block arrays of the local mean power (10 bytes per block of
+`zap_whiten_bins / 16` bins) and the 0.5 MB noise table. Measured on an L40
+(2026-11-18): at 2^27 samples the preprocessing peak was 3.17 GB, 1.21 GB for
+the series and 1.96 GB for the zap; at 2^26 with `zap_whiten_bins = 8`
+(one-bin blocks) 1.94 GB. The counted bytes fall about 50 MB short of the
+measured peak (cuFFT's plan tables, temporaries, allocation granularity), so
+the check adds 256 MB. The zap checks free device memory before it allocates
+and fails with an error naming both numbers.
+
 ## Reserve
 
 The reserve covers what cannot be counted deterministically: heap
@@ -410,8 +463,8 @@ change, and before relying on very large thread counts.
 With `--backend cuda` the script also samples device memory
 (`cudaMemGetInfo`) for the whole sweep and reports that high-water mark
 against the model. On CUDA the host residual is not the quantity the limit
-checks: `max_process_memory_gb` means device memory, and host memory is not
-checked.
+checks: `max_process_memory_gb` means device memory, and host memory has its
+own forecast (CUDA backend, Host memory).
 
 ## Planning
 
@@ -459,6 +512,30 @@ circular EP search. `[ep]` `p_orb_min`, `m_c_max` and `m_p_min` are the orbit
 the circular pruning validates its leaves against, and the five-parameter
 drift above; a `[search.orbit]` table sets them from its own orbit, and setting
 them in `[ep]` as well is an error.
+Once a leaf's snap and acceleration are both significant
+(`validation_significance` k), the validation kills it only when its whole
+cell, widened by k widths, is faster than `p_orb_min` (`|snap| - k dsnap >
+omega_max^2 (|accel| + k daccel)`) or beyond the mass limit (`|accel| -
+k daccel > x_mass ((|snap| + k dsnap) / (|accel| - k daccel))^(2/3)`). It
+only removes leaves, and the noise forecasts do not model it, so they stay
+upper bounds.
+
+`[ep]` `p_orb_max` (seconds, off by default; circular searches only) targets
+the search at compact orbits. For a circular orbit `snap = -omega^2 accel` at
+every epoch, so once a leaf's acceleration is significant, the validation
+kills it when even its cell's largest `|snap|` and smallest `|accel|` (each
+widened by `validation_significance` cell widths) give an orbit slower than
+`omega_min = 2 pi / p_orb_max`: `|snap| + k dsnap < omega_min^2 (|accel| -
+k daccel)`. A snap still consistent with zero at a significant acceleration
+is such an orbit. Leaves near the orbit's nodes (acceleration not
+significant) are always kept, so the hand-off to the crackle basis is
+unchanged. The limit only removes leaves, so the plan's forecasts stay upper
+bounds: the plan cache does not record it, and a cached plan serves any
+`p_orb_max`. Leave headroom (e.g. 1.2-1.5 times the longest target period)
+for mildly eccentric orbits, whose local `-snap / accel` varies along the
+orbit. The margin makes the limit bite only when the snap is well measured,
+in practice for a limit within a few observation lengths (docs/performance.md),
+and a detection's reported `p_orb` (the cell centre) can exceed the limit.
 
 ### Ring capacity
 
@@ -605,15 +682,29 @@ make the slices' forecasts as equal as possible (`seed_slice_edges`, stored in
 the plan cache). A chunk that needs slices may widen only while its own FFA
 buffers take at most a quarter of the limit: those buffers are shared by the
 whole sweep, and wider sliced chunks would hand them the room the slices
-free. On the CPU a run keeps its finished slices' final leaves (the
-leaf, two scores and a width, doubled for vector growth) until it writes them,
-`L_final` leaves per worker (`held_final_leaves`); the CUDA engine keeps them
-on the host, which the CUDA policy does not model. `L_final` is the noise
-forecast: a bright source or RFI that is not zapped, masked or harvested can
-fill every slice's tree, and a run then holds up to K times `max_sugg` final
-leaves on the host until it is written (per CPU worker; per run snapshot on
-CUDA). Where such a tree overflowed, the overload summary at the end of a
-search names the chunk. On CUDA
+free. A run's finished slices' final leaves stay on the host up to
+`slice_spill_rows()` rows (2^20, about 0.1 GB for a circular search). On the
+CPU the workers share that cap, each holding up to `slice_spill_rows() /
+n_workers` rows: a bright line fills every concurrent run at once. Real
+searches end far below that: runs of a few tens of final leaves are typical
+and about 45,000 the most seen. A run whose slices would go past
+the cap moves all its rows to a scratch on disk beside the run's result file
+(`lib/search/slice_scratch.hpp`: one raw file per column, in the sweep's
+temporary directory, removed on every exit) and appends every later slice
+there. It is then written from the scratch in batches of 2^16 rows, with the
+same datasets, bit for bit, as from memory. The per-run reduction streams
+over the scratch twice: once into the cell cap, once to gather the rows it
+keeps. Past the cap the host holds no slice: the CPU writes a slice straight
+from the tree, and the CUDA engine copies it to the scratch in pieces of one
+batch. The scratch is a fail-safe, not a working mode: only a bright source
+or RFI that is not zapped, masked or harvested fills every slice's tree, up
+to K times `max_sugg` final leaves per run. That costs disk instead of host
+memory, and a run that writes more than 1 GB of scratch says so; zap, mask or
+harvest the source, or search it at a higher threshold. Where a tree overflowed, the overload summary at the end of a
+search names the chunk. The planner still counts `L_final` final leaves per
+worker (`held_final_leaves`, the noise forecast) on the CPU: a conservative
+term now, kept so that plans do not change. A run of one slice holds its
+tree's final leaves on the host while it is written, as before. On CUDA
 a sliced run also keeps a device list of its slice's seed indices (4 bytes per
 FFA coordinate), which the model counts only with RFI control
 (`ep_cuda_rfi_bytes`). Every slice repeats all

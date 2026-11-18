@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -11,6 +12,7 @@
 
 #include "lib/pipelines/ep_sweep_common.hpp"
 #include "lib/search/cands.hpp"
+#include "lib/search/slice_scratch.hpp"
 
 // Shared by the seed-slice tests of both backends (ep_seed_slices_t.cpp and
 // ep_seed_slices_cuda_t.cpp): a small EP search, and its final leaves and
@@ -35,6 +37,8 @@ struct RunResults {
     std::string name;
     std::vector<SliceLeaf> leaves;
     std::vector<search::PruneStats> stats;
+    /// level_stats_circular rows (level, snap, crackle); circular runs only.
+    std::vector<std::array<std::uint64_t, 3>> circular;
     SizeType n_harvested_total{0};
     /// The per-run reduction's counts, when the run was reduced:
     /// n_final_leaves, n_leaves_above_snr_min, n_cell_dropped, n_dominated,
@@ -75,5 +79,23 @@ RunResults to_run_results(const pipelines::detail::EPResultPayload& payload);
 /// level stats, exactly.
 void check_same_runs(const std::vector<RunResults>& a,
                      const std::vector<RunResults>& b);
+
+/// Sets the rows a sliced run holds in memory before it spills to disk,
+/// and restores the old value when it goes out of scope.
+class SpillRowsGuard {
+public:
+    explicit SpillRowsGuard(SizeType rows)
+        : m_old(search::detail::slice_spill_rows()) {
+        search::detail::set_slice_spill_rows(rows);
+    }
+    ~SpillRowsGuard() { search::detail::set_slice_spill_rows(m_old); }
+    SpillRowsGuard(const SpillRowsGuard&)            = delete;
+    SpillRowsGuard& operator=(const SpillRowsGuard&) = delete;
+    SpillRowsGuard(SpillRowsGuard&&)                 = delete;
+    SpillRowsGuard& operator=(SpillRowsGuard&&)      = delete;
+
+private:
+    SizeType m_old;
+};
 
 } // namespace loki::test

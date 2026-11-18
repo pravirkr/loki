@@ -44,6 +44,7 @@
 #include "loki/common/types.hpp"
 #include "loki/io/candidate_file.hpp"
 #include "loki/io/preprocess.hpp"
+#include "loki/io/search_series.hpp"
 #include "loki/io/sift.hpp"
 #include "loki/io/timeseries.hpp"
 #include "loki/pipelines/ep_freq_sweep.hpp"
@@ -315,9 +316,13 @@ loki::Exec search_exec(const loki::search::FFATomlConfig& cfg) {
     return exec;
 }
 
-/// A search timeseries and the summary of its preprocessing.
+/// The folding inputs of a search, on its backend, and the summary of their
+/// preprocessing. The raw series is not kept.
 struct SearchTimeSeries {
-    loki::io::TimeSeries ts;
+    loki::io::SearchSeries series;
+    loki::io::ObservationMetadata observation;
+    loki::SizeType nsamps{};
+    double dt{};
     std::optional<loki::io::PreprocessReport> report;
     double load_s{};       ///< Wall time to read the series.
     double preprocess_s{}; ///< Wall time to preprocess it.
@@ -421,25 +426,32 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
     read_opts.nthreads   = nthreads;
     SPDLOG_INFO("Loading timeseries from: {}", ts_path.string());
     const auto load_start = SteadyClock::now();
-    SearchTimeSeries out{.ts = loki::io::TimeSeries::read(ts_path, read_opts),
-                         .report = std::nullopt};
-    out.load_s = seconds_since(load_start);
-    auto& ts   = out.ts;
+    const auto ts         = loki::io::TimeSeries::read(ts_path, read_opts);
+    SearchTimeSeries out;
+    out.load_s      = seconds_since(load_start);
+    out.observation = ts.get_observation();
+    out.nsamps      = ts.get_nsamps();
+    out.dt          = ts.get_dt();
     SPDLOG_INFO(
         "Loaded timeseries: nsamps = {}, dt = {:.6e} s, tobs = {:.2f} s",
         ts.get_nsamps(), ts.get_dt(), ts.get_tobs());
     if (!cfg.preprocess) {
+        out.series = loki::io::SearchSeries::from_host(
+            ts.get_ts_e(), ts.get_ts_v(), out.dt, exec);
         return out;
     }
     const auto options = cfg.to_preprocess_options();
     const bool robust  = options.method == loki::io::PreprocessMethod::kRobust;
-    // GPU searches preprocess on their device; the CPU thread count serves
-    // the options the GPU runs on the host (z-score, spectral zap).
+    // A GPU search preprocesses on its device and keeps the result there;
+    // the CPU thread count serves the z-score method, which the GPU runs on
+    // the host.
     exec.nthreads               = nthreads;
     const auto preprocess_start = SteadyClock::now();
-    const auto rep              = ts.preprocess(options, exec);
-    out.preprocess_s            = seconds_since(preprocess_start);
-    const double dt             = ts.get_dt();
+    auto [series, rep]          = loki::io::SearchSeries::preprocess(
+        ts.get_ts_e(), out.dt, options, exec);
+    out.series       = std::move(series);
+    out.preprocess_s = seconds_since(preprocess_start);
+    const double dt  = out.dt;
     if (robust) {
         SPDLOG_INFO(
             "Preprocessing (robust): baseline window = {:.3f} s, variance "
@@ -542,6 +554,10 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     check_frequency_range(toml_cfg);
     toml_cfg.candidates.validate();
     toml_cfg.observation.validate();
+    if (toml_cfg.max_host_memory_gb.has_value()) {
+        SPDLOG_WARN("performance.max_host_memory_gb is ignored by FFA "
+                    "searches (search ep on CUDA only)");
+    }
     const loki::Exec exec = search_exec(toml_cfg);
 
     if (dry_run) {
@@ -580,13 +596,13 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     }
     const auto run_start = SteadyClock::now();
     auto loaded          = load_search_timeseries(toml_cfg, exec);
-    auto& ts             = loaded.ts;
     if (device_init.joinable()) {
         device_init.join();
     }
-    const loki::SizeType actual_nsamps = ts.get_nsamps();
+    const loki::SizeType actual_nsamps = loaded.nsamps;
+    const double dt                    = loaded.dt;
 
-    const auto ffa_cfg = toml_cfg.to_search_config(actual_nsamps, ts.get_dt());
+    const auto ffa_cfg = toml_cfg.to_search_config(actual_nsamps, dt);
     warn_long_masked_run(loaded.report, ffa_cfg.get_bseg_brute());
 
     const std::filesystem::path outdir_path = toml_cfg.outdir;
@@ -601,7 +617,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         SPDLOG_INFO("Using {} backend on device {}",
                     loki::to_string(exec.backend), exec.device);
     }
-    auto observation = ts.get_observation();
+    auto observation = loaded.observation;
     if (toml_cfg.observation.dm) {
         observation.dm = toml_cfg.observation.dm;
     }
@@ -612,23 +628,22 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         observation.barycentric = toml_cfg.observation.barycentric;
     }
     const auto plan_start = SteadyClock::now();
-    loki::pipelines::FFAFreqSweep sweep(ffa_cfg, toml_cfg.candidates,
+    loki::pipelines::FFAFreqSweep sweep(ffa_cfg, toml_cfg.candidate_options(),
                                         /*show_progress=*/true, exec);
     const double plan_s     = seconds_since(plan_start);
     const auto search_start = SteadyClock::now();
     execute_recording_spool(
         [&] {
-            sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                          ts.get_ts_v().first(actual_nsamps), outdir_path,
-                          toml_cfg.prefix, config_toml, observation);
+            sweep.execute(loaded.series, outdir_path, toml_cfg.prefix,
+                          config_toml, observation);
         },
         outdir_path / fmt::format("{}_ffa_spool.h5", toml_cfg.prefix), toml_cfg,
-        actual_nsamps, ts.get_dt());
+        actual_nsamps, dt);
     const double search_s = seconds_since(search_start);
 
     const auto result_file =
         outdir_path / fmt::format("{}_ffa_results.h5", toml_cfg.prefix);
-    record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt());
+    record_provenance(result_file, toml_cfg, actual_nsamps, dt);
     record_run_stats(result_file,
                      {.timing_s    = {{"load", loaded.load_s},
                                       {"preprocess", loaded.preprocess_s},
@@ -847,6 +862,115 @@ ep_candidate_planning_config(const loki::search::EPTomlConfig& config,
     return cfg;
 }
 
+/// Host memory of a CUDA EP search, GB (2^30). The device holds the search;
+/// the host holds the CUDA context throughout, the series and its variance
+/// while it loads and preprocesses, then the final leaves of the runs in
+/// flight while it searches, and the candidate budget after.
+struct EPHostForecast {
+    double load_gb{0.0};
+    double search_gb{0.0};
+    [[nodiscard]] double peak_gb() const noexcept {
+        return std::max(load_gb, search_gb);
+    }
+};
+
+/// The process with its CUDA context and no data (0.15 GB measured, L40,
+/// CUDA 12).
+constexpr double kCudaHostBaseGb = 0.15;
+constexpr double kBytesPerGb     = 1024.0 * 1024.0 * 1024.0;
+
+EPHostForecast ep_cuda_host_forecast(const loki::search::EPTomlConfig& cfg,
+                                     SizeType nsamps,
+                                     SizeType nparams) {
+    // The series and its variance, 4 bytes a sample each. The z-score
+    // preprocessing runs on the host into a second pair.
+    const bool host_preprocess =
+        cfg.preprocess && cfg.to_preprocess_options().method !=
+                              loki::io::PreprocessMethod::kRobust;
+    const double bytes_per_sample = host_preprocess ? 16.0 : 8.0;
+    const auto host = loki::algorithms::ep_cuda_host_memory(nparams);
+    const bool candidates =
+        cfg.candidates.enabled && cfg.poly_basis == "taylor";
+    // Candidate processing starts once the sweep has written every run.
+    const double search_data_gb =
+        std::max(static_cast<double>(host.sweep_bytes()) / kBytesPerGb,
+                 candidates ? cfg.candidates.memory_gb : 0.0);
+    return {.load_gb =
+                kCudaHostBaseGb +
+                (bytes_per_sample * static_cast<double>(nsamps) / kBytesPerGb),
+            .search_gb = kCudaHostBaseGb + search_data_gb};
+}
+
+/// Logs the host-memory forecast of a CUDA EP search and stops one whose
+/// forecast is above performance.max_host_memory_gb. On the CPU the cap is
+/// ignored: max_process_memory_gb caps the host memory there.
+void check_ep_host_memory(const loki::search::EPTomlConfig& cfg,
+                          loki::Exec exec,
+                          SizeType nsamps,
+                          SizeType nparams) {
+    if (exec.backend == loki::Backend::kCPU) {
+        if (cfg.max_host_memory_gb.has_value()) {
+            SPDLOG_WARN("performance.max_host_memory_gb is ignored on the "
+                        "CPU: max_process_memory_gb caps the host memory "
+                        "there");
+        }
+        return;
+    }
+    const auto forecast = ep_cuda_host_forecast(cfg, nsamps, nparams);
+    const auto limit    = cfg.max_host_memory_gb;
+    SPDLOG_INFO("Host memory forecast: {:.2f} GB (loading {:.2f} GB, "
+                "searching {:.2f} GB){}",
+                forecast.peak_gb(), forecast.load_gb, forecast.search_gb,
+                limit ? fmt::format(", limit {:.2f} GB", *limit)
+                      : std::string{});
+    if (limit && forecast.peak_gb() > *limit) {
+        throw std::runtime_error(fmt::format(
+            "host memory forecast {:.2f} GB (loading {:.2f} GB for {} "
+            "samples, searching {:.2f} GB) is above "
+            "performance.max_host_memory_gb = {:.2f} GB",
+            forecast.peak_gb(), forecast.load_gb, nsamps, forecast.search_gb,
+            *limit));
+    }
+}
+
+/// Prints the host memory of a CUDA plan: the forecast, and what a run of
+/// one slice holds if a source fills its tree (not bounded by the forecast).
+template <typename FoldType>
+void print_ep_host_memory(
+    const loki::algorithms::EPRegionPlanner<FoldType>& planner,
+    const loki::search::EPTomlConfig& toml_cfg,
+    const loki::search::PulsarSearchConfig& cfg) {
+    const auto forecast = ep_cuda_host_forecast(
+        toml_cfg, cfg.get_nsamps_input(), cfg.get_nparams());
+    const auto host = loki::algorithms::ep_cuda_host_memory(cfg.get_nparams());
+    SizeType unsliced_max_sugg = 0;
+    for (const auto& chunk : planner.get_chunk_cfgs()) {
+        if (chunk.seed_slice_edges.size() <= 2) {
+            unsliced_max_sugg = std::max(unsliced_max_sugg, chunk.max_sugg);
+        }
+    }
+    const auto& con = loki::cli::Console::get();
+    std::cout << con.title("Host memory:")
+              << fmt::format(" {:.2f} GB forecast (loading {:.2f} GB, "
+                             "searching {:.2f} GB){}\n",
+                             forecast.peak_gb(), forecast.load_gb,
+                             forecast.search_gb,
+                             toml_cfg.max_host_memory_gb
+                                 ? fmt::format(" against a limit of {:.2f} GB",
+                                               *toml_cfg.max_host_memory_gb)
+                                 : std::string{});
+    if (unsliced_max_sugg > 0) {
+        std::cout << con.muted(fmt::format(
+                         "       a run of one seed slice whose tree a source "
+                         "fills holds up to {:.2f} GB more (not in the "
+                         "forecast)",
+                         static_cast<double>(unsliced_max_sugg *
+                                             host.leaf_bytes) /
+                             kBytesPerGb))
+                  << "\n";
+    }
+}
+
 /// `--pulsar-mask F_LO:F_HI` values as [f_lo, f_hi] windows.
 std::vector<std::array<double, 2>>
 parse_pulsar_mask(const std::vector<std::string>& values) {
@@ -883,6 +1007,9 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
                        loki::Exec exec,
                        bool force_replan = false) {
     const auto cfg = ep_candidate_planning_config(toml_cfg, input_cfg, exec);
+    // A dry run stops where the search would.
+    check_ep_host_memory(toml_cfg, exec, cfg.get_nsamps_input(),
+                         cfg.get_nparams());
     // The same worker count the sweep uses, so the cache matches it. The GPU
     // sweep prunes its runs on one worker.
     const SizeType n_workers = loki::algorithms::ep_sweep_n_workers(
@@ -899,6 +1026,9 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
             planner.save_cache(*cache_path);
         }
         print_ep_plan(planner, workers, cache_path);
+        if (exec.backend != loki::Backend::kCPU) {
+            print_ep_host_memory(planner, toml_cfg, cfg);
+        }
     } else {
         const loki::algorithms::EPRegionPlanner<float> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
@@ -908,6 +1038,9 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
             planner.save_cache(*cache_path);
         }
         print_ep_plan(planner, workers, cache_path);
+        if (exec.backend != loki::Backend::kCPU) {
+            print_ep_host_memory(planner, toml_cfg, cfg);
+        }
     }
 }
 
@@ -1216,7 +1349,9 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
                 std::min(*toml_cfg.n_runs, plan_base.get_nsegments_ref_pool());
         }
         // The plan cache is prepared as the search would prepare it, so a
-        // search after the dry run reuses it.
+        // search after the dry run reuses it. On a GPU whose free memory
+        // sets the budget, the search plans with its series resident and
+        // may replan (docs/memory.md, "Preprocessing on CUDA").
         plan_and_print_ep(toml_cfg, preview_cfg,
                           prepare_ep_plan_cache(toml_cfg, preview_cfg, exec),
                           exec);
@@ -1224,12 +1359,21 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
         return 0;
     }
 
+    // Before the samples are read, so a series too large for the host is
+    // refused before it is allocated.
+    if (!toml_cfg.timeseries_path.empty() &&
+        std::filesystem::exists(toml_cfg.timeseries_path)) {
+        const auto info =
+            loki::io::TimeSeries::read_info(toml_cfg.timeseries_path);
+        check_ep_host_memory(
+            toml_cfg, exec, info.nsamps,
+            toml_cfg.to_ep_search_config(info.nsamps, info.dt).get_nparams());
+    }
     const auto run_start               = SteadyClock::now();
     auto loaded                        = load_search_timeseries(toml_cfg, exec);
-    auto& ts                           = loaded.ts;
-    const loki::SizeType actual_nsamps = ts.get_nsamps();
-    const auto ep_cfg =
-        toml_cfg.to_ep_search_config(actual_nsamps, ts.get_dt());
+    const loki::SizeType actual_nsamps = loaded.nsamps;
+    const double dt                    = loaded.dt;
+    const auto ep_cfg = toml_cfg.to_ep_search_config(actual_nsamps, dt);
     if (clamp_default_runs && toml_cfg.n_runs.has_value()) {
         const loki::plans::FFAPlanBase plan_base(ep_cfg);
         toml_cfg.n_runs =
@@ -1254,20 +1398,21 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     const bool common_candidates =
         toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor";
     const auto rfi_config = toml_cfg.prune_rfi_config();
-    auto sweep            = common_candidates
-                                ? loki::pipelines::EPFreqSweep(
-                                      ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
-                                      toml_cfg.poly_basis, toml_cfg.ref_ducy, rfi_config,
-                                      cache, toml_cfg.n_runs, toml_cfg.ref_segs, exec)
-                                : loki::pipelines::EPFreqSweep(
-                                      ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
-                                      toml_cfg.ref_ducy, rfi_config, cache,
-                                      toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+    auto sweep =
+        common_candidates
+            ? loki::pipelines::EPFreqSweep(
+                  ep_cfg, toml_cfg.candidate_options(), true, toml_cfg.min_pd,
+                  toml_cfg.poly_basis, toml_cfg.ref_ducy, rfi_config, cache,
+                  toml_cfg.n_runs, toml_cfg.ref_segs, exec)
+            : loki::pipelines::EPFreqSweep(
+                  ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
+                  toml_cfg.ref_ducy, rfi_config, cache, toml_cfg.n_runs,
+                  toml_cfg.ref_segs, exec);
     if (toml_cfg.candidates.enabled && !common_candidates) {
         SPDLOG_WARN("Common EP candidates currently support polynomial Taylor "
                     "only; writing run diagnostics");
     }
-    auto observation = ts.get_observation();
+    auto observation = loaded.observation;
     if (toml_cfg.observation.dm) {
         observation.dm = toml_cfg.observation.dm;
     }
@@ -1281,18 +1426,16 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     const auto search_start = SteadyClock::now();
     execute_recording_spool(
         [&] {
-            sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                          ts.get_ts_v().first(actual_nsamps), outdir_path,
-                          toml_cfg.prefix, observation);
+            sweep.execute(loaded.series, outdir_path, toml_cfg.prefix,
+                          observation);
         },
         outdir_path / fmt::format("{}_ep_spool.h5", toml_cfg.prefix), toml_cfg,
-        actual_nsamps, ts.get_dt(), config_toml);
+        actual_nsamps, dt, config_toml);
     const double execute_s = seconds_since(search_start);
 
     const auto result_file =
         outdir_path / fmt::format("{}_ep_results.h5", toml_cfg.prefix);
-    record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt(),
-                      config_toml);
+    record_provenance(result_file, toml_cfg, actual_nsamps, dt, config_toml);
     record_run_stats(result_file,
                      ep_run_stats(result_file, loaded, plan_s, execute_s,
                                   seconds_since(run_start)));
@@ -2348,7 +2491,7 @@ int publish_as(const PublishCli& cli, const PublishSource& src) {
                     cli.file.string());
     }
 
-    auto options                  = cfg.candidates;
+    auto options                  = cfg.candidate_options();
     options.enabled               = true;
     std::optional<double> snr_min = cli.snr_min;
     if (src.reduced && !cli.max_per_cell) {
@@ -3276,6 +3419,12 @@ int main(int argc, char** argv) {
         "--memory-gb", ep_cfg.max_process_memory_gb,
         "Memory cap in GB of 2^30 bytes (as Slurm's --mem=16G): total "
         "process RSS on CPU, device memory on CUDA");
+    ep_grp_perf
+        ->add_option("--max-host-memory-gb", ep_cfg.max_host_memory_gb,
+                     "Host memory cap in GB of a CUDA search "
+                     "(performance.max_host_memory_gb): it stops before "
+                     "loading when its forecast is above it. Ignored on CPU")
+        ->check(CLI::PositiveNumber);
     ep_grp_perf->add_option("--region-growth-factor",
                             ep_cfg.region_growth_factor,
                             "Period growth factor between search regions "

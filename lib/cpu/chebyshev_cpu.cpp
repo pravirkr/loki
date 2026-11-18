@@ -1028,12 +1028,13 @@ void poly_chebyshev_resolve_accel_batch(
         const auto alpha_1 = leaves_tree[lo + 2];
         const auto f0      = leaves_tree[lo + 6];
         const auto a_new   = 4.0 * alpha_2 * inv_ts2;
-        const auto delta_v = 4.0 * alpha_2 * inv_ts2 * dt;
+        const auto v_add =
+            (alpha_1 * inv_ts) + (4.0 * alpha_2 * inv_ts2 * dt_add);
         const auto delta_d =
             (alpha_1 * inv_ts * dt) + (2.0 * alpha_2 * inv_ts2 * dt2);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Find nearest grid indices
@@ -1098,14 +1099,15 @@ void poly_chebyshev_resolve_jerk_batch(std::span<const double> leaves_tree,
         const auto f0      = leaves_tree[lo + 8];
         const auto a_new =
             (4.0 * alpha_2 * inv_ts2) + (24.0 * alpha_3 * dt_add * inv_ts3);
-        const auto delta_v = ((4.0 * alpha_2 * inv_ts2) * dt) +
-                             ((12.0 * alpha_3 * inv_ts3) * dt2);
+        const auto v_add   = ((alpha_1 - (3.0 * alpha_3)) * inv_ts) +
+                             ((4.0 * alpha_2 * inv_ts2) * dt_add) +
+                             ((12.0 * alpha_3 * inv_ts3) * dt_add * dt_add);
         const auto delta_d = ((alpha_1 - (3.0 * alpha_3)) * inv_ts * dt) +
                              ((2.0 * alpha_2 * inv_ts2) * dt2) +
                              ((4.0 * alpha_3 * inv_ts3) * dt3);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase
@@ -1175,10 +1177,11 @@ void poly_chebyshev_resolve_snap_batch(std::span<const double> leaves_tree,
         const auto a_new   = (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2) +
                              (24.0 * alpha_3 * dt_add * inv_ts3) +
                              (96.0 * alpha_4 * dt2_add * inv_ts4);
-        const auto delta_v =
-            (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2 * dt) +
-            ((12.0 * alpha_3 * inv_ts3) * dt2) +
-            ((32.0 * alpha_4 * inv_ts4) * dt3);
+        const auto v_add =
+            ((alpha_1 - (3.0 * alpha_3)) * inv_ts) +
+            (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2 * dt_add) +
+            ((12.0 * alpha_3 * inv_ts3) * dt_add * dt_add) +
+            ((32.0 * alpha_4 * inv_ts4) * dt_add * dt_add * dt_add);
 
         const auto delta_d =
             ((alpha_1 - (3.0 * alpha_3)) * inv_ts * dt) +
@@ -1187,7 +1190,7 @@ void poly_chebyshev_resolve_snap_batch(std::span<const double> leaves_tree,
             ((8.0 * alpha_4 * inv_ts4) * dt4);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase

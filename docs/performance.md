@@ -279,6 +279,59 @@ other power is 0.95-1.02 for f up to 0.15, and 0.995-1.011 above 10 Hz
 on the bright-binary series. `phase_kept` (the previous zap) is
 bit-identical to before.
 
+### Spectral zap on the GPU
+
+A CUDA search used to run the whole preprocessing on the CPU as soon as the
+zap was on (the zap had no GPU code). The zap now runs on the device, with
+the whole-series transforms on cuFFT (`docs/fft.md`). Measured 2026-11-18,
+L40, `loki.libloki.io.preprocess` with 4 CPU threads, synthetic series with
+lines, a pulsar and bursts (0.04-0.08 % masked, so three removal passes),
+`zap_periodic` on and 1,200 narrow birdie windows, `noise` mode; times
+include the host-device copies. A job preprocesses once, so the first CUDA
+call of the process (which also plans cuFFT) is the figure that counts; a
+repeated call is given in brackets:
+
+| Series | CPU, no zap | CPU, zap | CUDA, no zap | CUDA, zap |
+|---|---|---|---|---|
+| 2^26 samples | 1.8 s | 8.1 s | 0.24 s | 0.72 s (0.58 s) |
+| 2^27 samples | 3.5 s | 23.6 s | 0.44-0.48 s | 1.11 s (0.95 s) |
+
+Both backends zapped the same bins (10,419 and 20,771) and masked the same
+samples; the outputs differ by 3.7e-6 of the noise RMS. On smaller cases
+(2^20 samples, every mode, with and without gaps, even and odd lengths) the
+zapped bins and masks were identical and the self-check ratios within 1e-4.
+
+On a real 2^26-sample series with a bright binary pulsar, 1,219 birdie
+windows and a 7.5 s masked run (CUDA EP search, 80-95 Hz, acc +-40), the
+GPU zap against the CPU zap of the previous build: the same zapped bins in
+all three modes (1,108,234 for `noise` and `zero`, 410,947 for
+`phase_kept`), self-check ratios equal to three decimals, and the same
+candidates (117, 634 and 147) with S/N differing by less than 0.001.
+Preprocessing took 0.6-0.7 s instead of 5.1 s (`phase_kept`) and 8.3 s
+(`noise`), the whole run 1.5 s instead of 11.6 s (`noise`), and the peak
+host RSS fell from 2.5 to 1.2 GB. On a real 2^27-sample series (CUDA EP
+acceleration search, 1.7 % masked, 2,539,819 zapped bins, warm plan cache)
+preprocessing took 1.1 s instead of 24.5 s and the whole job 9.8 s instead
+of 33.4 s (peak host RSS 2.2 instead of 4.9 GB); the zapped bins, the
+self-check and the 117 candidates matched, S/N within 0.001.
+
+### Device-resident search input (`io::SearchSeries`)
+
+With the zap on the GPU, a CUDA search still copied the preprocessed
+`ts_e`, `ts_v` back to the host and the sweep uploaded them again. The CLI
+now keeps them on the device (`io::SearchSeries`) and drops the raw host
+series after preprocessing. Measured 2026-11-18, L40, CUDA EP searches,
+against the previous build: on the real 2^26-sample series above (all three
+zap modes) preprocessing took 0.5-0.6 s instead of 0.6-0.8 s and the peak
+host RSS fell from 1.15-1.19 to 0.77 GB, with bit-identical result files.
+On the real 2^27-sample series, preprocessing took 1.0 s instead of 1.2 s,
+the job 9.6-9.7 s instead of 9.9 s, and the peak host RSS fell from 2.23 to
+1.52 GB; preprocessing and the 117 candidates (top S/N 16.76) matched, and
+the result files differed only as much as two runs of the previous build
+differ from each other (Fourier-domain EP jitter, `docs/architecture.md`).
+The saving is host memory more than time: the round trip of 1 GB costs
+about 0.2 s.
+
 ### RFI control of the EP pruning (`[ep.rfi]`, CPU)
 
 A 2^24-sample series with a bright pulsar (S/N about 275) and four
@@ -547,6 +600,54 @@ forecast leaf, as the forecasts run about 1.65 times the measured
 populations. It only ranks plans: at 2 GB it chose 1 chunk with 6 slices at
 batch 32768 over 2 chunks with up to 64 slices at 65536.
 
+**Final leaves on disk (slice scratch).** A run pruned in seed slices kept
+every finished slice's final leaves on the host until it wrote them. A bright
+line that is not zapped fills each slice's tree, so the host memory grew with
+the number of slices. Measured 2026-11-18, L40, a real 2^26-sample series
+with a sinusoid at 420 Hz added (amplitude 0.02, 0.05 and 0.2 of the noise
+RMS), circular Taylor search (crackle orbit, nbins 16, eta 1), 400-445 Hz,
+one run, one chunk of 10 seed slices, CUDA, 30 GB; outputs on local disk:
+
+| Series | Before: peak host RSS | After: peak host RSS | Final leaves | Scratch | Search after |
+|---|---|---|---|---|---|
+| noise | 0.77 GB | 0.77 GB | 6,425 | 0.8 MB | 33.6 s (33.8 before) |
+| line, 0.02 | 12.1 GB (search 83.5 s) | 0.77 GB | 50-78 M | 5.8-9 GB | 81.9-93.1 s |
+| line, 0.05 | killed above 14.4 GB | 0.77 GB | 110 M | 12.8 GB | 106 s |
+| line, 0.2 | killed above 15.1 GB | 0.77 GB | 312 M | 36.0 GB | 235 s |
+
+- The host memory no longer depends on the leaves; the disk takes them. Noise
+  runs write almost nothing and run as before.
+- The writes stall the pruning: the 36 GB took 70.9 s of the 235 s search
+  (buffered writes at about 0.5 GB/s on that disk, against 2.3 GB/s with direct
+  I/O), and reading them back for the per-run reduction made the
+  postprocessing 64-83 s.
+- Final-leaf counts of an overloaded CUDA run are not reproducible: two runs
+  of the same 0.02 series gave 50.5 M and 78.0 M final leaves (23 overload
+  trims each). The candidates above threshold matched (top S/N 82.63).
+- A 0.02 run failed with a full disk quota when its scratch went to a home
+  directory with a quota; the scratch was removed and the run stopped with an
+  error. Put the output directory on a disk with room for such runs, or zap,
+  mask or harvest the line.
+
+**Final leaves in memory up to a cap.** The scratch above is a fail-safe:
+real runs end with tens of final leaves (about 45,000 the most seen), and
+writing them through a file only adds work. A sliced run now holds its final
+leaves on the host up to 2^20 rows (`slice_spill_rows()`) and moves them to
+the scratch only when a slice would pass that. The reader also reads the
+series straight into its buffer and closes the file before the variance is
+allocated. The same setup as above:
+
+| Series | Peak host RSS | Scratch | Search | Postprocess |
+|---|---|---|---|---|
+| noise | 0.64 GB (0.77 before) | none | 33.5 s | 0.0 s |
+| line, 0.02 | 0.64 GB | 8.8 GB, 76.5 M leaves, 15.9 s to write | 89.0 s | 5.4 s |
+
+- The 0.77 GB peak was at the end of loading: the samples, the file pages the
+  reader had mapped and the variance, 12 bytes per sample. The peak is now
+  during preprocessing on the GPU: the samples and the variance (8 bytes per
+  sample) and the CUDA context (about 0.12 GB). The search holds 0.15 GB.
+- A run below the cap writes from memory, bit for bit as from the scratch.
+
 Whole searches, plan only (2^26 samples, CUDA, 32 runs):
 
 | Search | Before | After |
@@ -621,7 +722,128 @@ the widest chunk of all (249-504 Hz, from a 30 GB plan) 19. A chunk's FFA
 grid is laid out from its limits, so any change of the bounds moves every
 grid point; a signal near the thresholds is caught or not by where the
 points fall. Recovery has no trend with width or f_max, so the chunk width
-is not a sensitivity lever.
+is not a sensitivity lever. That search ran circular at eta 2, where the
+loss is largest (next paragraph); at eta 1 the same signal is found in 31 of
+32 runs.
+
+Tolerance eta and a real signal (S/N about 20 when folded): on one chunk
+around it, 32 runs, the runs scoring 8 or more and the median best score
+were, for a jerk search, 29 / 18.2 at eta 1, 26 / 16.7 at 1.25, 22 / 14.6
+at 1.5, 20 / 10.1 at 1.75 and 18 / 11.1 at 2; for a circular search 31 /
+18.1, 31 / 18.0, 28 / 14.3, 20 / 10.5 and 2 / 0 (wall time of the whole
+command, planning included: 127, 58, 39, 21 and 15 s). The jerk search
+loses smoothly; the circular one keeps eta 1 sensitivity to 1.25 and loses
+the signal at 2. Pick eta from such a curve, measured on the search's own
+configuration.
+
+Counting circular leaves by basis (`level_stats_circular`): on that chunk,
+CUDA, 4 runs of 127 stages, a pass over each stage's survivors after the
+stage cost 0.27 s of 15.4 s (1.8 %), whether it used Thrust counts or one
+kernel with warp ballots: the cost is the extra strided read of every leaf.
+Counting in the transform kernel, which already holds each leaf and its
+class, costs nothing measurable (15.43 vs 15.46 s, three pairs, run-to-run
+spread 0.1 s), and the per-level counts copy back once per prune instead of
+syncing every stage. Writing the basis code into the leaf costs nothing
+measurable either (0.3 %, inside the spread).
+
+`ep.p_orb_max` (circular searches; docs/memory.md) kills a leaf only once its
+cell, widened by `validation_significance` (5) widths, is wholly a slower
+orbit, so it bites only when the snap is measured to a fraction of
+`omega_min^2 |accel|`, that is for a limit close to the observation length.
+Injections (2^24 samples, T = 1074 s, 100 Hz, S/N 25, circular orbits with
+m_c = 0.3 at four orbital phases, `p_orb_min` = T, 8 runs, CUDA):
+
+- limit 2000 s (1.9 T): leaves -0.6 to -4.6 % for orbits inside it and -0.2
+  to -1.1 % for orbits of 3000 and 6000 s, which keep their best S/N;
+- limit 1300 s (1.2 T): leaves -7 to -26 % inside it, -3 to -13 % for orbits
+  of 2000 s, whose best S/N falls by 4.7-6.6 at three of four phases, and
+  -2 to -4 % for orbits of 4000 s (snap never resolved), which keep theirs;
+- orbits inside the limit (0.9 and 1.0 times it, 16 cases) keep their best
+  S/N in every case. The best score of 7 of their 128 runs changed, and 3 of
+  the 16 cases lost one run scoring 8 or more. In each changed run the leaf
+  removed was a partial match scoring at most 11.4, 6.8-41 snap widths from
+  the true orbit (`snap = -omega^2 accel`); in the 43 unchanged runs scoring
+  15 or more the best leaf lies within 0.7 widths of it and passes the limit
+  with a margin of at least 17 %, also at 1.0 times the limit.
+
+A CPU search at the 1300 s limit behaves alike (leaves -13 %, best S/N kept,
+one run fewer at 8 or more). On a real 280 Hz binary pulsar whose detections
+all sit in the Taylor channel (snap unresolved; 5500 s observation, 32 runs,
+272-318 Hz, eta 1), limits of 80000, 40000 and 20000 s left the recovery
+unchanged (31 of 32 runs, median 18.06) and cut the leaves by 0.003, 0.15
+and 2.0 % (wall time 128, 128, 126 s against 128 s). At such settings the
+limit is nearly inert; restricting the children at branching with the same
+margin would remove the same leaves earlier, so it would be as inert.
+
+The validation's orbit checks prune hard but lose orbits at the period
+limit. Injections (2^24 samples, T = 1074 s = `p_orb_min`, 100 Hz, S/N 25,
+crackle order, m_c_max 5, eta 1, 16 runs, CUDA) at P_orb = 1.0, 1.1, 1.3
+and 2.0 T, four orbital phases, with a light (0.3 M_sun) companion and with
+m_c = m_c_max, m_p = m_p_min (the mass limit), were searched with the
+`p_orb_min` and mass checks as they are (the point estimate
+`omega^2 = -snap / accel`), with both widened by `validation_significance`
+cell widths (kill only if `|snap| - k dsnap > omega_max^2 (|accel| +
+k daccel)`, or if `|accel| - k daccel` exceeds the mass limit at the cell's
+largest `omega^2`), and with both removed (a scratch build). Removing them
+leaves 1.3-2.8 times as many leaves; widening them, 1.09-1.31 times. At
+P_orb = `p_orb_min` the checks as they are lower the best score in 6 of the 8
+cases (by 2.1-5.5) and lose runs scoring 8 or more in 5; widened, they recover
+as much as removing them does (same best score in all 32 cases). From
+1.1 `p_orb_min` the widening changes no best score. The widened checks are
+the default since 2026-11-18. Rerun with the resolve fix below (runs scoring
+8 or more, of 512): 350 as they were, 361 widened, 370 removed; at P_orb = T
+the old checks lowered the best score in all 8 cases (by 0.7-4.4), the
+widened ones in none. Each of the 9 runs the widened checks lose against
+none had its best leaf off the orbit (a CPU trace of one: every leaf only
+the unchecked search kept is 10 or more of 16 bins rms from the orbit and
+implies a period of 0.76-0.89 T). On the real 280 Hz binary pulsar (one
+chunk, 32 runs, eta 1) the widened checks keep the recovery (32 of 32,
+median 18.06) with 6.6 % more leaves and 8.5 % more wall time (139 against
+128 s, two pairs). Most of the loss of
+compact orbits is elsewhere: without an orbit the same search finds the
+signal in 14 of 16 runs (median best score 18.9); with the heavy companion
+at P_orb = T, even without the checks, in 4-9 runs (median 0-8.5). Traces of
+lost runs (CPU, no checks, every leaf of every stage against the true orbit,
+frequency included) show two losses, the same with and without the checks:
+
+- a run referenced at the series edge moves its reference epoch by a
+  segment (4.2 s) every stage; while the snap cell is unsplit its leaves
+  carry the box-centre snap, the transforms shift the jerk by the snap
+  error each stage and the aggressive tile does not widen cells, so the
+  orbit leaves its cells from about stage 15 and the run loses it by
+  stage 41 (traced before the resolve fix below). Without the checks, runs
+  referenced at segments 0-16 or 110-127 find this orbit in 5 of 24, the
+  others in 25 of 40 (after the fix). Accepted as the cost of the
+  aggressive tile: the remedies (mid-only references, holding the
+  reference epoch, more snap cells, widening) cost run independence, a
+  start-independent volume or more volume.
+- a mid-series run (reference segment 42 of 128, after the resolve fix
+  below) has no drift: a leaf whose phase matches the orbit to 0.2-0.9 of
+  16 bins rms over the span survives to stage 33, but scores only 0.1-0.8
+  above the thresholds (5.22 at stage 33 against 5.09) and falls below at
+  stage 34, a stage without branching. The no-orbit control's leaf, matching
+  to 0.3-0.5 bins, scores 9.0 there. Already at stages 2-5 the matched
+  orbit leaf scores 4.0 falling to 2.6 against the control's 4.0-4.6 at the
+  same match. Not explained yet: such losses come in contiguous blocks of
+  reference segments that move with the orbital phase (all of 0-59 for one
+  phase), like the known loss of runs referenced near the orbit's nodes.
+
+Frequency of the moving-grid resolve (2026-11-18): on the moving grid a leaf
+keeps its seed's f0 and carries its own frequency offset in its velocity,
+but the pruning-stage resolves took the added segment's frequency from the
+velocity change since t_init, dropping the leaf's offset there, so a fold
+could use a neighbouring frequency cell; its phase was right. Resolving from
+the leaf's absolute velocity at the added segment (every basis, CPU and
+CUDA; the ascend resolves were right) changes no FFA output, and recovery
+only within run-to-run jitter. On the 32 injections above, with the checks
+as they are: runs scoring 8 or more 341 -> 350 of 512 (16 cases up, 9 down;
+best score 10 up, 8 down), leaves +8 %. On the real 280 Hz signal at eta 1
+(one chunk, 32 runs): jerk 29 of 32 before and after (median 18.21; 1 run
+gained, 1 lost, 3 lower), circular 31 -> 32 (median 18.06), wall time 128 s
+both. Results earlier in this file were measured before this fix, except the
+mid-series trace and the edge counts above. Leaves on the real chunk:
+unchanged (jerk +0.9 %, circular -0.02 %); on the injections they rise or
+fall per case.
 
 Reserve of a slice (docs/memory.md): on the 495 Hz chunk above, which holds a
 bright pulsar, the busiest slice held 65-100 cells' worth of leaves beyond

@@ -183,9 +183,17 @@ TEST_CASE("CUDA EP: seed slices give the leaves and stats of one prune",
         CHECK(whole.front().total_overloads() == 0);
         // One prune repeats exactly, so slices can be compared exactly.
         loki::test::check_same_runs(whole, run_engine(cfg, ts_e, ts_v, 1));
-        for (const SizeType k : {SizeType{3}, SizeType{1000}}) {
-            CAPTURE(k);
-            loki::test::check_same_runs(whole, run_engine(cfg, ts_e, ts_v, k));
+        // The final leaves held in memory, all on disk, or spilled mid-run.
+        const auto n_run = whole.front().n_leaves();
+        for (const SizeType spill : {loki::search::detail::slice_spill_rows(),
+                                     SizeType{0}, n_run / 2}) {
+            CAPTURE(spill);
+            const loki::test::SpillRowsGuard guard(spill);
+            for (const SizeType k : {SizeType{3}, SizeType{1000}}) {
+                CAPTURE(k);
+                loki::test::check_same_runs(whole,
+                                            run_engine(cfg, ts_e, ts_v, k));
+            }
         }
     }
 }
@@ -272,10 +280,15 @@ TEST_CASE("CUDA EP sweep: seed slices are exact under a pulsar mask",
     CHECK(whole.front().total_overloads() == 0);
     loki::test::check_same_runs(whole, chunk.run(1, rfi));
     // One slice per cell: the cells under the window are fully masked
-    // slices.
-    for (const SizeType k : {SizeType{4}, n_freq}) {
-        CAPTURE(k);
-        loki::test::check_same_runs(whole, chunk.run(k, rfi));
+    // slices. The sweep writes the final leaves from memory and from disk.
+    for (const SizeType spill :
+         {loki::search::detail::slice_spill_rows(), SizeType{0}}) {
+        CAPTURE(spill);
+        const loki::test::SpillRowsGuard spill_guard(spill);
+        for (const SizeType k : {SizeType{4}, n_freq}) {
+            CAPTURE(k);
+            loki::test::check_same_runs(whole, chunk.run(k, rfi));
+        }
     }
 
     // An early harvest of the pulsar from level 4: the mask its first
@@ -290,10 +303,16 @@ TEST_CASE("CUDA EP sweep: seed slices are exact under a pulsar mask",
     harvest.harvest_mask_ntiles = 2.0;
     const auto harvested        = chunk.run(1, harvest);
     REQUIRE(harvested.front().n_harvested_total > 0);
-    const auto sliced = chunk.run(n_freq, harvest);
-    REQUIRE(sliced.size() == harvested.size());
-    for (SizeType r = 0; r < harvested.size(); ++r) {
-        CHECK(sliced[r].n_harvested_total == harvested[r].n_harvested_total);
+    for (const SizeType spill :
+         {loki::search::detail::slice_spill_rows(), SizeType{0}}) {
+        CAPTURE(spill);
+        const loki::test::SpillRowsGuard spill_guard(spill);
+        const auto sliced = chunk.run(n_freq, harvest);
+        REQUIRE(sliced.size() == harvested.size());
+        for (SizeType r = 0; r < harvested.size(); ++r) {
+            CHECK(sliced[r].n_harvested_total ==
+                  harvested[r].n_harvested_total);
+        }
     }
 }
 #endif // LOKI_ENABLE_CUDA

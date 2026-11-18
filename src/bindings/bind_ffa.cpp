@@ -135,6 +135,21 @@ void bind_ffa(py::module_& m) {
             py::arg("file_prefix") = "test", py::kw_only(),
             py::arg("config_toml") = "",
             py::arg("observation") = io::ObservationMetadata{})
+        .def(
+            "execute",
+            [](FFAFreqSweep& self, const io::SearchSeries& series,
+               const std::filesystem::path& outdir,
+               const std::string& file_prefix, const std::string& config_toml,
+               const io::ObservationMetadata& observation) {
+                long_call([&] {
+                    self.execute(series, outdir, file_prefix, config_toml,
+                                 observation);
+                });
+            },
+            py::arg("series"), py::arg("outdir"),
+            py::arg("file_prefix") = "test", py::kw_only(),
+            py::arg("config_toml") = "",
+            py::arg("observation") = io::ObservationMetadata{})
         .def_static("publish_candidates", &FFAFreqSweep::publish_candidates,
                     py::arg("spool"), py::arg("output"), py::kw_only(),
                     py::arg("candidates")  = search::CandidateOptions{},

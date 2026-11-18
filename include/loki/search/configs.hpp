@@ -74,6 +74,10 @@ struct FFATomlConfig {
     Backend backend{Backend::kCPU}; // "cpu" | "cuda"
     int device{0};                  // GPU ordinal, used by GPU backends
     double max_process_memory_gb{8.0};
+    /// Host memory cap in GB (2^30) of a CUDA EP search, where
+    /// max_process_memory_gb caps device memory; unset = no cap. The search
+    /// stops before it loads the series when its forecast is above it.
+    std::optional<double> max_host_memory_gb;
     double region_growth_factor{1.5};
     SizeType nbins_max{1024};
     SizeType nbins_min_lossy_bf{64};
@@ -88,6 +92,11 @@ struct FFATomlConfig {
     /// @brief Preprocessing options with the effective baseline window
     /// `max(filter_window, min_window_periods / f_min)`.
     [[nodiscard]] io::PreprocessOptions to_preprocess_options() const;
+
+    /// `candidates` with the zapped windows the preprocessing applies (the
+    /// birdies of a robust preprocessing, freq -+ width / 2) in
+    /// `zap_windows`, so the tables flag rows in them.
+    [[nodiscard]] CandidateOptions candidate_options() const;
 
     /// @brief Convert parsed TOML parameters into an FFASearchConfig.
     [[nodiscard]] FFASearchConfig
@@ -312,6 +321,9 @@ public:
     double get_target_snr() const noexcept;
     SizeType get_prune_poly_order() const noexcept;
     double get_p_orb_min() const noexcept;
+    /// Longest orbital period a circular-orbit search keeps, in seconds;
+    /// empty (the default) keeps every period. See with_p_orb_max().
+    std::optional<double> get_p_orb_max() const noexcept;
     double get_m_c_max() const noexcept;
     double get_m_p_min() const noexcept;
     double get_propagator_significance() const noexcept;
@@ -341,6 +353,17 @@ public:
     /// fields.
     [[nodiscard]] EPSearchConfig with_ep_default_nsegments(
         SizeType target_n_segs = kDefaultEPSegments) const;
+
+    /// This configuration with the longest orbital period a circular-orbit
+    /// (five-parameter) search keeps, in seconds; empty keeps every period.
+    /// The validation kills a leaf whose cell, widened by
+    /// validation_significance cell widths, holds only orbits slower than
+    /// 2 pi / p_orb_max (|snap| < omega_min^2 |accel|). Leaves whose
+    /// acceleration is not significant, such as those near the orbit's nodes,
+    /// are always kept. Throws std::invalid_argument for another search or a
+    /// period not above p_orb_min.
+    [[nodiscard]] EPSearchConfig
+    with_p_orb_max(std::optional<double> p_orb_max) const;
 
     // --- TOML Helpers ---
     static EPSearchConfig
@@ -427,6 +450,9 @@ struct EPTomlConfig : FFATomlConfig {
     /// Segments the pruning starts from (power of 2); empty = 128.
     std::optional<SizeType> nsegments;
     double p_orb_min{1e-5};
+    /// Longest orbital period a circular-orbit search keeps, in seconds;
+    /// empty keeps every period (EPSearchConfig::with_p_orb_max).
+    std::optional<double> p_orb_max;
     double m_c_max{10.0};
     double m_p_min{1.4};
     double propagator_significance{2.0};

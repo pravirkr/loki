@@ -126,6 +126,27 @@ struct RunLeafReduction {
     std::vector<std::uint32_t> retained; ///< Leaf indices kept, ascending.
 };
 
+/// The per-run reduction fed one leaf at a time, in any order: add() every
+/// final leaf of the run with its index, then finish(). The result does not
+/// depend on the order (CellCap keeps the same trials in any arrival order).
+class RunLeafReducer {
+public:
+    RunLeafReducer(const LeafReductionSpec& spec, std::size_t nparams);
+    void add(std::size_t index,
+             std::span<const double> leaf,
+             float score,
+             std::uint32_t width);
+    /// The reduction of the @p n_leaves leaves added.
+    [[nodiscard]] RunLeafReduction finish(std::size_t n_leaves);
+
+private:
+    const LeafReductionSpec* m_spec;
+    std::size_t m_nparams;
+    CellCap m_cap;
+    std::uint64_t m_above{};
+    std::uint64_t m_added{};
+};
+
 /// Applies CellCap and, with dominance_kappa, DominanceReducer to the final
 /// leaves of one run, exactly as candidate publication does for one run.
 /// @p leaf(i) and @p score(i) give leaf i; @p widths has one per leaf.

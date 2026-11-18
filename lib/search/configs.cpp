@@ -323,6 +323,8 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                    [](auto& c) -> auto& { return c.device; }),
         field<Cfg>("performance", "max_process_memory_gb",
                    [](auto& c) -> auto& { return c.max_process_memory_gb; }),
+        field<Cfg>("performance", "max_host_memory_gb",
+                   [](auto& c) -> auto& { return c.max_host_memory_gb; }),
         field<Cfg>("performance", "region_growth_factor",
                    [](auto& c) -> auto& { return c.region_growth_factor; }),
         field<Cfg>("performance", "nbins_max",
@@ -436,6 +438,8 @@ const toml_utils::Schema<EPTomlConfig>& ep_schema() {
                      [](auto& c) -> auto& { return c.nsegments; }),
             orbit_prior(field<E>("ep", "p_orb_min",
                                  [](auto& c) -> auto& { return c.p_orb_min; })),
+            field<E>("ep", "p_orb_max",
+                     [](auto& c) -> auto& { return c.p_orb_max; }),
             orbit_prior(field<E>("ep", "m_c_max",
                                  [](auto& c) -> auto& { return c.m_c_max; })),
             orbit_prior(field<E>("ep", "m_p_min",
@@ -486,6 +490,12 @@ void check_ffa_fields(const FFATomlConfig& cfg) {
         cfg.region_growth_factor <= 1.0) {
         throw std::invalid_argument(
             "performance.region_growth_factor must be finite and > 1.0");
+    }
+    if (cfg.max_host_memory_gb.has_value() &&
+        (!utils::is_finite(*cfg.max_host_memory_gb) ||
+         *cfg.max_host_memory_gb <= 0.0)) {
+        throw std::invalid_argument(
+            "performance.max_host_memory_gb must be finite and > 0");
     }
     cfg.candidates.validate();
     cfg.observation.validate();
@@ -577,7 +587,8 @@ zap_whiten_bins = 1001
 zap_mode = "noise"
 # zap_seed = 12345
 
-# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
+# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...].
+# Candidates at a ratio p/q (p, q <= 4) of one are flagged in_zap_window.
 birdies = []
 
 [search]
@@ -633,6 +644,10 @@ nthreads = 4
 
 # Maximum memory cap in GB used for chunk planning
 max_process_memory_gb = 8.0
+
+# Host memory cap in GB of a CUDA EP search (search ep only); FFA searches
+# ignore it.
+# max_host_memory_gb = 16.0
 
 # Geometric growth factor of the period range from one search region to the
 # next (2.0 = octaves). nbins and eta grow with it, so the phase tolerance
@@ -759,6 +774,19 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
 
 FFATomlConfig FFATomlConfig::load(const std::filesystem::path& path) {
     return toml_utils::load_file(path, &FFATomlConfig::from_string);
+}
+
+CandidateOptions FFATomlConfig::candidate_options() const {
+    CandidateOptions out = candidates;
+    out.zap_windows.clear();
+    if (preprocess && preprocessing.method == io::PreprocessMethod::kRobust) {
+        for (const auto& b : preprocessing.birdies) {
+            out.zap_windows.push_back(
+                {.lo = std::max(0.0, b.freq - (0.5 * b.width)),
+                 .hi = b.freq + (0.5 * b.width)});
+        }
+    }
+    return out;
 }
 
 io::PreprocessOptions FFATomlConfig::to_preprocess_options() const {
@@ -1936,6 +1964,7 @@ public:
 
     SizeType m_prune_poly_order;
     double m_p_orb_min;
+    std::optional<double> m_p_orb_max;
     double m_m_c_max;
     double m_m_p_min;
     double m_propagator_significance;
@@ -2058,6 +2087,9 @@ double EPSearchConfig::get_target_snr() const noexcept {
 double EPSearchConfig::get_p_orb_min() const noexcept {
     return m_ep_impl->m_p_orb_min;
 }
+std::optional<double> EPSearchConfig::get_p_orb_max() const noexcept {
+    return m_ep_impl->m_p_orb_max;
+}
 double EPSearchConfig::get_m_c_max() const noexcept {
     return m_ep_impl->m_m_c_max;
 }
@@ -2085,13 +2117,15 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(
     double eta,
     std::span<const ParamLimit> param_limits) const {
     auto ffa = get_updated_config(nbins, eta, param_limits);
-    return EPSearchConfig(
+    auto out = EPSearchConfig(
         std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
+    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    return out;
 }
 
 EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
@@ -2099,25 +2133,50 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
                                                      double f_min,
                                                      double f_max) const {
     auto ffa = get_updated_config(nbins, eta, f_min, f_max);
-    return EPSearchConfig(
+    auto out = EPSearchConfig(
         std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
+    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    return out;
 }
 
 EPSearchConfig
 EPSearchConfig::with_ep_default_nsegments(SizeType target_n_segs) const {
     auto ffa = FFASearchConfig::with_ep_default_nsegments(target_n_segs);
-    return EPSearchConfig(
+    auto out = EPSearchConfig(
         std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
         m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
         m_ep_impl->m_propagator_significance,
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
+    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    return out;
+}
+
+EPSearchConfig
+EPSearchConfig::with_p_orb_max(std::optional<double> p_orb_max) const {
+    if (p_orb_max.has_value()) {
+        if (get_nparams() != 5) {
+            throw std::invalid_argument(fmt::format(
+                "p_orb_max applies only to a circular-orbit (five-parameter) "
+                "search, not to one with {} parameters",
+                get_nparams()));
+        }
+        if (!utils::is_finite(*p_orb_max) ||
+            !(*p_orb_max > m_ep_impl->m_p_orb_min)) {
+            throw std::invalid_argument(fmt::format(
+                "p_orb_max ({} s) must be finite and above p_orb_min ({} s)",
+                *p_orb_max, m_ep_impl->m_p_orb_min));
+        }
+    }
+    auto out                   = *this;
+    out.m_ep_impl->m_p_orb_max = p_orb_max;
+    return out;
 }
 
 EPSearchConfig EPSearchConfig::from_toml(const std::filesystem::path& path,
@@ -2201,6 +2260,9 @@ void validate_ep_config(const EPTomlConfig& cfg) {
         }
     }
     require_positive(cfg.p_orb_min, "ep.p_orb_min");
+    if (cfg.p_orb_max.has_value()) {
+        require_positive(*cfg.p_orb_max, "ep.p_orb_max");
+    }
     require_positive(cfg.m_c_max, "ep.m_c_max");
     require_positive(cfg.m_p_min, "ep.m_p_min");
     require_positive(cfg.propagator_significance, "ep.propagator_significance");
@@ -2294,7 +2356,8 @@ zap_whiten_bins = 1001
 zap_mode = "noise"
 # zap_seed = 12345
 
-# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
+# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...].
+# Candidates at a ratio p/q (p, q <= 4) of one are flagged in_zap_window.
 birdies = []
 
 [search]
@@ -2370,6 +2433,14 @@ n_runs = 16
 # m_c_max = 10.0
 # m_p_min = 1.4
 
+# Circular (crackle) pruning only: the longest orbital period to keep, in
+# seconds (default: no limit). Leaves whose cell holds only slower orbits are
+# killed once their acceleration is significant. It saves work only for a
+# limit within one or two observation lengths, where the snap is resolved
+# (docs/performance.md). Leave headroom (e.g. 1.2-1.5 times the longest target
+# period) for mildly eccentric orbits.
+# p_orb_max = 3600.0
+
 # Significance levels of the propagator and the validation
 propagator_significance = 2.0
 validation_significance = 5.0
@@ -2435,6 +2506,11 @@ nthreads = 4
 
 # Maximum memory cap in GB: process RSS on CPU, device memory on CUDA
 max_process_memory_gb = 8.0
+
+# Host memory cap in GB of a CUDA search; unset = no cap. The search stops
+# before it loads the series when its host-memory forecast is above it.
+# Ignored on the CPU, where max_process_memory_gb caps host memory.
+# max_host_memory_gb = 16.0
 
 # Geometric growth factor of the period range from one search region to the
 # next (2.0 = octaves). nbins and eta grow with it, so the phase tolerance
@@ -2600,7 +2676,8 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
     return EPSearchConfig(std::move(ffa), prune_poly_order, orbit_p_min,
                           orbit_m_c, orbit_m_p, propagator_significance,
                           validation_significance, use_conservative_tile,
-                          target_snr, overflow_keep_fraction);
+                          target_snr, overflow_keep_fraction)
+        .with_p_orb_max(p_orb_max);
 }
 
 void EPRFIOptions::validate() const {

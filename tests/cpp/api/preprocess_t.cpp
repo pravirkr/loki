@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/common/backend.hpp"
@@ -612,14 +613,11 @@ TEST_CASE("preprocess: CUDA matches the CPU", "[io][preprocess][cuda]") {
         const auto raw = white(20, 34);
         require_same(run(raw, {}, 1), run_cuda(raw));
     }
-    SECTION("z-score and zap options run on the CPU") {
+    SECTION("the z-score method runs on the CPU") {
         const auto raw = white(50'000, 35);
         PreprocessOptions z;
         z.method = PreprocessMethod::kZScore;
         REQUIRE(run(raw, z, 1).e == run_cuda(raw, z).e);
-        PreprocessOptions zap;
-        zap.zap_periodic = true;
-        REQUIRE(run(raw, zap, 1).e == run_cuda(raw, zap).e);
     }
     SECTION("invalid input") {
         auto bad = white(10'000, 36);
@@ -630,6 +628,119 @@ TEST_CASE("preprocess: CUDA matches the CPU", "[io][preprocess][cuda]") {
         // Constant data has no usable variance.
         REQUIRE_THROWS_AS(run_cuda(std::vector<float>(10'000, 3.0F)),
                           std::invalid_argument);
+    }
+}
+
+namespace {
+
+/// A GPU zap against the CPU's: cuFFT and pocketfft round differently, so
+/// the series agree to float level, not bit for bit; the zapped bins, the
+/// sample mask and the counts agree exactly on these well-separated cases.
+void require_close_zap(const Out& cpu, const Out& gpu) {
+    REQUIRE(cpu.rep.n_zapped == gpu.rep.n_zapped);
+    REQUIRE(cpu.rep.n_masked == gpu.rep.n_masked);
+    REQUIRE(cpu.rep.n_clipped == gpu.rep.n_clipped);
+    REQUIRE(cpu.rep.longest_masked_run == gpu.rep.longest_masked_run);
+    REQUIRE(cpu.rep.zap_bands.size() == gpu.rep.zap_bands.size());
+    for (SizeType i = 0; i < cpu.rep.zap_bands.size(); ++i) {
+        const auto& c = cpu.rep.zap_bands[i];
+        const auto& g = gpu.rep.zap_bands[i];
+        REQUIRE(c.f_lo == g.f_lo);
+        REQUIRE(c.n_zapped == g.n_zapped);
+        REQUIRE_THAT(g.power_ratio, WithinAbs(c.power_ratio, 2e-3));
+    }
+    double d2 = 0.0;
+    double s2 = 0.0;
+    for (SizeType i = 0; i < cpu.e.size(); ++i) {
+        REQUIRE((cpu.v[i] == 0.0F) == (gpu.v[i] == 0.0F));
+        const double d = static_cast<double>(gpu.e[i]) - cpu.e[i];
+        d2 += d * d;
+        s2 += static_cast<double>(cpu.e[i]) * cpu.e[i];
+    }
+    REQUIRE(std::sqrt(d2 / s2) < 1e-4);
+}
+
+/// White noise with lines at 37.1 and 211.3 Hz and bursts that bad-block
+/// masking removes (gaps), when @p gaps.
+std::vector<float> lines_and_gaps(SizeType n, unsigned seed, bool gaps) {
+    auto raw = white(n, seed);
+    for (SizeType i = 0; i < n; ++i) {
+        const double t = static_cast<double>(i) * kTsamp;
+        raw[i] += static_cast<float>(
+            (0.3 * std::sin(2.0 * std::numbers::pi * 37.1 * t)) +
+            (0.2 * std::sin(2.0 * std::numbers::pi * 211.3 * t)));
+    }
+    if (gaps) {
+        for (SizeType i = n / 3; i < (n / 3) + 4000; ++i) {
+            raw[i] *= 6.0F;
+        }
+        for (SizeType i = (2 * n) / 3; i < ((2 * n) / 3) + 9000; ++i) {
+            raw[i] += 4.0F;
+        }
+    }
+    return raw;
+}
+
+} // namespace
+
+TEST_CASE("preprocess: the CUDA spectral zap matches the CPU's",
+          "[io][preprocess][cuda][zap]") {
+    if (!loki::is_available(loki::Backend::kCUDA)) {
+        SKIP("CUDA backend not available");
+    }
+    using loki::io::ZapMode;
+    const auto mode =
+        GENERATE(ZapMode::kNoise, ZapMode::kZero, ZapMode::kPhaseKept);
+    const bool gaps = GENERATE(true, false);
+    // Even and odd lengths (the Nyquist bin is real only for even n).
+    const SizeType n = GENERATE(SizeType{1} << 19U, (SizeType{1} << 19U) + 101);
+    const auto raw   = lines_and_gaps(n, 51, gaps);
+    PreprocessOptions opt;
+    opt.zap_mode     = mode;
+    opt.zap_periodic = true;
+    opt.zap_sigma    = 7.0;
+    opt.birdies      = {{.freq = 37.1, .width = 0.5},
+                        {.freq = 300.0, .width = 2.0},
+                        {.freq = 444.4, .width = 0.0}};
+    const auto cpu   = run(raw, opt, 2);
+    const auto gpu   = run_cuda(raw, opt);
+    REQUIRE(cpu.rep.n_zapped > 0);
+    REQUIRE((cpu.rep.n_masked > 0) == gaps);
+    require_close_zap(cpu, gpu);
+    REQUIRE(tone_amplitude(gpu.e, 211.3) < 0.02);
+    // Deterministic: a second GPU run gives the same bits.
+    const auto again = run_cuda(raw, opt);
+    REQUIRE(again.e == gpu.e);
+    REQUIRE(again.v == gpu.v);
+}
+
+TEST_CASE("preprocess: CUDA zap variants", "[io][preprocess][cuda][zap]") {
+    if (!loki::is_available(loki::Backend::kCUDA)) {
+        SKIP("CUDA backend not available");
+    }
+    const auto raw = lines_and_gaps(1U << 18U, 52, true);
+    SECTION("birdies only, seeded fill") {
+        PreprocessOptions opt;
+        opt.birdies  = {{.freq = 211.3, .width = 1.0}};
+        opt.zap_seed = 99;
+        require_close_zap(run(raw, opt, 2), run_cuda(raw, opt));
+    }
+    SECTION("threshold only, narrow whitening (one-bin blocks)") {
+        PreprocessOptions opt;
+        opt.zap_periodic    = true;
+        opt.zap_whiten_bins = 8;
+        const auto gpu      = run_cuda(raw, opt);
+        require_close_zap(run(raw, opt, 2), gpu);
+        REQUIRE(tone_amplitude(gpu.e, 211.3) < 0.02);
+    }
+    SECTION("nothing above the threshold") {
+        const auto noise = white(1U << 18U, 53);
+        PreprocessOptions opt;
+        opt.zap_periodic = true;
+        const auto gpu   = run_cuda(noise, opt);
+        REQUIRE(gpu.rep.n_zapped == 0);
+        // No zap: the robust passes alone, as bit-identical as without it.
+        require_same(run(noise, opt, 1), gpu);
     }
 }
 

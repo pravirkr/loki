@@ -20,6 +20,7 @@
 #include "lib/common/dispatch.hpp"
 #include "lib/io/candidate_results.hpp"
 #include "lib/pipelines/ffa_freq_sweep_engine.hpp"
+#include "lib/pipelines/sweep_input.hpp"
 
 namespace loki::pipelines {
 
@@ -47,6 +48,7 @@ public:
         : m_engine(std::move(engine)) {}
     std::unique_ptr<detail::FFAFreqSweepEngine> m_engine;
     search::CandidateOptions candidates;
+    Exec exec;
 };
 
 FFAFreqSweep::FFAFreqSweep(const search::FFASearchConfig& cfg,
@@ -75,22 +77,28 @@ FFAFreqSweep::FFAFreqSweep(const search::FFASearchConfig& cfg,
     m_impl = std::make_unique<Impl>(
         make_ffa_freq_sweep_engine(search_cfg, show_progress, exec));
     m_impl->candidates = candidates;
+    m_impl->exec       = exec;
 }
 
 FFAFreqSweep::~FFAFreqSweep()                                        = default;
 FFAFreqSweep::FFAFreqSweep(FFAFreqSweep&& other) noexcept            = default;
 FFAFreqSweep& FFAFreqSweep::operator=(FFAFreqSweep&& other) noexcept = default;
 
-void FFAFreqSweep::execute(std::span<const float> ts_e,
-                           std::span<const float> ts_v,
-                           const std::filesystem::path& outdir,
-                           std::string_view file_prefix,
-                           std::string_view config_toml,
-                           const io::ObservationMetadata& observation) {
+namespace {
+
+/// Searches @p input; with candidates, through a staging spool that is
+/// published, or kept for publish_candidates() when that fails.
+void run_ffa(detail::FFAFreqSweepEngine& engine,
+             const search::CandidateOptions& candidates,
+             const detail::SweepInput& input,
+             const std::filesystem::path& outdir,
+             std::string_view file_prefix,
+             std::string_view config_toml,
+             const io::ObservationMetadata& observation) {
     observation.validate();
-    if (!m_impl->candidates.enabled) {
+    if (!candidates.enabled) {
         // The flat detection file of earlier versions, written in place.
-        m_impl->m_engine->execute(ts_e, ts_v, outdir, file_prefix, config_toml);
+        engine.execute(input, outdir, file_prefix, config_toml);
         return;
     }
     std::filesystem::create_directories(outdir);
@@ -115,7 +123,7 @@ void FFAFreqSweep::execute(std::span<const float> ts_e,
         std::filesystem::remove_all(staging, error);
     };
     try {
-        m_impl->m_engine->execute(ts_e, ts_v, staging, "spool", config_toml);
+        engine.execute(input, staging, "spool", config_toml);
     } catch (...) {
         // An incomplete search leaves nothing worth keeping.
         discard_staging();
@@ -125,7 +133,7 @@ void FFAFreqSweep::execute(std::span<const float> ts_e,
     try {
         io::detail::write_candidate_results(
             spool, outdir / (std::string(file_prefix) + "_ffa_results.h5"),
-            observation, m_impl->candidates);
+            observation, candidates);
     } catch (...) {
         // The search finished: keep its detections so post-processing can be
         // retried without searching again.
@@ -149,6 +157,29 @@ void FFAFreqSweep::execute(std::span<const float> ts_e,
         throw;
     }
     discard_staging();
+}
+
+} // namespace
+
+void FFAFreqSweep::execute(std::span<const float> ts_e,
+                           std::span<const float> ts_v,
+                           const std::filesystem::path& outdir,
+                           std::string_view file_prefix,
+                           std::string_view config_toml,
+                           const io::ObservationMetadata& observation) {
+    run_ffa(*m_impl->m_engine, m_impl->candidates,
+            detail::SweepInput::host(ts_e, ts_v), outdir, file_prefix,
+            config_toml, observation);
+}
+
+void FFAFreqSweep::execute(const io::SearchSeries& series,
+                           const std::filesystem::path& outdir,
+                           std::string_view file_prefix,
+                           std::string_view config_toml,
+                           const io::ObservationMetadata& observation) {
+    run_ffa(*m_impl->m_engine, m_impl->candidates,
+            detail::sweep_input(series, m_impl->exec, "FFAFreqSweep::execute"),
+            outdir, file_prefix, config_toml, observation);
 }
 
 void FFAFreqSweep::publish_candidates(

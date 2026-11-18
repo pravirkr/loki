@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -508,4 +509,60 @@ TEST_CASE("EP configs reduce final leaves per run by default", "[config]") {
         "[candidates]\nmax_per_cell = 0\n");
     REQUIRE(off.candidates.max_per_cell == 0);
     REQUIRE_NOTHROW(off.candidates.validate());
+}
+
+namespace {
+
+/// A circular-orbit (crackle) EP document with extra [ep] keys.
+std::string circular_doc(const std::string& ep = "") {
+    return "[input]\n"
+           "nsamps = 65536\n"
+           "tsamp = 0.000064\n"
+           "[search]\n"
+           "f_min = 140.0\n"
+           "f_max = 142.0\n"
+           "nbins = 32\n"
+           "[search.orbit]\n"
+           "order = \"crackle\"\n"
+           "p_orb_min = 600.0\n"
+           "[ep]\n"
+           "n_runs = 2\n"
+           "nsegments = 8\n" +
+           ep;
+}
+
+} // namespace
+
+TEST_CASE("ep.p_orb_max limits a circular search and is off by default",
+          "[config][ep]") {
+    using loki::search::EPTomlConfig;
+    const auto off =
+        EPTomlConfig::from_string(circular_doc()).to_ep_search_config();
+    REQUIRE(off.get_nparams() == 5);
+    CHECK_FALSE(off.get_p_orb_max().has_value());
+
+    const auto on =
+        EPTomlConfig::from_string(circular_doc("p_orb_max = 3600.0\n"))
+            .to_ep_search_config();
+    CHECK(on.get_p_orb_max() == 3600.0);
+    // The copies the planner and the sweep make keep it.
+    CHECK(on.get_updated_ep_config(on.get_nbins(), 1.5, on.get_param_limits())
+              .get_p_orb_max() == 3600.0);
+    CHECK(on.get_updated_ep_config(on.get_nbins(), 1.5, 140.5, 141.5)
+              .get_p_orb_max() == 3600.0);
+    CHECK(on.with_ep_default_nsegments(16).get_p_orb_max() == 3600.0);
+    CHECK_FALSE(on.with_p_orb_max(std::nullopt).get_p_orb_max().has_value());
+
+    // At or below p_orb_min, or not positive.
+    CHECK_THROWS_AS(
+        EPTomlConfig::from_string(circular_doc("p_orb_max = 600.0\n"))
+            .to_ep_search_config(),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        EPTomlConfig::from_string(circular_doc("p_orb_max = -1.0\n")),
+        std::invalid_argument);
+    // Only a circular search has an orbital period to limit.
+    CHECK_THROWS_AS(EPTomlConfig::from_string(make_doc("p_orb_max = 3600.0\n"))
+                        .to_ep_search_config(),
+                    std::invalid_argument);
 }

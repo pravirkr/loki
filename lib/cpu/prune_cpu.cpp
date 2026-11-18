@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -39,6 +40,7 @@
 #include "lib/search/cands.hpp"
 #include "lib/search/ep_support.hpp"
 #include "lib/search/prune_mask.hpp"
+#include "lib/search/slice_scratch.hpp"
 #include "lib/utils/workspace_impl.hpp"
 #include "lib/utils/world_tree.hpp"
 
@@ -49,6 +51,9 @@ namespace {
 // Number of individual harvests echoed to the log at info level per run;
 // beyond this only per-level summaries are emitted.
 constexpr SizeType kMaxHarvestLogLines = 16;
+
+// Parameters of a circular-orbit search (crackle, snap, jerk, accel, freq).
+constexpr SizeType kCircularParams = 5;
 
 template <SupportedFoldType FoldType> class PruneImpl {
 public:
@@ -116,6 +121,12 @@ public:
         m_seed_edges.assign(f_edges.begin(), f_edges.end());
     }
 
+    /// Rows of final leaves a run of seed slices holds in memory before it
+    /// spills to its scratch: this worker's share of slice_spill_rows().
+    void set_spill_rows(SizeType rows) {
+        m_spill_rows = std::max<SizeType>(rows, 1);
+    }
+
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
                  std::span<const SizeType> ascend_levels,
@@ -168,8 +179,13 @@ public:
             report_survivors(actual_result_file, run_name);
         } else {
             // Prune the seeds slice by slice over the same FFA output and
-            // write one merged result for the run.
+            // write one merged result for the run. The finished slices'
+            // final leaves stay in memory up to this worker's share of
+            // slice_spill_rows() rows, then go to a scratch beside the
+            // result file.
             SliceResults merged;
+            merged.scratch_stem = search::detail::slice_scratch_stem(
+                actual_result_file, run_name);
             for (SizeType s = 0; s < n_slices; ++s) {
                 std::ofstream slice_log(actual_log_file, std::ios::app);
                 slice_log << fmt::format("Seed slice {} of {}\n", s + 1,
@@ -213,6 +229,7 @@ private:
     SizeType m_total_levels;
     /// Frequency-cell edges of the seed slices; empty: one slice.
     std::vector<SizeType> m_seed_edges;
+    SizeType m_spill_rows{search::detail::slice_spill_rows()};
 
     bool m_prune_complete{false};
     SizeType m_prune_level{};
@@ -407,12 +424,19 @@ private:
         }
     }
 
-    /// The final leaves of a run pruned in seed slices, and its stats.
+    /// The final leaves of a run pruned in seed slices (on disk), and its
+    /// stats.
+    /// Final leaves of the run's slices: in memory up to m_spill_rows rows
+    /// (the worker's share of search::detail::slice_spill_rows()), then all
+    /// on disk.
     struct SliceResults {
         std::vector<double> leaves;
         std::vector<float> scores;
         std::vector<float> scores_ep;
         std::vector<std::uint32_t> widths;
+        /// Set once the rows outgrow the memory cap.
+        std::unique_ptr<search::detail::SliceScratch> scratch;
+        std::filesystem::path scratch_stem;
         search::PruneStatsCollection stats;
         /// Deepest level any slice reached.
         SizeType prune_level{0};
@@ -454,14 +478,43 @@ private:
     void collect_slice(SliceResults& merged) {
         const auto widths      = finalize_survivors();
         const auto& world_tree = get_workspace().world_tree;
-        const auto append      = [](auto& dst, const auto& view) {
-            dst.insert(dst.end(), view.first.begin(), view.first.end());
-            dst.insert(dst.end(), view.second.begin(), view.second.end());
-        };
-        append(merged.leaves, world_tree.get_leaves_circular_view());
-        append(merged.scores, world_tree.get_scores_circular_view());
-        append(merged.scores_ep, world_tree.get_scores_ep_circular_view());
-        merged.widths.insert(merged.widths.end(), widths.begin(), widths.end());
+        const auto leaves      = world_tree.get_leaves_circular_view();
+        const auto scores      = world_tree.get_scores_circular_view();
+        const auto scores_ep   = world_tree.get_scores_ep_circular_view();
+        if (!merged.scratch &&
+            merged.scores.size() + world_tree.get_size() <= m_spill_rows) {
+            const auto append = [](auto& dst, const auto& view) {
+                dst.insert(dst.end(), view.first.begin(), view.first.end());
+                dst.insert(dst.end(), view.second.begin(), view.second.end());
+            };
+            append(merged.leaves, leaves);
+            append(merged.scores, scores);
+            append(merged.scores_ep, scores_ep);
+            merged.widths.insert(merged.widths.end(), widths.begin(),
+                                 widths.end());
+        } else {
+            if (!merged.scratch) {
+                // Over the cap: the rows held so far go first, in order.
+                merged.scratch = std::make_unique<search::detail::SliceScratch>(
+                    merged.scratch_stem, world_tree.get_leaves_stride());
+                merged.scratch->append_leaves(merged.leaves);
+                merged.scratch->append_scores(merged.scores);
+                merged.scratch->append_scores_ep(merged.scores_ep);
+                merged.scratch->append_widths(merged.widths);
+                std::vector<double>().swap(merged.leaves);
+                std::vector<float>().swap(merged.scores);
+                std::vector<float>().swap(merged.scores_ep);
+                std::vector<std::uint32_t>().swap(merged.widths);
+            }
+            auto& scratch = *merged.scratch;
+            scratch.append_leaves(leaves.first);
+            scratch.append_leaves(leaves.second);
+            scratch.append_scores(scores.first);
+            scratch.append_scores(scores.second);
+            scratch.append_scores_ep(scores_ep.first);
+            scratch.append_scores_ep(scores_ep.second);
+            scratch.append_widths(widths);
+        }
         merged.stats.merge_slice(m_pstats);
         merged.prune_level = std::max(merged.prune_level, m_prune_level);
     }
@@ -476,13 +529,21 @@ private:
         const auto total_pruning_gflops = compute_total_prune_gflops();
         auto result_writer              = search::PruneResultWriter(
             actual_result_file, search::PruneResultWriter::Mode::kAppend);
-        result_writer.write_run_results(
-            run_name, m_snail_scheme.get_data(),
-            {std::span<double>(merged.leaves), {}},
-            {std::span<float>(merged.scores), {}},
-            {std::span<float>(merged.scores_ep), {}}, total_pruning_gflops,
-            merged.scores.size(), m_cfg.get_nparams(), m_pstats, merged.widths,
-            m_reduction);
+        if (merged.scratch) {
+            search::detail::log_scratch_volume(*merged.scratch, run_name);
+            result_writer.write_run_results(
+                run_name, m_snail_scheme.get_data(), *merged.scratch,
+                total_pruning_gflops, m_cfg.get_nparams(), m_pstats,
+                m_reduction);
+        } else {
+            result_writer.write_run_results(
+                run_name, m_snail_scheme.get_data(),
+                {std::span<double>(merged.leaves), {}},
+                {std::span<float>(merged.scores), {}},
+                {std::span<float>(merged.scores_ep), {}}, total_pruning_gflops,
+                merged.scores.size(), m_cfg.get_nparams(), m_pstats,
+                merged.widths, m_reduction);
+        }
         if (m_rfi->has_harvest()) {
             result_writer.write_run_harvest(
                 run_name, m_harvest, m_cfg.get_nparams(), m_n_harvested_total);
@@ -725,7 +786,14 @@ private:
         const auto n_branches  = world_tree.get_size_old();
         const auto n_overloads = world_tree.get_n_overloads();
 
+        // A circular stage's transforms count its leaves by basis.
+        std::array<SizeType, 2> basis_counts{};
+        const bool circular = m_cfg.get_nparams() == kCircularParams;
+        if (circular) {
+            m_prune_funcs->set_basis_counts(&basis_counts);
+        }
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats);
+        m_prune_funcs->set_basis_counts(nullptr);
         if (world_tree.get_n_overloads() > n_overloads) {
             spdlog::debug(
                 "Pruning level {:3d}: the world tree overflowed in {} "
@@ -760,6 +828,12 @@ private:
         log << pstats_cur.get_summary();
         log.close();
         m_pstats.update_stats(pstats_cur, stats.batch_timers);
+        if (circular) {
+            m_pstats.update_circular(search::CircularStageCounts{
+                .level            = m_prune_level,
+                .n_leaves_snap    = basis_counts[0],
+                .n_leaves_crackle = basis_counts[1]});
+        }
         if (stats.n_harvested > 0) {
             spdlog::debug("Pruning level {:3d}: harvested {} candidate(s) "
                           "(run total {}, recorded {}, mask cells {})",
@@ -1565,6 +1639,10 @@ private:
                     m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
                 prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
                 prune.set_seed_slices(m_seed_edges);
+                // The workers' runs share the in-memory cap: a bright line
+                // fills all of them at once.
+                prune.set_spill_rows(search::detail::slice_spill_rows() /
+                                     m_n_workers);
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,

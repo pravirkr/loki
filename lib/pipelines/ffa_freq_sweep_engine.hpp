@@ -12,6 +12,8 @@
 
 #include "loki/search/configs.hpp"
 
+#include "lib/pipelines/sweep_input.hpp"
+
 namespace loki::pipelines::detail {
 
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
@@ -23,8 +25,8 @@ protected:
 public:
     virtual ~FFAFreqSweepEngine() = default;
 
-    virtual void execute(std::span<const float> ts_e,
-                         std::span<const float> ts_v,
+    /// Searches @p input: host arrays, or (CUDA) a resident series.
+    virtual void execute(const SweepInput& input,
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix,
                          std::string_view config_toml) = 0;

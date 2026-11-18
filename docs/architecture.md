@@ -76,15 +76,17 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
 - Public headers include only `loki/...` public headers and the standard
   library.
 - Shared resources are opaque handles built with an `Exec`:
-  `memory::FFAWorkspace<T>`, `memory::EPWorkspace<T>` and `math::FFTManager`.
-  An algorithm that receives one checks that it was built for the same
-  backend and device.
+  `memory::FFAWorkspace<T>`, `memory::EPWorkspace<T>`, `math::FFTManager`
+  and `io::SearchSeries` (the folding inputs of a search, host or device
+  memory). An algorithm that receives one checks that it was built for the
+  same backend and device.
 - A handle's storage is private: `class Impl; Impl& impl();` sit under
   `private:`, with `friend struct loki::detail::HandleAccess;`. Library code
   reaches the concrete buffers only through the accessors built on
   `HandleAccess` (`memory::detail::cpu_workspace`, `cuda_workspace`,
-  `math::detail::cpu_fft`, `cuda_fft`). A new handle follows the same
-  pattern.
+  `math::detail::cpu_fft`, `cuda_fft`, `io::detail::host_series`,
+  `device_series`). The forward declaration of `HandleAccess` is
+  `loki/utils/handle_access.hpp`. A new handle follows the same pattern.
 
 ### 2. Signatures
 
@@ -234,7 +236,7 @@ The namespace follows the directory. Public headers:
 | `include/loki/pipelines/` | `loki::pipelines` |
 | `include/loki/detection/`, `io/`, `search/`, `simulation/` | `loki::<directory>` |
 | `include/loki/common/` | `loki`, except `plans.hpp` (`loki::plans`) and `coord.hpp` (`loki::coord`) |
-| `include/loki/utils/` | one namespace per header: `fft.hpp` uses `loki::math`, `workspace.hpp` uses `loki::memory`, `psr_utils.hpp` uses `loki::psr_utils` |
+| `include/loki/utils/` | one namespace per header: `fft.hpp` uses `loki::math`, `workspace.hpp` uses `loki::memory`, `psr_utils.hpp` uses `loki::psr_utils`, `handle_access.hpp` (one forward declaration) uses `loki::detail` |
 
 The `common/` and `utils/` exceptions are part of the frozen API. Do not add
 more: a new public header takes the namespace of its directory.
@@ -339,6 +341,10 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   Production needs statistical, not bit, reproducibility: the same
   detections, with S/N within 1e-4 relative. Every other path is
   deterministic for a fixed seed.
+- Preprocessing on the GPU is bit-identical to the CPU without a spectral
+  zap. With one, the whole-series transforms run on cuFFT, so the output
+  agrees with the CPU's at float level only (`docs/preprocessing.md`); the
+  noise fill draws the host's numbers (`lib/detail/keyed_rng.hpp`).
 - Candidate postprocessing (sorting, the per-run reduction, grouping and
   selection) is deterministic: given the same final leaves it gives the same
   product, bit for bit, in any thread count. Ties are broken by S/N, then the
@@ -360,7 +366,8 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   rotation is FP32 with no `__sincosf`. The CPU computes its phase steps in
   double and rounds them once (`fill_merge_phase_steps`, `ep_phase_steps`). The Fourier brute fold seeds its phasors from the
   double phase reduced to a cycle, re-seeded every 64 samples. The GPU FFTs
-  are portable block transforms (no cuFFT). Fourier results are at float
+  of the search are portable block transforms; cuFFT runs only the
+  whole-series preprocessing transforms (`lib/cuda/fft_long_cuda.cu`). Fourier results are at float
   level relative to the CPU reference.
 - Thread counts. The caller's `nthreads` is never capped from above:
   library code clamps only from below, `nthreads = std::max(nthreads, 1)`,

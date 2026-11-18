@@ -113,4 +113,24 @@ TEST_CASE("EP leaves are reported at the midpoint, up to a_max + j_max T / 2, "
         flagged += flags[i];
     }
     REQUIRE(flagged == outside);
+
+    // Every EP detection carries its cell half-widths; a polynomial search
+    // never resolves an orbit.
+    const auto has_errors = file.getDataSet("detections/has_parameter_errors")
+                                .read<std::vector<std::uint8_t>>();
+    const auto errors     = file.getDataSet("detections/param_errors")
+                                .read<std::vector<std::vector<double>>>();
+    const auto basis      = file.getDataSet("detections/leaf_basis")
+                                .read<std::vector<std::uint8_t>>();
+    const auto p_orb =
+        file.getDataSet("detections/p_orb").read<std::vector<float>>();
+    REQUIRE(errors.size() == params.size());
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        CHECK(has_errors[i] == 1);
+        CHECK(basis[i] == 0);
+        CHECK(p_orb[i] == 0.0F);
+        for (const double e : errors[i]) {
+            CHECK(e > 0.0);
+        }
+    }
 }

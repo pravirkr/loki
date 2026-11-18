@@ -463,3 +463,18 @@ def test_accelerated_ffa_export_matches_native_parameters(
     assert np.any(accel < 0)
     np.testing.assert_allclose(f1, -f0 * accel / C, rtol=1e-9, atol=1e-15)
     assert np.all(f2 == 0)
+
+
+def test_zap_windows_from_birdies() -> None:
+    cfg = libloki.configs.FFATomlConfig()
+    opts = cfg.preprocessing
+    opts.birdies = [libloki.io.Birdie(50.0, 0.4)]
+    cfg.preprocessing = opts
+    windows = cfg.candidate_options().zap_windows
+    assert len(windows) == 1
+    assert windows[0].lo == pytest.approx(49.8)
+    assert windows[0].hi == pytest.approx(50.2)
+    cand = libloki.configs.CandidateOptions()
+    cand.zap_windows = [libloki.configs.FrequencyWindow(2.0, 1.0)]
+    with pytest.raises(ValueError):
+        cand.validate()

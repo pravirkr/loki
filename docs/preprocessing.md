@@ -19,9 +19,14 @@ These are the sufficient statistics of a matched filter under heteroscedastic
 Gaussian noise. Folding them with the existing kernels gives inverse-variance
 weighting and exact masking, with no change to the fold or score math.
 
-The search CLI runs it on the host CPU in `load_search_timeseries`. It reads
-the raw series, then calls `TimeSeries::preprocess` with the `[preprocessing]`
-table.
+The search CLI runs it in `load_search_timeseries`: it reads the raw series
+and calls `io::SearchSeries::preprocess` with the `[preprocessing]` table on
+the search's backend. On CUDA the raw series is uploaded once, preprocessed
+on the device and searched there; the folding inputs never return to the
+host. Library users get the same with `SearchSeries::preprocess` and the
+sweeps' `execute(const io::SearchSeries&, ...)` (Python:
+`io.SearchSeries.preprocess` and `sweep.execute(series, ...)`); `io::preprocess`
+and the span overloads of `execute` stay for host arrays.
 
 ## Methods
 
@@ -45,14 +50,29 @@ so a CUDA search does not spend its single host core on it.
   device:
   - block medians and variances (radix selection);
   - the running median over block values;
-  - whitening, the bad-block sums and the output pass.
+  - whitening, the bad-block sums and the output pass;
+  - the spectral zap and its self-check: the whole-series transforms on
+    cuFFT (`docs/fft.md`), the local mean power with the same block
+    medians and running median, the flags, the gap passes and the fill.
 
-  The block-level steps (running means, flag decisions, normalisation) run
-  on the host for both backends (`lib/io/preprocess_robust.cpp`).
-  Selections are exact, and the interpolation uses the same IEEE double
-  operations, so on the reference build the output is bit-identical to the
-  CPU's.The z-score method and the spectral zap (`zap_periodic`, `birdies`) have no
-  GPU kernels. On a GPU `Exec` they run on the CPU with `Exec::nthreads`.
+  The block-level steps (running means, flag decisions, normalisation, the
+  gap retention of the zap) run on the host for both backends
+  (`lib/io/preprocess_robust.cpp`). Selections are exact, and the
+  interpolation uses the same IEEE double operations, so without a zap the
+  output is bit-identical to the CPU's on the reference build. With a zap
+  it is not: cuFFT and pocketfft round differently, so the spectra, the
+  local mean power and the output differ at float level, and a bin within
+  about 1e-6 of the threshold can flip. The noise fill draws the same
+  numbers for the same seed and bin on both backends. Measured on
+  synthetic series (2^20 samples, lines, gaps, every mode): the same
+  zapped bins and mask, output RMS difference 2-4e-6 of the noise, band
+  ratios within 1e-4. A CUDA run is deterministic on one GPU and toolkit.
+  The zap needs about 20 bytes per Fourier bin of device memory on top of
+  the series, plus the cuFFT work area: the whole preprocessing peaked at
+  3.2 GB at 2^27 samples (`docs/memory.md`). Without that room it fails with
+  an error; it never falls back to the CPU.
+  The z-score method has no GPU kernels; on a GPU `Exec` it runs on the
+  CPU with `Exec::nthreads`.
 
 1. **Geometry.**
    - The baseline window `W` is in seconds; see "Baseline window" below.
@@ -175,7 +195,9 @@ robust|zscore`, `--filter-window`, `--fast-median/--no-fast-median` and
 - **Periodic zap.**
   - Leave `zap_periodic` off when searching for bright pulsars. Their
     harmonics are strong, narrow lines and can exceed `zap_sigma`.
-  - Prefer `birdies` for known mains and instrumental lines.
+  - Prefer `birdies` for known mains and instrumental lines. Candidates at
+    `p/q` (p, q <= 4) of a birdie window are flagged `in_zap_window`
+    (`docs/candidates.md`).
   - Keep `zap_mode = "noise"`. With `"phase_kept"`, a pulsar-like RFI line
     in a birdie window can still be folded to a detection.
 - **Masking scales.**

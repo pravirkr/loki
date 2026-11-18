@@ -8,6 +8,7 @@
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/io/observation.hpp"
+#include "loki/io/search_series.hpp"
 #include "loki/search/candidates.hpp"
 #include "loki/search/configs.hpp"
 
@@ -44,6 +45,15 @@ public:
     /// error is rethrown; publish_candidates() resumes from it.
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
+                 const std::filesystem::path& outdir        = "./",
+                 std::string_view file_prefix               = "test",
+                 std::string_view config_toml               = {},
+                 const io::ObservationMetadata& observation = {});
+
+    /// Searches @p series, which must be on this sweep's backend and
+    /// device. On CUDA a series preprocessed there (io::SearchSeries::
+    /// preprocess) is searched in place, with no copy through the host.
+    void execute(const io::SearchSeries& series,
                  const std::filesystem::path& outdir        = "./",
                  std::string_view file_prefix               = "test",
                  std::string_view config_toml               = {},

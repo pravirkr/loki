@@ -88,10 +88,10 @@ PreprocessReport preprocess(std::span<const float> raw,
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        // The GPU runs the robust passes; the z-score method and the
-        // spectral zap have no GPU kernels and run on the CPU.
-        if (options.method != PreprocessMethod::kRobust ||
-            options.zap_periodic || !options.birdies.empty()) {
+        // The GPU runs the robust method, spectral zap included; the
+        // z-score method (legacy, verification) has no GPU kernels and
+        // runs on the CPU.
+        if (options.method != PreprocessMethod::kRobust) {
             return detail::preprocess_cpu(raw, tsamp, ts_e, ts_v, options,
                                           exec.nthreads);
         }

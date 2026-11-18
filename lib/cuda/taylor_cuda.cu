@@ -513,9 +513,9 @@ resolve_taylor_accel(const double* __restrict__ leaves_tree,
     const double v_cur = leaves_tree[lo + 2];
     const double f0    = leaves_tree[lo + 6];
 
-    const double delta_v   = a_cur * dt;
+    const double v_add     = v_cur + (a_cur * dt_add);
     const double delta_d   = (v_cur * dt) + (a_cur * half_dt2);
-    const double f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+    const double f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
     const double delay_rel = delta_d * utils::kInvCval;
 
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
@@ -565,11 +565,12 @@ resolve_taylor_jerk(const double* __restrict__ leaves_tree,
     const double v_cur = leaves_tree[lo + 4];
     const double f0    = leaves_tree[lo + 8];
 
-    const double a_new   = a_cur + (j_cur * dt_add);
-    const double delta_v = (a_cur * dt) + (j_cur * half_dt2);
+    const double a_new = a_cur + (j_cur * dt_add);
+    const double v_add =
+        v_cur + (a_cur * dt_add) + (j_cur * 0.5 * dt_add * dt_add);
     const double delta_d =
         (v_cur * dt) + (a_cur * half_dt2) + (j_cur * sixth_dt3);
-    const double f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+    const double f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
     const double delay_rel = delta_d * utils::kInvCval;
 
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
@@ -622,12 +623,12 @@ resolve_taylor_snap(const double* __restrict__ leaves_tree,
     const double v_cur = leaves_tree[lo + 6];
     const double f0    = leaves_tree[lo + 10];
 
-    const double a_new = a_cur + (j_cur * dt_add) + (s_cur * half_dt2_add);
-    const double delta_v =
-        (a_cur * dt) + (j_cur * half_dt2) + (s_cur * sixth_dt3);
+    const double a_new     = a_cur + (j_cur * dt_add) + (s_cur * half_dt2_add);
+    const double v_add     = v_cur + (a_cur * dt_add) + (j_cur * half_dt2_add) +
+                             (s_cur * half_dt2_add * dt_add / 3.0);
     const double delta_d   = (v_cur * dt) + (a_cur * half_dt2) +
                              (j_cur * sixth_dt3) + (s_cur * twenty_fourth_dt4);
-    const double f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+    const double f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
     const double delay_rel = delta_d * utils::kInvCval;
 
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(

@@ -135,13 +135,17 @@ if(CMAKE_CUDA_COMPILER)
   if(LOKI_NEEDS_CURANDDX)
     target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:mathdx::curanddx>)
   endif()
-  # The CUDA runtime is linked statically, so a build needs no libcudart at run
-  # time (only the driver's libcuda). PRIVATE for shared loki, link-only PUBLIC
-  # for static loki.
+  # The CUDA runtime is linked statically (no libcudart at run time). cuFFT runs
+  # the whole-series preprocessing transforms (lib/cuda/fft_long_cuda.cu only)
+  # and is the shared libcufft, so a CUDA build needs the driver's libcuda and
+  # libcufft at run time. PRIVATE for shared loki, link-only PUBLIC for static
+  # loki.
   if(BUILD_SHARED_LIBS)
-    target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::cudart_static)
+    target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::cudart_static CUDA::cufft)
   else()
-    target_link_libraries(${LOKI_LIBRARY_NAME} PUBLIC $<LINK_ONLY:CUDA::cudart_static>)
+    target_link_libraries(
+      ${LOKI_LIBRARY_NAME} PUBLIC $<LINK_ONLY:CUDA::cudart_static> $<LINK_ONLY:CUDA::cufft>
+    )
   endif()
 endif()
 

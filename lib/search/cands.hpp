@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -22,6 +23,9 @@
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
+namespace detail {
+class SliceScratch;
+} // namespace detail
 
 struct FFATimerStatsPacked {
     float brutefold{};
@@ -102,6 +106,16 @@ struct PruneStats {
     [[nodiscard]] std::string get_summary() const;
 };
 
+/// Leaves a circular-orbit pruning stage propagated, by leaf basis (the
+/// `level_stats_circular` table): those its transform moved as resolved
+/// orbits (search::LeafBasis); the rest went through the Taylor channel.
+/// Without an overload trim they are the stage's survivors.
+struct CircularStageCounts {
+    SizeType level{};
+    SizeType n_leaves_snap{};    ///< Resolved by snap and acceleration
+    SizeType n_leaves_crackle{}; ///< Resolved by crackle and jerk (the hole)
+};
+
 struct PruneTimerStatsPacked {
     float branch{};
     float validate{};
@@ -169,6 +183,12 @@ public:
 
     void update_stats(const PruneStats& stats, const PruneTimerStats& timers);
     void update_stats(const PruneStats& stats);
+    /// Record a circular-orbit stage's survivors by basis.
+    void update_circular(const CircularStageCounts& counts);
+    [[nodiscard]] const std::vector<CircularStageCounts>&
+    get_circular_counts() const noexcept {
+        return m_circular_list;
+    }
     /**
      * @brief Add the stats of another seed slice of the same run.
      *
@@ -201,6 +221,7 @@ public:
 
 private:
     std::vector<PruneStats> m_stats_list;
+    std::vector<CircularStageCounts> m_circular_list;
     PruneTimerStats m_accumulated_timers;
 };
 
@@ -423,7 +444,39 @@ public:
                       std::span<const std::uint32_t> widths      = {},
                       const detail::LeafReductionSpec* reduction = nullptr);
 
+    /// write_run_results() of a run whose final leaves are in @p scratch
+    /// (seed slices): the same datasets, read from disk in bounded batches.
+    void
+    write_run_results(std::string_view run_name,
+                      std::span<const SizeType> snail_scheme,
+                      detail::SliceScratch& scratch,
+                      double total_pruning_gflops,
+                      SizeType n_params,
+                      const PruneStatsCollection& pstats,
+                      const detail::LeafReductionSpec* reduction = nullptr);
+
 private:
+    /// The row datasets of a run, created before its rows are written.
+    struct RunDatasets {
+        HighFive::DataSet param_sets;
+        HighFive::DataSet scores;
+        HighFive::DataSet scores_ep;
+        std::optional<HighFive::DataSet> width;
+    };
+    /// Creates the run group with its datasets and attributes; @p write_rows
+    /// fills the row datasets.
+    void
+    write_run_group(std::string_view run_name,
+                    std::span<const SizeType> snail_scheme,
+                    double total_pruning_gflops,
+                    SizeType n_leaves,
+                    SizeType n_params,
+                    const PruneStatsCollection& pstats,
+                    bool write_widths,
+                    const detail::RunLeafReduction* reduced,
+                    const detail::LeafReductionSpec* reduction,
+                    const std::function<void(const RunDatasets&)>& write_rows);
+
     std::filesystem::path m_filepath;
     Mode m_mode;
     std::string m_group_path;

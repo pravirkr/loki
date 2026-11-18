@@ -68,3 +68,29 @@ def test_circular_limits_drive_a_search_config() -> None:
 def test_circular_param_limits_rejects_unphysical_input(kwargs: dict) -> None:
     with pytest.raises(ValueError, match="circular orbit limits"):
         libloki.configs.circular_param_limits(25.0, 29.0, **kwargs)
+
+
+def test_p_orb_max_is_off_by_default_and_needs_a_circular_search() -> None:
+    def config(poly_order: int, **kwargs: float) -> libloki.configs.PulsarSearchConfig:
+        limits = libloki.configs.circular_param_limits(
+            140.0, 145.0, poly_order=poly_order, p_orb_min=5 * TOBS
+        )
+        return libloki.configs.PulsarSearchConfig(
+            nsamps=1 << 25,
+            tsamp=64e-6,
+            nbins=64,
+            eta=1.0,
+            param_limits=limits,
+            bseg_brute=4096,
+            nsegments=128,
+            prune_poly_order=3,
+            p_orb_min=5 * TOBS,
+            **kwargs,
+        )
+
+    assert config(5).p_orb_max is None
+    assert config(5, p_orb_max=20 * TOBS).p_orb_max == pytest.approx(20 * TOBS)
+    with pytest.raises(ValueError, match="p_orb_min"):
+        config(5, p_orb_max=4 * TOBS)
+    with pytest.raises(ValueError, match="circular"):
+        config(3, p_orb_max=20 * TOBS)

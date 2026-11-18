@@ -6,15 +6,18 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <numbers>
 #include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <highfive/highfive.hpp>
 
 #include "loki/io/observation.hpp"
 #include "loki/search/candidates.hpp"
+#include "loki/search/leaf_basis.hpp"
 
 #include "lib/detail/utils.hpp"
 #include "lib/search/candidate_processing.hpp"
@@ -199,6 +202,88 @@ TEST_CASE("Candidate products preserve optional EP-style native uncertainties",
     std::vector<std::vector<double>> errors;
     file.getDataSet("candidates/param_errors").read(errors);
     REQUIRE(errors == std::vector<std::vector<double>>{{0.5, 0.001}});
+}
+
+TEST_CASE("An EP leaf gives its cell widths, basis and orbital period",
+          "[candidates]") {
+    using loki::search::leaf_basis_value;
+    using loki::search::LeafBasis;
+    // A circular leaf, [crackle, snap, jerk, accel, freq] then (d0, 0) and
+    // (f0, basis): omega^2 = 1e-6 from snap / accel and 4e-6 from
+    // crackle / jerk, so the period shows which pair was used.
+    std::vector<double> leaf = {-4e-8, 1e-9,  -1e-5, 2e-7, 1e-2, 3e-4,  10.0,
+                                0.5,   280.0, -1e-5, 0.0,  0.0,  280.0, 0.0};
+    const auto period        = [](double omega_sq) {
+        return static_cast<float>(2.0 * std::numbers::pi / std::sqrt(omega_sq));
+    };
+    const auto make = [&](LeafBasis basis) {
+        leaf.back() = leaf_basis_value(basis);
+        return loki::search::detail::ep_leaf_candidate(leaf, 5, 9.0F, 2, 16, 3,
+                                                       7);
+    };
+    const auto taylor = make(LeafBasis::kPolynomial);
+    CHECK(taylor.leaf_basis == LeafBasis::kPolynomial);
+    CHECK(taylor.p_orb == 0.0F);
+    CHECK(taylor.has_parameter_errors);
+    CHECK(taylor.parameter_errors[0] == 1e-9);
+    CHECK(taylor.parameter_errors[4] == 1e-5); // the absolute width
+    const auto snap = make(LeafBasis::kCircularSnap);
+    CHECK(snap.leaf_basis == LeafBasis::kCircularSnap);
+    CHECK_THAT(snap.p_orb, Catch::Matchers::WithinRel(period(1e-6), 1e-6F));
+    const auto crackle = make(LeafBasis::kCircularCrackle);
+    CHECK(crackle.leaf_basis == LeafBasis::kCircularCrackle);
+    CHECK_THAT(crackle.p_orb, Catch::Matchers::WithinRel(period(4e-6), 1e-6F));
+    // A basis pair whose denominator is exactly zero falls back to the
+    // other pair: acceleration 0 (snap 0) uses crackle / jerk ...
+    const std::array<double, 2> accel = {leaf[6], leaf[2]};
+    leaf[6]                           = 0.0;
+    leaf[2]                           = 0.0;
+    CHECK_THAT(make(LeafBasis::kCircularSnap).p_orb,
+               Catch::Matchers::WithinRel(period(4e-6), 1e-6F));
+    leaf[6] = accel[0];
+    leaf[2] = accel[1];
+    // ... and jerk 0 (crackle 0) uses snap / acceleration.
+    const std::array<double, 2> jerk = {leaf[4], leaf[0]};
+    leaf[4]                          = 0.0;
+    leaf[0]                          = 0.0;
+    CHECK_THAT(make(LeafBasis::kCircularCrackle).p_orb,
+               Catch::Matchers::WithinRel(period(1e-6), 1e-6F));
+    leaf[4] = jerk[0];
+    leaf[0] = jerk[1];
+    // Codes outside the documented set are rejected, never guessed.
+    leaf.back() = 3.0;
+    CHECK_THROWS_AS(
+        loki::search::detail::ep_leaf_candidate(leaf, 5, 9.0F, 2, 16, 3, 7),
+        std::invalid_argument);
+    leaf.back() = 0.5;
+    CHECK_THROWS_AS(
+        loki::search::detail::ep_leaf_candidate(leaf, 5, 9.0F, 2, 16, 3, 7),
+        std::invalid_argument); // Polynomial layouts never read the slot.
+    const std::vector<double> jerk_leaf = {1e-2, 3e-4, 10.0, 0.5,   280.0,
+                                           1e-5, 0.0,  0.0,  280.0, 0.75};
+    const auto poly = loki::search::detail::ep_leaf_candidate(
+        jerk_leaf, 3, 9.0F, 2, 16, 3, 7);
+    CHECK(poly.leaf_basis == LeafBasis::kPolynomial);
+    CHECK(poly.p_orb == 0.0F);
+}
+
+TEST_CASE("Candidate products carry the leaf basis and orbital period",
+          "[candidates][hdf5]") {
+    const loki::test::TempDir dir("loki-candidate-results");
+    const auto raw = dir / "raw.h5";
+    spool(raw, 1);
+    {
+        HighFive::File file(raw.string(), HighFive::File::ReadWrite);
+        file.createDataSet("leaf_basis", std::vector<std::uint8_t>{2});
+        file.createDataSet("p_orb", std::vector<float>{3600.0F});
+    }
+    const auto out = dir / "out.h5";
+    loki::io::detail::write_candidate_results(raw, out, {}, {});
+    const HighFive::File file(out.string(), HighFive::File::ReadOnly);
+    REQUIRE(column<std::uint8_t>(file, "candidates/leaf_basis") ==
+            std::vector<std::uint8_t>{2});
+    REQUIRE(column<float>(file, "candidates/p_orb") ==
+            std::vector<float>{3600.0F});
 }
 
 TEST_CASE("Unclustered non-harmonic results stream beyond the index budget",
@@ -667,4 +752,54 @@ TEST_CASE("CellCap halving at budget boundary does not double-halve full cell",
     const auto ids_b = run_order(order_b);
     REQUIRE(ids_a.size() == n_fit);
     REQUIRE(ids_a == ids_b);
+}
+
+TEST_CASE("Rows at a ratio p/q <= 4 of a zapped window are flagged",
+          "[candidates][hdf5]") {
+    const loki::test::TempDir dir("loki-candidate-zap-window");
+    const auto raw = dir / "raw.h5";
+    spool(raw, 40); // frequencies 10, 11, 12 and 13 Hz
+    loki::search::CandidateOptions options;
+    // 10 Hz at 2/1, 13 Hz at 1/2. 11 and 12 Hz are at no ratio p/q <= 4 of
+    // either window (12 * 5/3 = 20 needs p = 5).
+    options.zap_windows = {{.lo = 19.9, .hi = 20.1}, {.lo = 6.45, .hi = 6.55}};
+    const auto out      = dir / "flagged.h5";
+    loki::io::detail::write_candidate_results(raw, out, {}, options);
+    const HighFive::File file(out.string(), HighFive::File::ReadOnly);
+    for (const auto* table : {"detections", "clusters", "candidates"}) {
+        INFO(table);
+        const auto f0 = column<double>(file, std::string(table) + "/f0");
+        const auto flag =
+            column<std::uint8_t>(file, std::string(table) + "/in_zap_window");
+        REQUIRE(f0.size() == flag.size());
+        REQUIRE_FALSE(f0.empty());
+        for (std::size_t i = 0; i < f0.size(); ++i) {
+            const bool expected =
+                std::abs(f0[i] - 10) < 1e-9 || std::abs(f0[i] - 13) < 1e-9;
+            CHECK(flag[i] == (expected ? 1 : 0));
+        }
+    }
+    std::vector<std::vector<double>> windows;
+    file.getDataSet("processing/zap_windows").read(windows);
+    REQUIRE(windows.size() == 2);
+    CHECK(windows[0] == std::vector<double>{19.9, 20.1});
+    std::uint32_t ratio_max = 0;
+    file.getGroup("processing")
+        .getAttribute("zap_window_ratio_max")
+        .read(ratio_max);
+    CHECK(ratio_max == 4);
+
+    // No windows: the column is all zero and the window table empty.
+    const auto plain = dir / "plain.h5";
+    loki::io::detail::write_candidate_results(raw, plain, {}, {});
+    const HighFive::File none(plain.string(), HighFive::File::ReadOnly);
+    for (const auto v :
+         column<std::uint8_t>(none, "candidates/in_zap_window")) {
+        CHECK(v == 0);
+    }
+    CHECK(none.getDataSet("processing/zap_windows").getDimensions() ==
+          std::vector<std::size_t>{0, 2});
+
+    options.zap_windows = {{.lo = 2.0, .hi = 1.0}};
+    CHECK_THROWS_AS(options.validate(), std::invalid_argument);
 }

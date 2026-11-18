@@ -164,8 +164,9 @@ struct PreprocessReport {
  * @param ts_e Output weighted signal, same length as @p raw.
  * @param ts_v Output weights (statistical information), same length.
  * @param options Method and parameters.
- * @param exec Backend; GPU runs PreprocessMethod::kRobust without spectral
- * zapping (kZScore, zap_periodic and birdies run on the CPU).
+ * @param exec Backend; GPU runs PreprocessMethod::kRobust, spectral zap
+ * included (kZScore runs on the CPU). A GPU zap agrees with the CPU's at
+ * float level, not bit for bit (docs/preprocessing.md).
  * @throws std::invalid_argument on bad sizes or options, non-finite input,
  * a constant series, or a fully masked series.
  */

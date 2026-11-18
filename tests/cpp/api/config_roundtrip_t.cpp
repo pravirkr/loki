@@ -67,6 +67,7 @@ void set_non_defaults(FFATomlConfig& cfg) {
     cfg.nthreads                 = 3;
     cfg.device                   = 1;
     cfg.max_process_memory_gb    = 12.5;
+    cfg.max_host_memory_gb       = 20.0;
     cfg.region_growth_factor     = 1.5;
     cfg.nbins_max                = 512;
     cfg.nbins_min_lossy_bf       = 32;
@@ -155,6 +156,7 @@ void check_same(const FFATomlConfig& a, const FFATomlConfig& b) {
     CHECK(a.backend == b.backend);
     CHECK(a.device == b.device);
     CHECK(a.max_process_memory_gb == b.max_process_memory_gb);
+    CHECK(a.max_host_memory_gb == b.max_host_memory_gb);
     CHECK(a.region_growth_factor == b.region_growth_factor);
     CHECK(a.nbins_max == b.nbins_max);
     CHECK(a.nbins_min_lossy_bf == b.nbins_min_lossy_bf);
@@ -197,6 +199,7 @@ void check_same_ep(const EPTomlConfig& a, const EPTomlConfig& b) {
     CHECK(a.ref_segs == b.ref_segs);
     CHECK(a.nsegments == b.nsegments);
     CHECK(a.p_orb_min == b.p_orb_min);
+    CHECK(a.p_orb_max == b.p_orb_max);
     CHECK(a.m_c_max == b.m_c_max);
     CHECK(a.m_p_min == b.m_p_min);
     CHECK(a.propagator_significance == b.propagator_significance);
@@ -269,6 +272,7 @@ TEST_CASE("EPTomlConfig to_toml_string gives back every setting",
     cfg.ref_segs                = std::vector<loki::SizeType>{0, 3, 7};
     cfg.nsegments               = 64;
     cfg.p_orb_min               = 3600.0;
+    cfg.p_orb_max               = 7200.0;
     cfg.m_c_max                 = 2.0;
     cfg.m_p_min                 = 1.3;
     cfg.propagator_significance = 2.5;
@@ -337,4 +341,29 @@ TEST_CASE("write_run_provenance writes and replaces root attributes",
     std::filesystem::remove(path);
     REQUIRE_THROWS_AS(loki::search::write_run_provenance(path, {}),
                       std::runtime_error);
+}
+
+TEST_CASE("candidate_options carries the birdies a robust preprocessing zaps",
+          "[config]") {
+    loki::search::FFATomlConfig cfg;
+    cfg.preprocessing.birdies = {{.freq = 50.0, .width = 0.4},
+                                 {.freq = 0.1, .width = 1.0}};
+    auto opts                 = cfg.candidate_options();
+    REQUIRE(opts.zap_windows.size() == 2);
+    CHECK(opts.zap_windows[0].lo == 49.8);
+    CHECK(opts.zap_windows[0].hi == 50.2);
+    CHECK(opts.zap_windows[1].lo == 0.0); // clamped at zero
+    CHECK_NOTHROW(opts.validate());
+    // The candidate settings themselves are kept.
+    cfg.candidates.flag_harmonics = true;
+    CHECK(cfg.candidate_options().flag_harmonics);
+    // Nothing is zapped without the robust preprocessing.
+    cfg.preprocessing.method = loki::io::PreprocessMethod::kZScore;
+    CHECK(cfg.candidate_options().zap_windows.empty());
+    cfg.preprocessing.method = loki::io::PreprocessMethod::kRobust;
+    cfg.preprocess           = false;
+    CHECK(cfg.candidate_options().zap_windows.empty());
+    // Not a configuration key: the TOML text is unchanged.
+    cfg.preprocess = true;
+    CHECK(cfg.to_toml_string().find("zap_windows") == std::string::npos);
 }

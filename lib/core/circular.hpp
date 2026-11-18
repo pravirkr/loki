@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <numbers>
+#include <optional>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -56,12 +59,32 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   double propagator_significance,
                                   memory::BranchingWorkspace& branch_ws);
 
+/// Kills the leaves that cannot be a circular orbit within the limits, at
+/// validation_significance (k) cell widths: unbound (snap and acceleration
+/// of one sign, both significant), or, once both are significant, a cell
+/// that is wholly faster than p_orb_min (|snap| - k dsnap > omega_max^2
+/// (|accel| + k daccel)) or wholly beyond the mass limit (|accel| - k daccel
+/// > x_mass ((|snap| + k dsnap) / (|accel| - k daccel))^(2/3)). With
+/// omega_min_sq > 0 (ep.p_orb_max) it also kills a leaf whose
+/// acceleration is significant and whose whole cell is a slower orbit:
+/// |snap| + k dsnap < omega_min_sq (|accel| - k daccel). 0 skips that test.
 SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     std::span<SizeType> leaves_origins,
                                     SizeType n_leaves,
                                     double p_orb_min,
+                                    double omega_min_sq,
                                     double x_mass_const,
                                     double validation_significance);
+
+/// omega_min^2 = (2 pi / p_orb_max)^2 of the validation, 0 without a limit.
+[[nodiscard]] inline double
+circ_omega_min_sq(std::optional<double> p_orb_max) noexcept {
+    if (!p_orb_max.has_value()) {
+        return 0.0;
+    }
+    const double omega_min = 2.0 * std::numbers::pi / *p_orb_max;
+    return omega_min * omega_min;
+}
 
 void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                                std::span<SizeType> param_indices,
@@ -90,13 +113,19 @@ void circ_taylor_ascend_resolve_batch(
     SizeType n_segments,
     double propagator_significance);
 
-void circ_taylor_transform_batch(std::span<double> leaves_tree,
-                                 std::span<SizeType> indices_tree,
-                                 std::pair<double, double> coord_next,
-                                 std::pair<double, double> coord_cur,
-                                 SizeType n_leaves,
-                                 bool use_conservative_tile,
-                                 double propagator_significance);
+/// Transforms the leaves to @p coord_next and writes each one's basis code
+/// (search::LeafBasis) into its basis slot. When @p basis_counts is set, adds
+/// the leaves propagated as snap- and as crackle-resolved orbits to
+/// (*basis_counts)[0] and [1].
+void circ_taylor_transform_batch(
+    std::span<double> leaves_tree,
+    std::span<SizeType> indices_tree,
+    std::pair<double, double> coord_next,
+    std::pair<double, double> coord_cur,
+    SizeType n_leaves,
+    bool use_conservative_tile,
+    double propagator_significance,
+    std::array<SizeType, 2>* basis_counts = nullptr);
 
 // mean is the weighted average of the d4..d1 products (including the
 // snap-occupancy factor). max_children is the largest child count of any

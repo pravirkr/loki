@@ -8,9 +8,17 @@
 #include <string>
 #include <vector>
 
+#include "loki/search/leaf_basis.hpp"
+
 namespace loki::search {
 
 /// Host-side postprocessing only; independent of the scoring backend.
+/// A closed frequency interval [lo, hi], in Hz.
+struct FrequencyWindow {
+    double lo{0.0};
+    double hi{0.0};
+};
+
 struct CandidateOptions {
     /// false skips candidate processing: FFA writes the search's flat
     /// detection file and EP its run diagnostics, as before candidate
@@ -39,6 +47,13 @@ struct CandidateOptions {
     /// covers about 2% of the frequencies of a 5-720 Hz search.
     double harmonic_doppler_tolerance{0.0};
     double harmonic_doppler_min_snr{20.0};
+    /// Frequency windows the preprocessing zapped, in Hz. The tables'
+    /// `in_zap_window` column is 1 for a row whose f0 * p / q lies in one of
+    /// them for some p, q in [1, kZapWindowRatioMax]: a flag for sifting, no
+    /// row is removed. Search configurations fill it from the
+    /// [preprocessing] birdies (FFATomlConfig::candidate_options()).
+    std::vector<FrequencyWindow> zap_windows;
+    static constexpr std::uint32_t kZapWindowRatioMax = 4;
     /// Keep at most this many of the strongest trials in each frequency
     /// cell of each source (EP run or FFA region), before grouping. Zero
     /// keeps every trial.
@@ -78,12 +93,20 @@ struct Candidate {
     /// EP: a parameter other than frequency lies outside its chunk's
     /// configured limits at the reported epoch (the observation midpoint).
     bool outside_prior{false};
+    /// EP: the basis the leaf was last propagated in (see LeafBasis);
+    /// kPolynomial except for resolved orbits of a circular-orbit search.
+    LeafBasis leaf_basis{LeafBasis::kPolynomial};
     std::uint64_t id{};
     std::uint32_t source_region{};
     std::uint32_t source_index{};
     std::uint32_t width{};
     std::uint32_t nbins{};
     float snr{};
+    /// EP circular-orbit searches: orbital period 2 pi / omega in seconds,
+    /// with omega from the pair that resolved the orbit (snap and
+    /// acceleration, or crackle and jerk) at the reported epoch. Zero when
+    /// the leaf is not a resolved orbit.
+    float p_orb{};
     [[nodiscard]] double duty_cycle() const;
     void validate() const;
 };

@@ -785,6 +785,7 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::validate(
     cudaStream_t stream) const noexcept {
     return circ_taylor_validate_batch_cuda(
         leaves_branch, validation_mask, n_leaves, this->m_cfg.get_p_orb_min(),
+        circ_omega_min_sq(this->m_cfg.get_p_orb_max()),
         this->m_cfg.get_x_mass_const(),
         this->m_cfg.get_validation_significance(), scratch_ws, stream);
 }
@@ -799,6 +800,7 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::validate_async(
     cudaStream_t stream) const noexcept {
     circ_taylor_validate_async_cuda(
         leaves_branch, validation_mask, n_leaves, this->m_cfg.get_p_orb_min(),
+        circ_omega_min_sq(this->m_cfg.get_p_orb_max()),
         this->m_cfg.get_x_mass_const(),
         this->m_cfg.get_validation_significance(), stream);
 }
@@ -835,7 +837,7 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::transform(
     circ_taylor_transform_batch_cuda(
         leaves_tree, validation_mask, coord_next, coord_cur, n_leaves,
         this->m_cfg.get_use_conservative_tile(),
-        this->m_cfg.get_propagator_significance(), stream);
+        this->m_cfg.get_propagator_significance(), stream, m_basis_counts_d);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

@@ -151,11 +151,18 @@ def test_ep_candidates_preserve_runs_and_cluster_the_full_list(product, tmp_path
             np.testing.assert_array_equal(
                 raw["param_sets"][i], run["param_sets"][leaf, :2, 0]
             )
+            # The uncertainties are the leaf's cell widths (grid steps).
+            np.testing.assert_array_equal(
+                raw["param_errors"][i], np.abs(run["param_sets"][leaf, :2, 1])
+            )
             chunk = run.parent.parent
             assert raw["width"][i] in chunk["scoring_widths"][:]
             assert raw["nbins"][i] == chunk.attrs["nbins"]
             assert "scores_ep" in run
-        assert not np.any(raw["has_parameter_errors"][:])
+        assert np.all(raw["has_parameter_errors"][:] == 1)
+        # A polynomial search resolves no orbit.
+        assert not np.any(raw["leaf_basis"][:])
+        assert not np.any(raw["p_orb"][:])
         np.testing.assert_allclose(
             raw["f1"][:], -raw["f0"][:] * raw["param_sets"][:, 0] / C
         )
@@ -441,7 +448,7 @@ def test_ep_reported_taylor_derivatives_are_normalized_without_truncation(
         np.testing.assert_array_equal(raw["f0"][:], native[:, -1])
         np.testing.assert_allclose(raw["f1"][:], -native[:, -1] * native[:, -2] / C)
         np.testing.assert_allclose(raw["f2"][:], -native[:, -1] * 3.0 / C)
-        assert not np.any(raw["has_parameter_errors"][:])
+        assert np.all(raw["has_parameter_errors"][:] == 1)
     if nparams >= 4:
         with pytest.raises(ValueError, match="above jerk"):
             export_pulsarx(output, tmp_path / "higher.cands")

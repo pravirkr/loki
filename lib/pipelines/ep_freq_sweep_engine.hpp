@@ -16,6 +16,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/pipelines/sweep_input.hpp"
 #include "lib/search/candidate_processing.hpp"
 
 namespace loki::pipelines::detail {
@@ -30,8 +31,8 @@ protected:
 public:
     virtual ~EPFreqSweepEngine() = default;
 
-    virtual void execute(std::span<const float> ts_e,
-                         std::span<const float> ts_v,
+    /// Searches @p input: host arrays, or (CUDA) a resident series.
+    virtual void execute(const SweepInput& input,
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix) = 0;
 

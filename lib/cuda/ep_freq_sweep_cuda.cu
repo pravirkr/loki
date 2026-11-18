@@ -171,8 +171,6 @@ public:
         m_ffa_workspace.reserve_brute_tables(max_tables.nfreqs,
                                              max_tables.phase_map_entries);
         m_fold_d.resize(stats.get_max_buffer_size(), DeviceFoldT{});
-        m_ts_e_d.resize(m_base_cfg.get_nsamps());
-        m_ts_v_d.resize(m_base_cfg.get_nsamps());
         check_shared_allocation(stats.get_max_buffer_size(),
                                 stats.get_max_coord_size());
 
@@ -219,17 +217,22 @@ public:
         m_reduction = std::move(spec);
     }
 
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
+    void execute(const detail::SweepInput& input,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix) override {
         timing::SimpleTimer sweep_timer;
         sweep_timer.start();
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
 
-        std::tie(ts_e, ts_v) = search::detail::ep_input_series(
-            m_base_cfg, ts_e, ts_v, "EPFreqSweep::execute");
-        check_device_has_room();
+        const bool resident   = input.resident();
+        const SizeType nsamps = search::detail::ep_input_nsamps(
+            m_base_cfg, resident ? input.device_e.size() : input.host_e.size(),
+            resident ? input.device_v.size() : input.host_v.size(),
+            "EPFreqSweep::execute");
+        // The plan counts the input (docs/memory.md); a resident series
+        // already holds it, host input is copied in below.
+        check_device_has_room(
+            resident ? 0 : algorithms::detail::ep_input_bytes(nsamps));
 
         std::error_code ec;
         std::filesystem::create_directories(outdir, ec);
@@ -249,21 +252,53 @@ public:
         // Removed on every exit, including an interrupt or a failed chunk.
         const detail::RemoveOnExit remove_tmp_dir(tmp_dir);
 
-        // The inputs stay on the device for the whole sweep.
+        // The inputs stay on the device for the whole sweep: a resident
+        // series in place, host input copied once.
         const cudaStream_t stream = m_stream.get();
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
-                            ts_e.data(), ts_e.size() * sizeof(float),
-                            cudaMemcpyHostToDevice, stream),
-            "EPFreqSweep: cudaMemcpyAsync ts_e failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
-                            ts_v.data(), ts_v.size() * sizeof(float),
-                            cudaMemcpyHostToDevice, stream),
-            "EPFreqSweep: cudaMemcpyAsync ts_v failed");
-        cuda_utils::check_cuda_call(
-            cudaStreamSynchronize(stream),
-            "EPFreqSweep: input copy synchronization failed");
+        cuda::std::span<const float> in_e;
+        cuda::std::span<const float> in_v;
+        if (resident) {
+            in_e = {input.device_e.data(), nsamps};
+            in_v = {input.device_v.data(), nsamps};
+        } else {
+            m_ts_e_d.resize(nsamps);
+            m_ts_v_d.resize(nsamps);
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
+                                input.host_e.data(), nsamps * sizeof(float),
+                                cudaMemcpyHostToDevice, stream),
+                "EPFreqSweep: cudaMemcpyAsync ts_e failed");
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
+                                input.host_v.data(), nsamps * sizeof(float),
+                                cudaMemcpyHostToDevice, stream),
+                "EPFreqSweep: cudaMemcpyAsync ts_v failed");
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(stream),
+                "EPFreqSweep: input copy synchronization failed");
+            in_e = {thrust::raw_pointer_cast(m_ts_e_d.data()), nsamps};
+            in_v = {thrust::raw_pointer_cast(m_ts_v_d.data()), nsamps};
+        }
+        // Host input is freed on every exit (the next execute() copies
+        // again); a resident series stays with its owner.
+        struct ReleaseInput {
+            thrust::device_vector<float>& e;
+            thrust::device_vector<float>& v;
+            ReleaseInput(thrust::device_vector<float>& e_in,
+                         thrust::device_vector<float>& v_in)
+                : e(e_in),
+                  v(v_in) {}
+            ReleaseInput(const ReleaseInput&)            = delete;
+            ReleaseInput& operator=(const ReleaseInput&) = delete;
+            ReleaseInput(ReleaseInput&&)                 = delete;
+            ReleaseInput& operator=(ReleaseInput&&)      = delete;
+            ~ReleaseInput() {
+                e.clear();
+                e.shrink_to_fit();
+                v.clear();
+                v.shrink_to_fit();
+            }
+        } const release_input(m_ts_e_d, m_ts_v_d);
 
         const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
         const SizeType nchunks = chunk_cfgs.size();
@@ -353,10 +388,8 @@ public:
                 .ffa_workspace = &m_ffa_workspace,
                 .fft_manager   = &m_fft_manager,
                 .fold_d        = cuda_utils::as_span(m_fold_d),
-                .ts_e_d        = cuda::std::span<const float>(
-                    thrust::raw_pointer_cast(m_ts_e_d.data()), m_ts_e_d.size()),
-                .ts_v_d = cuda::std::span<const float>(
-                    thrust::raw_pointer_cast(m_ts_v_d.data()), m_ts_v_d.size()),
+                .ts_e_d        = in_e,
+                .ts_v_d        = in_v,
                 .stream        = stream,
                 .ws_max_sugg   = capacity,
                 .ws_branch_max = group.branch_max,
@@ -443,17 +476,21 @@ private:
     // They only fire on a bug, a stale cache or a model drift: the planner
     // guarantees the budget and the model mirrors the allocations exactly.
 
-    /// The device must still have room for what the sweep allocates next.
-    void check_device_has_room() const {
+    /// The device must still have room for what the sweep allocates next:
+    /// the group workspaces and @p input_bytes of host input to copy in.
+    void check_device_has_room(SizeType input_bytes) const {
         const double free_gb =
             algorithms::detail::ep_cuda_free_memory_gb(m_device_id);
-        if (free_gb < m_extra_peak_gb) {
+        const double need_gb =
+            m_extra_peak_gb +
+            (static_cast<double>(input_bytes) / utils::kBytesPerGB);
+        if (free_gb < need_gb) {
             throw std::runtime_error(fmt::format(
                 "EPFreqSweep: device {} has {:.2f} GB free but the sweep "
                 "still needs up to {:.2f} GB (plan peak {:.2f} GB). Free "
                 "device memory or re-plan with a smaller "
                 "max_process_memory_gb.",
-                m_device_id, free_gb, m_extra_peak_gb,
+                m_device_id, free_gb, need_gb,
                 m_region_planner.get_stats().get_max_memory_gb()));
         }
     }

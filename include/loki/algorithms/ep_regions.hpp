@@ -188,6 +188,37 @@ ep_sweep_n_workers(int nthreads,
                    const std::optional<std::vector<SizeType>>& ref_segs);
 
 /**
+ * @brief Host memory the final leaves of a CUDA EP sweep take.
+ *
+ * The device holds the search; the host holds the final leaves of the runs
+ * in flight. This is the host memory beyond the CUDA context and the input
+ * series.
+ */
+struct EPCudaHostMemory {
+    /// Host bytes of one final leaf: its parameters, two scores and a width.
+    SizeType leaf_bytes{0};
+    /// Final leaves a run pruned in seed slices holds on the host; past them
+    /// it moves its final leaves to a scratch on disk.
+    SizeType spill_leaves{0};
+    /// Runs whose final leaves are on the host at once: the one the engine
+    /// fills, the one the writer writes and one waiting for it.
+    SizeType runs_in_flight{0};
+
+    /// Bytes of the final leaves of the runs in flight, each at most
+    /// spill_leaves, doubled for the growth of the vectors that collect
+    /// them (as the CPU model counts held leaves). A run of one slice holds
+    /// all of its tree's final leaves, up to the chunk's max_sugg, which
+    /// this does not bound.
+    [[nodiscard]] SizeType sweep_bytes() const noexcept {
+        constexpr SizeType kGrowth = 2;
+        return kGrowth * runs_in_flight * spill_leaves * leaf_bytes;
+    }
+};
+
+/// The EPCudaHostMemory of a search with @p nparams parameters.
+[[nodiscard]] EPCudaHostMemory ep_cuda_host_memory(SizeType nparams);
+
+/**
  * @brief A planner for EP (Extreme Pruning) regions across a frequency sweep.
  *
  * Subdivides a frequency search range into memory-bounded chunks.

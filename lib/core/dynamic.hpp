@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -109,6 +110,12 @@ public:
                            std::pair<double, double> coord_next,
                            std::pair<double, double> coord_cur,
                            SizeType n_leaves) const = 0;
+
+    /// Circular-orbit bases: counters to which every later transform adds
+    /// the leaves it propagates as snap- and as crackle-resolved orbits;
+    /// nullptr stops counting. Other bases ignore it.
+    virtual void
+    set_basis_counts(std::array<SizeType, 2>* /*counts*/) noexcept {}
 
     virtual std::vector<double>
     get_transform_matrix(std::pair<double, double> coord_cur,
@@ -382,8 +389,13 @@ template <SupportedFoldType FoldType>
 class PruneCircTaylorDPFuncts final : public BaseTaylorPruneDPFuncts<FoldType> {
 private:
     using Base = BaseTaylorPruneDPFuncts<FoldType>;
+    std::array<SizeType, 2>* m_basis_counts{nullptr};
 
 public:
+    void set_basis_counts(std::array<SizeType, 2>* counts) noexcept override {
+        m_basis_counts = counts;
+    }
+
     PruneCircTaylorDPFuncts(std::span<const SizeType> param_grid_count_init,
                             std::span<const double> dparams_init,
                             SizeType nseg_ffa,

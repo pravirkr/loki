@@ -1,6 +1,7 @@
 #include "lib/core/circular.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+#include "loki/search/leaf_basis.hpp"
 
 #include "lib/core/branching.hpp"
 #include "lib/core/transforms.hpp"
@@ -404,6 +406,7 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     std::span<SizeType> leaves_origins,
                                     SizeType n_leaves,
                                     double p_orb_min,
+                                    double omega_min_sq,
                                     double x_mass_const,
                                     double validation_significance) {
     constexpr SizeType kParams       = 5U;
@@ -436,18 +439,40 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
         if (snap_unphysical) {
             continue; // kill outright
         }
+        // p_orb_max: kill when even the cell's largest |snap| and smallest
+        // |accel| give an orbit slower than omega_min. Needs a significant
+        // acceleration only, so a snap consistent with zero (a wide orbit) is
+        // killed too; near the nodes (acceleration not significant) the
+        // leaf is kept.
+        if (omega_min_sq > 0.0 && is_sig_accel) {
+            const double snap_hi =
+                std::abs(snap) + (validation_significance * dsnap);
+            const double accel_lo =
+                std::abs(accel) - (validation_significance * daccel);
+            if (snap_hi < omega_min_sq * accel_lo) {
+                continue;
+            }
+        }
         const bool snap_region =
             is_sig_snap && is_sig_accel && is_physical_snap;
         if (snap_region) {
-            // snap_region: apply physical validity checks
-            const double omega_sq = -snap / accel;
-            const double limit_accel =
-                x_mass_const * std::pow(omega_sq, kTwoThirds);
-
-            const bool valid_omega = omega_sq < omega_max_sq;
-            // |d2| < x * omega^(4/3)
-            const bool valid_accel = std::abs(accel) <= limit_accel;
-            if (!valid_omega || !valid_accel) {
+            // Kill only when the whole cell, widened by k widths, is too fast
+            // an orbit or too heavy a companion: the point estimate
+            // omega^2 = -snap / accel is uncertain by up to ~40 % near the
+            // significance gate. accel_lo > 0 here (accel is significant).
+            const double k        = validation_significance;
+            const double snap_lo  = std::abs(snap) - (k * dsnap);
+            const double snap_hi  = std::abs(snap) + (k * dsnap);
+            const double accel_lo = std::abs(accel) - (k * daccel);
+            const double accel_hi = std::abs(accel) + (k * daccel);
+            // omega^2 > omega_max^2 even at the cell's slowest orbit
+            const bool too_fast = snap_lo > omega_max_sq * accel_hi;
+            // |accel| > x omega^(4/3) even at the cell's smallest |accel|
+            // and largest omega^2
+            const bool too_heavy =
+                accel_lo >
+                x_mass_const * std::pow(snap_hi / accel_lo, kTwoThirds);
+            if (too_fast || too_heavy) {
                 continue;
             }
         }
@@ -543,16 +568,15 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
         const auto sin_odt_init  = std::sin(omega_dt_init);
         const auto a_t_init =
             (a_t_cur * cos_odt_init) + ((j_t_cur / omega_orb) * sin_odt_init);
-        const auto j_t_init =
-            (j_t_cur * cos_odt_init) - ((a_t_cur * omega_orb) * sin_odt_init);
 
         const auto a_new = a_t_add;
-        const auto delta_v =
-            (-j_t_add / omega_orb_sq) - (-j_t_init / omega_orb_sq);
+        // The added segment's absolute velocity: on the moving grid f0 stays
+        // the seed's, so the leaf's frequency offset lives in its velocity.
+        const auto v_add     = v_t_cur + ((j_t_cur - j_t_add) / omega_orb_sq);
         const auto delta_d   = (-a_t_add / omega_orb_sq) -
                                (-a_t_init / omega_orb_sq) +
                                ((v_t_cur + (j_t_cur / omega_orb_sq)) * dt);
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase
@@ -591,16 +615,15 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
         const auto sin_odt_init  = std::sin(omega_dt_init);
         const auto a_t_init =
             (a_t_cur * cos_odt_init) + ((j_t_cur / omega_orb) * sin_odt_init);
-        const auto j_t_init =
-            (j_t_cur * cos_odt_init) - ((a_t_cur * omega_orb) * sin_odt_init);
 
         const auto a_new = a_t_add;
-        const auto delta_v =
-            (-j_t_add / omega_orb_sq) - (-j_t_init / omega_orb_sq);
+        // The added segment's absolute velocity: on the moving grid f0 stays
+        // the seed's, so the leaf's frequency offset lives in its velocity.
+        const auto v_add     = v_t_cur + ((j_t_cur - j_t_add) / omega_orb_sq);
         const auto delta_d   = (-a_t_add / omega_orb_sq) -
                                (-a_t_init / omega_orb_sq) +
                                ((v_t_cur + (j_t_cur / omega_orb_sq)) * dt);
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase
@@ -624,15 +647,16 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
         const auto f0      = leaves_tree[lo + 12];
         const auto a_new = a_t_cur + (j_t_cur * dt_add) +
                            (s_t_cur * half_dt2_add) + (c_t_cur * sixth_dt3_add);
-        const auto delta_v = (a_t_cur * dt) + (j_t_cur * half_dt2) +
-                             (s_t_cur * sixth_dt3) +
-                             (c_t_cur * twenty_fourth_dt4);
+        const auto v_add = v_t_cur + (a_t_cur * dt_add) +
+                           (j_t_cur * half_dt2_add) +
+                           (s_t_cur * sixth_dt3_add) +
+                           (c_t_cur * sixth_dt3_add * dt_add / 4.0);
         const auto delta_d =
             (v_t_cur * dt) + (a_t_cur * half_dt2) + (j_t_cur * sixth_dt3) +
             (s_t_cur * twenty_fourth_dt4) + (c_t_cur * onehundred_twenty_dt5);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase
@@ -826,7 +850,8 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,
                                  bool use_conservative_tile,
-                                 double propagator_significance) {
+                                 double propagator_significance,
+                                 std::array<SizeType, 2>* basis_counts) {
     constexpr SizeType kParams       = 5;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -850,6 +875,19 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
         get_circ_taylor_mask_scattered(leaves_tree, indices_tree, n_leaves,
                                        kParams, propagator_significance);
+    if (basis_counts != nullptr) {
+        (*basis_counts)[0] += idx_circular_snap.size();
+        (*basis_counts)[1] += idx_circular_crackle.size();
+    }
+    // Each leaf records the basis this stage propagates it in (its basis
+    // slot, after f0).
+    constexpr SizeType kBasisSlot = kLeavesStride - 1;
+    constexpr double kTaylorBasis =
+        search::leaf_basis_value(search::LeafBasis::kPolynomial);
+    constexpr double kSnapBasis =
+        search::leaf_basis_value(search::LeafBasis::kCircularSnap);
+    constexpr double kCrackleBasis =
+        search::leaf_basis_value(search::LeafBasis::kCircularCrackle);
 
     // Process circular indices
     for (SizeType const i : idx_circular_snap) {
@@ -881,12 +919,13 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
         const double d0_j     = d_circ_j + (d0_i - d_circ_i) + (d1_diff * dt);
 
         // Write back transformed values
-        leaves_tree[lo + 0]  = d5_j;
-        leaves_tree[lo + 2]  = d4_j;
-        leaves_tree[lo + 4]  = d3_j;
-        leaves_tree[lo + 6]  = d2_j;
-        leaves_tree[lo + 8]  = d1_j;
-        leaves_tree[lo + 10] = d0_j;
+        leaves_tree[lo + 0]          = d5_j;
+        leaves_tree[lo + 2]          = d4_j;
+        leaves_tree[lo + 4]          = d3_j;
+        leaves_tree[lo + 6]          = d2_j;
+        leaves_tree[lo + 8]          = d1_j;
+        leaves_tree[lo + 10]         = d0_j;
+        leaves_tree[lo + kBasisSlot] = kSnapBasis;
     }
 
     // Process circular crackle indices
@@ -918,12 +957,13 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
         const double d0_j     = d_circ_j + (d0_i - d_circ_i) + (d1_diff * dt);
 
         // Write back transformed values
-        leaves_tree[lo + 0]  = d5_j;
-        leaves_tree[lo + 2]  = d4_j;
-        leaves_tree[lo + 4]  = d3_j;
-        leaves_tree[lo + 6]  = d2_j;
-        leaves_tree[lo + 8]  = d1_j;
-        leaves_tree[lo + 10] = d0_j;
+        leaves_tree[lo + 0]          = d5_j;
+        leaves_tree[lo + 2]          = d4_j;
+        leaves_tree[lo + 4]          = d3_j;
+        leaves_tree[lo + 6]          = d2_j;
+        leaves_tree[lo + 8]          = d1_j;
+        leaves_tree[lo + 10]         = d0_j;
+        leaves_tree[lo + kBasisSlot] = kCrackleBasis;
     }
 
     // Process normal indices
@@ -949,6 +989,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                (d2_val_i * half_dt2) + (d3_val_i * sixth_dt3) +
                                (d4_val_i * twenty_fourth_dt4) +
                                (d5_val_i * onehundred_twenty_dt5);
+        leaves_tree[lo + kBasisSlot] = kTaylorBasis;
     }
 
     // Process error leaves

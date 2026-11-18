@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -29,6 +30,7 @@
 
 #include "lib/algorithms/ep_memory.hpp"
 #include "lib/search/cands.hpp"
+#include "lib/search/slice_scratch.hpp"
 
 namespace loki::pipelines::detail {
 
@@ -83,6 +85,10 @@ struct EPResultPayload {
     std::vector<float> scores;
     std::vector<float> scores_ep;
     std::vector<std::uint32_t> widths;
+    /// A run pruned in seed slices whose final leaves outgrew
+    /// slice_spill_rows(): they are here instead of in leaves .. widths
+    /// (empty), and the files go with the payload.
+    std::unique_ptr<search::detail::SliceScratch> scratch;
     double gflops{0.0};
     SizeType nparams{0};
     search::PruneStatsCollection stats;

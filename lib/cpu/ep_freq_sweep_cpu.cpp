@@ -110,12 +110,14 @@ public:
         m_reduction = std::move(spec);
     }
 
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
+    void execute(const detail::SweepInput& input,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix) override {
         timing::SimpleTimer sweep_timer;
         sweep_timer.start();
+        std::span<const float> ts_e;
+        std::span<const float> ts_v;
+        std::tie(ts_e, ts_v) = input.host_spans("EPFreqSweep::execute");
         std::tie(ts_e, ts_v) = search::detail::ep_input_series(
             m_base_cfg, ts_e, ts_v, "EPFreqSweep::execute");
 

@@ -53,6 +53,15 @@ while IFS= read -r line; do fail "$line"; done < <(
     sources include lib src applications bench tests/cpp |
         xargs grep -nE 'std::(v?format|format_to|format_string|formatter)\b|#include <format>')
 
+# 3c. cuFFT stays in the FFT module: only the whole-series transforms
+#     (lib/cuda/fft_long_cuda.cu) use it; the search kernels use PortableFFT
+#     (docs/fft.md, "Whole-series transforms").
+section "cuFFT only in lib/cuda/fft_long_cuda.cu"
+while IFS= read -r line; do fail "$line"; done < <(
+    sources include lib src applications bench tests/cpp |
+        grep -v '^lib/cuda/fft_long_cuda\.cu$' |
+        xargs grep -nE '#include <cufft|\bcufft[A-Z][A-Za-z0-9]*\(')
+
 # 4. Public headers open only the namespaces rule 7 allows.
 section "public namespaces follow the directory"
 for h in $(find include/loki -mindepth 2 -name '*.hpp'); do

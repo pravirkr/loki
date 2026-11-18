@@ -551,11 +551,11 @@ void poly_taylor_resolve_accel_batch(std::span<const double> leaves_tree,
         const auto v_cur   = leaves_tree[lo + 2];
         const auto f0      = leaves_tree[lo + 6];
         const auto a_new   = a_cur;
-        const auto delta_v = a_cur * dt;
+        const auto v_add   = v_cur + (a_cur * dt_add);
         const auto delta_d = (v_cur * dt) + (a_cur * half_dt2);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Find nearest grid indices
@@ -611,18 +611,18 @@ void poly_taylor_resolve_jerk_batch(std::span<const double> leaves_tree,
         ((half_dt2_add * dt_add) - (half_dt2_init * dt_init)) / 3.0;
 
     for (SizeType i = 0; i < n_leaves; ++i) {
-        const auto lo      = i * kLeavesStride;
-        const auto j_cur   = leaves_tree[lo + 0];
-        const auto a_cur   = leaves_tree[lo + 2];
-        const auto v_cur   = leaves_tree[lo + 4];
-        const auto f0      = leaves_tree[lo + 8];
-        const auto a_new   = a_cur + (j_cur * dt_add);
-        const auto delta_v = (a_cur * dt) + (j_cur * half_dt2);
+        const auto lo    = i * kLeavesStride;
+        const auto j_cur = leaves_tree[lo + 0];
+        const auto a_cur = leaves_tree[lo + 2];
+        const auto v_cur = leaves_tree[lo + 4];
+        const auto f0    = leaves_tree[lo + 8];
+        const auto a_new = a_cur + (j_cur * dt_add);
+        const auto v_add = v_cur + (a_cur * dt_add) + (j_cur * half_dt2_add);
         const auto delta_d =
             (v_cur * dt) + (a_cur * half_dt2) + (j_cur * sixth_dt3);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase
@@ -681,20 +681,20 @@ void poly_taylor_resolve_snap_batch(std::span<const double> leaves_tree,
         ((half_dt2_add * half_dt2_add) - (half_dt2_init * half_dt2_init)) / 6.0;
 
     for (SizeType i = 0; i < n_leaves; ++i) {
-        const auto lo    = i * kLeavesStride;
-        const auto s_cur = leaves_tree[lo + 0];
-        const auto j_cur = leaves_tree[lo + 2];
-        const auto a_cur = leaves_tree[lo + 4];
-        const auto v_cur = leaves_tree[lo + 6];
-        const auto f0    = leaves_tree[lo + 10];
-        const auto a_new = a_cur + (j_cur * dt_add) + (s_cur * half_dt2_add);
-        const auto delta_v =
-            (a_cur * dt) + (j_cur * half_dt2) + (s_cur * sixth_dt3);
+        const auto lo      = i * kLeavesStride;
+        const auto s_cur   = leaves_tree[lo + 0];
+        const auto j_cur   = leaves_tree[lo + 2];
+        const auto a_cur   = leaves_tree[lo + 4];
+        const auto v_cur   = leaves_tree[lo + 6];
+        const auto f0      = leaves_tree[lo + 10];
+        const auto a_new   = a_cur + (j_cur * dt_add) + (s_cur * half_dt2_add);
+        const auto v_add   = v_cur + (a_cur * dt_add) + (j_cur * half_dt2_add) +
+                             (s_cur * half_dt2_add * dt_add / 3.0);
         const auto delta_d = (v_cur * dt) + (a_cur * half_dt2) +
                              (j_cur * sixth_dt3) + (s_cur * twenty_fourth_dt4);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
+        const auto f_new     = f0 * (1.0 - (v_add * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
 
         // Calculate relative phase
