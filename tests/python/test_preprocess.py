@@ -138,3 +138,28 @@ def test_cuda_matches_cpu() -> None:
     series = io.TimeSeries(raw, np.ones_like(raw), TSAMP)
     series.preprocess(io.PreprocessOptions(), backend="cuda")
     np.testing.assert_array_equal(series.ts_e, gpu[0])
+
+
+@pytest.mark.skipif(
+    "cuda" not in libloki.available_backends(), reason="CUDA backend not built"
+)
+def test_cuda_zap_matches_cpu() -> None:
+    n = 1 << 17
+    t = np.arange(n) * TSAMP
+    raw = _noise(n, seed=6) + 0.3 * np.sin(2 * np.pi * 123.4 * t).astype(np.float32)
+    raw[50000:53000] *= 6.0
+    opts = io.PreprocessOptions()
+    opts.zap_periodic = True
+    opts.birdies = [io.Birdie(321.0, 0.5)]
+    cpu = io.preprocess(raw, TSAMP, opts, nthreads=2)
+    gpu = io.preprocess(raw, TSAMP, opts, backend="cuda")
+    # cuFFT and pocketfft round differently: float-level agreement.
+    assert gpu[2].n_zapped == cpu[2].n_zapped > 0
+    assert gpu[2].n_masked == cpu[2].n_masked > 0
+    np.testing.assert_array_equal(cpu[1] == 0.0, gpu[1] == 0.0)
+    err = np.sqrt(np.mean((gpu[0] - cpu[0]) ** 2) / np.mean(cpu[0] ** 2))
+    assert err < 1e-4
+    assert len(gpu[2].zap_bands) == len(cpu[2].zap_bands)
+    for b_cpu, b_gpu in zip(cpu[2].zap_bands, gpu[2].zap_bands, strict=True):
+        assert b_gpu.n_zapped == b_cpu.n_zapped
+        assert b_gpu.power_ratio == pytest.approx(b_cpu.power_ratio, abs=2e-3)

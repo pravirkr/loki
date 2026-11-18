@@ -279,6 +279,42 @@ other power is 0.95-1.02 for f up to 0.15, and 0.995-1.011 above 10 Hz
 on the bright-binary series. `phase_kept` (the previous zap) is
 bit-identical to before.
 
+### Spectral zap on the GPU
+
+A CUDA search used to run the whole preprocessing on the CPU as soon as the
+zap was on (the zap had no GPU code). The zap now runs on the device, with
+the whole-series transforms on cuFFT (`docs/fft.md`). Measured 2026-11-18,
+L40, `loki.libloki.io.preprocess` with 4 CPU threads, synthetic series with
+lines, a pulsar and bursts (0.04-0.08 % masked, so three removal passes),
+`zap_periodic` on and 1,200 narrow birdie windows, `noise` mode; times
+include the host-device copies. A job preprocesses once, so the first CUDA
+call of the process (which also plans cuFFT) is the figure that counts; a
+repeated call is given in brackets:
+
+| Series | CPU, no zap | CPU, zap | CUDA, no zap | CUDA, zap |
+|---|---|---|---|---|
+| 2^26 samples | 1.8 s | 8.1 s | 0.24 s | 0.72 s (0.58 s) |
+| 2^27 samples | 3.5 s | 23.6 s | 0.44-0.48 s | 1.11 s (0.95 s) |
+
+Both backends zapped the same bins (10,419 and 20,771) and masked the same
+samples; the outputs differ by 3.7e-6 of the noise RMS. On smaller cases
+(2^20 samples, every mode, with and without gaps, even and odd lengths) the
+zapped bins and masks were identical and the self-check ratios within 1e-4.
+
+On a real 2^26-sample series with a bright binary pulsar, 1,219 birdie
+windows and a 7.5 s masked run (CUDA EP search, 80-95 Hz, acc +-40), the
+GPU zap against the CPU zap of the previous build: the same zapped bins in
+all three modes (1,108,234 for `noise` and `zero`, 410,947 for
+`phase_kept`), self-check ratios equal to three decimals, and the same
+candidates (117, 634 and 147) with S/N differing by less than 0.001.
+Preprocessing took 0.6-0.7 s instead of 5.1 s (`phase_kept`) and 8.3 s
+(`noise`), the whole run 1.5 s instead of 11.6 s (`noise`), and the peak
+host RSS fell from 2.5 to 1.2 GB. On a real 2^27-sample series (CUDA EP
+acceleration search, 1.7 % masked, 2,539,819 zapped bins, warm plan cache)
+preprocessing took 1.1 s instead of 24.5 s and the whole job 9.8 s instead
+of 33.4 s (peak host RSS 2.2 instead of 4.9 GB); the zapped bins, the
+self-check and the 117 candidates matched, S/N within 0.001.
+
 ### RFI control of the EP pruning (`[ep.rfi]`, CPU)
 
 A 2^24-sample series with a bright pulsar (S/N about 275) and four

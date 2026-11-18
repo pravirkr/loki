@@ -434,7 +434,7 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
     const auto options = cfg.to_preprocess_options();
     const bool robust  = options.method == loki::io::PreprocessMethod::kRobust;
     // GPU searches preprocess on their device; the CPU thread count serves
-    // the options the GPU runs on the host (z-score, spectral zap).
+    // the z-score method, which the GPU runs on the host.
     exec.nthreads               = nthreads;
     const auto preprocess_start = SteadyClock::now();
     const auto rep              = ts.preprocess(options, exec);

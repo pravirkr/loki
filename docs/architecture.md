@@ -339,6 +339,10 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   Production needs statistical, not bit, reproducibility: the same
   detections, with S/N within 1e-4 relative. Every other path is
   deterministic for a fixed seed.
+- Preprocessing on the GPU is bit-identical to the CPU without a spectral
+  zap. With one, the whole-series transforms run on cuFFT, so the output
+  agrees with the CPU's at float level only (`docs/preprocessing.md`); the
+  noise fill draws the host's numbers (`lib/detail/keyed_rng.hpp`).
 - Candidate postprocessing (sorting, the per-run reduction, grouping and
   selection) is deterministic: given the same final leaves it gives the same
   product, bit for bit, in any thread count. Ties are broken by S/N, then the

@@ -389,6 +389,23 @@ Test hooks shrink the batches to exercise their edges (`ffa_memory_t.cpp`):
 `tests/cpp/internal/ffa_memory_t.cpp` also checks that the planner's terms
 cover the real workspace and the per-thread bounds of every chunk.
 
+### Preprocessing on CUDA
+
+Preprocessing runs and frees its device memory before the sweep is
+planned, so it is not part of the plan. The robust passes hold the series
+three times (`x`, `z` as floats and a byte mask: 9 bytes per sample) plus
+block arrays. The spectral zap adds, per Fourier bin (`n / 2 + 1`), the
+spectrum (8 bytes), the power and the local mean (4 + 4) and four flag bytes,
+plus the cuFFT work area (`LongRealFFT::workspace_bytes`, one spectrum: 0.54
+GB at 2^27), the block arrays of the local mean power (10 bytes per block of
+`zap_whiten_bins / 16` bins) and the 0.5 MB noise table. Measured on an L40
+(2026-11-18): at 2^27 samples the preprocessing peak was 3.17 GB, 1.21 GB for
+the series and 1.96 GB for the zap; at 2^26 with `zap_whiten_bins = 8`
+(one-bin blocks) 1.94 GB. The counted bytes fall about 50 MB short of the
+measured peak (cuFFT's plan tables, temporaries, allocation granularity), so
+the check adds 256 MB. The zap checks free device memory before it allocates
+and fails with an error naming both numbers.
+
 ## Reserve
 
 The reserve covers what cannot be counted deterministically: heap

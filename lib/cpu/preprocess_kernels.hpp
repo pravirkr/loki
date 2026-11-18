@@ -114,21 +114,6 @@ void flag_bad_blocks(std::span<const float> z,
                      std::span<std::uint8_t> mask,
                      int nthreads);
 
-/// Power threshold in Exp(1) units with upper-tail probability equal to the
-/// Gaussian upper tail at @p sigma.
-[[nodiscard]] double exp_power_threshold(double sigma);
-
-/// 1 for the spectral bins (of @p nf, DC excluded) inside @p birdies over
-/// an observation of @p t_obs seconds; a birdie narrower than a bin covers
-/// the nearest bin.
-[[nodiscard]] std::vector<std::uint8_t>
-birdie_bins(std::span<const Birdie> birdies, double t_obs, SizeType nf);
-
-/// Default removal passes of a hard zap on data with gaps.
-inline constexpr SizeType kZapGapPasses = 3;
-/// Gap fraction from which a hard zap makes its extra passes.
-inline constexpr double kZapMinGapFraction = 1e-4;
-
 /// What zap_spectrum() flags and how it replaces the flagged bins.
 struct SpectralZap {
     bool use_threshold{false};  ///< flag bins above the threshold

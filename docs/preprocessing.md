@@ -45,14 +45,29 @@ so a CUDA search does not spend its single host core on it.
   device:
   - block medians and variances (radix selection);
   - the running median over block values;
-  - whitening, the bad-block sums and the output pass.
+  - whitening, the bad-block sums and the output pass;
+  - the spectral zap and its self-check: the whole-series transforms on
+    cuFFT (`docs/fft.md`), the local mean power with the same block
+    medians and running median, the flags, the gap passes and the fill.
 
-  The block-level steps (running means, flag decisions, normalisation) run
-  on the host for both backends (`lib/io/preprocess_robust.cpp`).
-  Selections are exact, and the interpolation uses the same IEEE double
-  operations, so on the reference build the output is bit-identical to the
-  CPU's.The z-score method and the spectral zap (`zap_periodic`, `birdies`) have no
-  GPU kernels. On a GPU `Exec` they run on the CPU with `Exec::nthreads`.
+  The block-level steps (running means, flag decisions, normalisation, the
+  gap retention of the zap) run on the host for both backends
+  (`lib/io/preprocess_robust.cpp`). Selections are exact, and the
+  interpolation uses the same IEEE double operations, so without a zap the
+  output is bit-identical to the CPU's on the reference build. With a zap
+  it is not: cuFFT and pocketfft round differently, so the spectra, the
+  local mean power and the output differ at float level, and a bin within
+  about 1e-6 of the threshold can flip. The noise fill draws the same
+  numbers for the same seed and bin on both backends. Measured on
+  synthetic series (2^20 samples, lines, gaps, every mode): the same
+  zapped bins and mask, output RMS difference 2-4e-6 of the noise, band
+  ratios within 1e-4. A CUDA run is deterministic on one GPU and toolkit.
+  The zap needs about 20 bytes per Fourier bin of device memory on top of
+  the series, plus the cuFFT work area: the whole preprocessing peaked at
+  3.2 GB at 2^27 samples (`docs/memory.md`). Without that room it fails with
+  an error; it never falls back to the CPU.
+  The z-score method has no GPU kernels; on a GPU `Exec` it runs on the
+  CPU with `Exec::nthreads`.
 
 1. **Geometry.**
    - The baseline window `W` is in seconds; see "Baseline window" below.

@@ -117,6 +117,88 @@ void flag_decisions(const BlockGrid& g,
                     double min_good,
                     std::span<std::uint8_t> bad);
 
+// --- Spectral zap: host helpers shared by the backends -------------------
+
+/// make_keyed_pcg32 purpose of the noise drawn into zapped bins.
+inline constexpr std::uint32_t kZapNoisePurpose = 1;
+/// Default removal passes of a hard zap on data with gaps.
+inline constexpr SizeType kZapGapPasses = 3;
+/// Gap fraction from which a hard zap makes its extra passes.
+inline constexpr double kZapMinGapFraction = 1e-4;
+/// Samples per chunk of the input hash that seeds the noise fill.
+inline constexpr SizeType kZapSeedChunk = SizeType{1} << 20U;
+
+/// Power threshold in Exp(1) units with upper-tail probability equal to the
+/// Gaussian upper tail at @p sigma.
+[[nodiscard]] double exp_power_threshold(double sigma);
+
+/// Inclusive range of spectral bins.
+struct BinRange {
+    SizeType lo{0};
+    SizeType hi{0};
+};
+
+/// The bin ranges (of @p nf, DC excluded, possibly overlapping) inside
+/// @p birdies over an observation of @p t_obs seconds; a birdie narrower
+/// than a bin covers the nearest bin. Empty ranges are left out.
+[[nodiscard]] std::vector<BinRange>
+birdie_ranges(std::span<const Birdie> birdies, double t_obs, SizeType nf);
+
+/// 1 for the bins of birdie_ranges(), 0 elsewhere (size @p nf).
+[[nodiscard]] std::vector<std::uint8_t>
+birdie_bins(std::span<const Birdie> birdies, double t_obs, SizeType nf);
+
+/// The noise seed of a series of @p n samples from the FNV-1a hashes of its
+/// kZapSeedChunk-sample chunks, in order.
+[[nodiscard]] std::uint64_t
+combine_chunk_hashes(SizeType n, std::span<const std::uint64_t> hashes);
+
+/// Geometry of the local mean power of @p nf bins with a running-median
+/// width of @p whiten_bins: blocks of `block` bins, `k` blocks per window.
+struct PowerGrid {
+    SizeType block{1};
+    SizeType k{1};
+};
+[[nodiscard]] PowerGrid power_grid(SizeType whiten_bins, SizeType nf);
+
+/// Samples per block of the valid-sample indicator that GapRetention
+/// transforms (the tail shorter than a block is left out).
+[[nodiscard]] inline SizeType gap_retention_block(SizeType n) noexcept {
+    return std::max<SizeType>(n >> 20U, 1);
+}
+
+/**
+ * In-window power that zeroing the gaps leaves of a fill that is white
+ * over a run of W flagged bins:
+ * sum_{|q| < W} |M(q)|^2 (1 - |q| / W) / n^2, with M the spectrum of the
+ * valid-sample indicator. (1 - f)^2 for gaps much shorter than 1 / W (f the
+ * gap fraction), 1 - f for much longer ones. M is taken from the indicator
+ * averaged over blocks of gap_retention_block(n) samples, which is exact
+ * enough at the low q that matter.
+ */
+class GapRetention {
+public:
+    /// @p fraction: the valid fraction of each whole block.
+    explicit GapRetention(std::span<const float> fraction);
+
+    /// Retention for a run of @p width bins.
+    [[nodiscard]] double operator()(SizeType width) const;
+
+private:
+    std::vector<double> m_s0; // prefix sums of |M(q)|^2 / n^2
+    std::vector<double> m_s1; // prefix sums of q |M(q)|^2 / n^2
+    double m_dc{0.0};
+    double m_total{0.0};
+};
+
+/// NormalSampler's inverse-CDF table, for a device noise fill
+/// (math::normal_from_lut).
+[[nodiscard]] std::span<const float> zap_noise_lut();
+
+/// Edges of the zap self-check bands, Hz: 0, 10, 20, 50, 100, ... up to
+/// the Nyquist frequency @p f_nyq.
+[[nodiscard]] std::vector<double> zap_band_edges(double f_nyq);
+
 /**
  * @brief The per-sample passes of the robust method on one backend.
  *
