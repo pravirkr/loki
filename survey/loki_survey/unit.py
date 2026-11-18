@@ -243,12 +243,29 @@ def candidate_leaves(src: h5py.File) -> np.ndarray | None:
         return None
     paths = src["search/sources/run_path"].asstr()[:]
     regions = src["candidates/source_region"][:]
-    rows = src["candidates/source_index"][:]
+    spool_rows = src["candidates/source_index"][:]
     nparams = len(src.attrs["param_names"])
-    leaves = np.zeros((len(rows), nparams + 2, 2), dtype=np.float64)
-    for i, (region, row) in enumerate(zip(regions, rows, strict=True)):
-        leaves[i] = src[paths[int(region)]]["param_sets"][int(row)]
+    leaves = np.zeros((len(spool_rows), nparams + 2, 2), dtype=np.float64)
+    for i, (region, spool_row) in enumerate(zip(regions, spool_rows, strict=True)):
+        run = src[paths[int(region)]]
+        leaves[i] = run["param_sets"][run_row(run, int(spool_row))]
     return leaves
+
+
+def run_row(run: h5py.Group, spool_row: int) -> int:
+    """Return the row of an EP run group that holds this spool row's leaf.
+
+    A candidate's ``source_index`` is its leaf's row in loki's search spool. A
+    run group loki reduced (``max_per_cell`` > 0) keeps only its retained
+    leaves, and ``leaf_index`` gives each kept row's spool row.
+    """
+    if "leaf_index" not in run:
+        return spool_row
+    rows = np.nonzero(run["leaf_index"][:] == spool_row)[0]
+    if rows.size != 1:
+        msg = f"spool row {spool_row} is not kept once in {run.name}"
+        raise KeyError(msg)
+    return int(rows[0])
 
 
 def compact(result: Path, out: Path, provenance: dict[str, Any]) -> dict[str, int]:

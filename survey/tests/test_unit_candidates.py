@@ -7,6 +7,7 @@ import shutil
 from typing import TYPE_CHECKING
 
 import h5py
+import numpy as np
 import pytest
 
 from loki_survey import unit as unit_module
@@ -61,6 +62,13 @@ def test_cell_cap_keeps_the_strongest_trial_of_each_cell(
         with h5py.File(output, "r") as handle:
             assert handle.attrs["n_cell_dropped"] > 0
             assert handle["processing"].attrs["max_per_cell"] == 1
+    # loki keeps only the retained leaves of a capped run: each candidate's
+    # leaf must still be its own.
+    with h5py.File(run / "out" / f"{EP_UNIT}.h5", "r") as handle:
+        params = handle["candidates/param_sets"][:]
+        leaves = handle["survey/leaves"][:]
+    assert len(params) > 0
+    np.testing.assert_array_equal(leaves[:, : params.shape[1], 0], params)
 
 
 def test_a_failed_candidate_step_runs_again_from_loki_spool(
