@@ -82,20 +82,6 @@ template <typename F> auto call_psrio(F&& fn) -> decltype(fn()) {
     }
 }
 
-[[nodiscard]] psrio::TimeSeries load_file(const std::filesystem::path& path) {
-    switch (kind_from_path(path)) {
-    case FileKind::kTim:
-        return call_psrio([&] { return psrio::TimeSeries::from_tim(path); });
-    case FileKind::kDat: {
-        auto inf = path;
-        inf.replace_extension(".inf");
-        return call_psrio(
-            [&] { return psrio::TimeSeries::from_dat(path, inf); });
-    }
-    }
-    throw error_check::DetailedException("unhandled timeseries path");
-}
-
 [[nodiscard]] psrio::TimeSeriesReader
 open_reader(const std::filesystem::path& path) {
     switch (kind_from_path(path)) {
@@ -252,9 +238,18 @@ double TimeSeries::get_tobs() const noexcept {
 
 TimeSeries TimeSeries::read(const std::filesystem::path& path,
                             const ReadOptions& options) {
-    const psrio::TimeSeries raw = load_file(path);
-    psrio::Header header        = raw.header();
-    std::vector<float> samples(raw.data().begin(), raw.data().end());
+    // Read straight into the series' own buffer: a psrio::TimeSeries would
+    // hold a second copy of the samples while they are copied out. The
+    // reader maps the file, and the pages it touched count as resident until
+    // it closes, so it closes before the variance is allocated.
+    psrio::Header header;
+    std::vector<float> samples;
+    {
+        psrio::TimeSeriesReader reader = open_reader(path);
+        header                         = reader.header();
+        samples.resize(header.nsamples);
+        call_psrio([&] { return reader.read_data(std::span<float>(samples)); });
+    }
     std::vector<float> variance(samples.size(), 1.0F);
     if (options.preprocess) {
         io::preprocess(samples, header.tsamp, samples, variance,
