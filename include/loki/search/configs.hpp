@@ -89,6 +89,11 @@ struct FFATomlConfig {
     /// `max(filter_window, min_window_periods / f_min)`.
     [[nodiscard]] io::PreprocessOptions to_preprocess_options() const;
 
+    /// `candidates` with the zapped windows the preprocessing applies (the
+    /// birdies of a robust preprocessing, freq -+ width / 2) in
+    /// `zap_windows`, so the tables flag rows in them.
+    [[nodiscard]] CandidateOptions candidate_options() const;
+
     /// @brief Convert parsed TOML parameters into an FFASearchConfig.
     [[nodiscard]] FFASearchConfig
     to_search_config(std::optional<SizeType> override_nsamps = std::nullopt,

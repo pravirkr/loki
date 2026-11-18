@@ -506,6 +506,20 @@ Removal affects the folding list, while `/clusters` retains flagged rows.
 The optional count limit is applied last, in decreasing S/N order. Neither
 mechanism alters `/detections`.
 
+### Rows in zapped windows (`in_zap_window`)
+
+Every table row carries `in_zap_window`: 1 when its `f0` times a ratio `p/q`,
+with `p` and `q` from 1 to 4 (1/4, 1/3, 1/2, 2/3, 3/4, 1, 4/3, 3/2, 2, 3, 4),
+lies inside a frequency window the preprocessing zapped. A search fills the
+windows from the `[preprocessing]` birdies (`freq -+ width / 2`) when it runs
+the robust preprocessing; the data-driven periodic zap is not included. The
+flag removes nothing: noise in and near a zapped window can still fold to a
+near-threshold peak, and sifting can down-weight such rows. The windows are
+`/processing/zap_windows` (`(n, 2)`, Hz) with `zap_window_ratio_max`.
+Library callers set `CandidateOptions::zap_windows` themselves
+(`FFATomlConfig::candidate_options()` derives them from a configuration); a
+`loki publish` of a kept spool derives them from the stored configuration.
+
 ### Keeping the strongest trials per frequency cell
 
 A search can leave millions of trials above `snr_min`, most of them responses
@@ -615,7 +629,7 @@ width (a grid resolution, not a statistical uncertainty).
 derivative in Hz, Hz/s and Hz/s². Other columns include `snr`, `width`, `nbins`,
 `duty_cycle`, `member_count`, `phase_extent`, `parent_cluster_id`, `harmonic_numerator`,
 `harmonic_denominator`, `selected`, `outside_prior`, `leaf_basis` and `p_orb` (both
-0 outside circular-orbit searches). Nonapplicable relationship fields are
+0 outside circular-orbit searches) and `in_zap_window`. Nonapplicable relationship fields are
 zero/-1. On raw detection rows, only `cluster_id` encodes membership; `phase_extent` is zero and cluster
 counts, relationships and selection must be read from `/clusters`.
 

@@ -624,7 +624,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         observation.barycentric = toml_cfg.observation.barycentric;
     }
     const auto plan_start = SteadyClock::now();
-    loki::pipelines::FFAFreqSweep sweep(ffa_cfg, toml_cfg.candidates,
+    loki::pipelines::FFAFreqSweep sweep(ffa_cfg, toml_cfg.candidate_options(),
                                         /*show_progress=*/true, exec);
     const double plan_s     = seconds_since(plan_start);
     const auto search_start = SteadyClock::now();
@@ -1264,15 +1264,16 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
     const bool common_candidates =
         toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor";
     const auto rfi_config = toml_cfg.prune_rfi_config();
-    auto sweep            = common_candidates
-                                ? loki::pipelines::EPFreqSweep(
-                                      ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
-                                      toml_cfg.poly_basis, toml_cfg.ref_ducy, rfi_config,
-                                      cache, toml_cfg.n_runs, toml_cfg.ref_segs, exec)
-                                : loki::pipelines::EPFreqSweep(
-                                      ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
-                                      toml_cfg.ref_ducy, rfi_config, cache,
-                                      toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+    auto sweep =
+        common_candidates
+            ? loki::pipelines::EPFreqSweep(
+                  ep_cfg, toml_cfg.candidate_options(), true, toml_cfg.min_pd,
+                  toml_cfg.poly_basis, toml_cfg.ref_ducy, rfi_config, cache,
+                  toml_cfg.n_runs, toml_cfg.ref_segs, exec)
+            : loki::pipelines::EPFreqSweep(
+                  ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
+                  toml_cfg.ref_ducy, rfi_config, cache, toml_cfg.n_runs,
+                  toml_cfg.ref_segs, exec);
     if (toml_cfg.candidates.enabled && !common_candidates) {
         SPDLOG_WARN("Common EP candidates currently support polynomial Taylor "
                     "only; writing run diagnostics");
@@ -2356,7 +2357,7 @@ int publish_as(const PublishCli& cli, const PublishSource& src) {
                     cli.file.string());
     }
 
-    auto options                  = cfg.candidates;
+    auto options                  = cfg.candidate_options();
     options.enabled               = true;
     std::optional<double> snr_min = cli.snr_min;
     if (src.reduced && !cli.max_per_cell) {

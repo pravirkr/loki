@@ -1,3 +1,5 @@
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -37,8 +39,10 @@ std::pair<int, std::string> run_cli(const std::string& args,
 }
 
 /// Writes a simulated pulse series and a search configuration that reads it.
-std::filesystem::path write_case(const loki::test::TempDir& dir,
-                                 const std::string& algorithm) {
+std::filesystem::path
+write_case(const loki::test::TempDir& dir,
+           const std::string& algorithm,
+           const std::string& preprocessing = "preprocess = false\n") {
     const bool ep           = algorithm == "ep";
     const double freq       = ep ? 141.0 : 100.0;
     const double dt         = ep ? 6.4e-5 : 1e-4;
@@ -52,7 +56,7 @@ std::filesystem::path write_case(const loki::test::TempDir& dir,
     const auto config = dir / (algorithm + ".toml");
     std::ofstream out(config);
     out << fmt::format("[input]\ntimeseries = \"{}\"\n", series.string());
-    out << "[preprocessing]\npreprocess = false\n";
+    out << "[preprocessing]\n" << preprocessing;
     if (ep) {
         out << "[search]\nf_min = 140.0\nf_max = 142.0\nacc_min = -10.0\n"
                "acc_max = 10.0\nnbins = 32\n"
@@ -70,6 +74,8 @@ std::filesystem::path write_case(const loki::test::TempDir& dir,
 struct Product {
     std::vector<float> snr;
     std::vector<std::vector<double>> params;
+    std::vector<double> f0;
+    std::vector<std::uint8_t> in_zap_window;
     std::uint64_t n_candidates{};
     std::uint64_t n_detections{};
     std::string input_path;
@@ -82,6 +88,10 @@ Product read_product(const std::filesystem::path& path) {
     Product p;
     file.getDataSet("snr").read(p.snr);
     file.getDataSet("param_sets").read(p.params);
+    if (file.exist("candidates")) {
+        file.getDataSet("candidates/f0").read(p.f0);
+        file.getDataSet("candidates/in_zap_window").read(p.in_zap_window);
+    }
     file.getAttribute("n_candidates").read(p.n_candidates);
     file.getAttribute("n_detections").read(p.n_detections);
     const auto observation = file.getGroup("observation");
@@ -103,6 +113,7 @@ void check_candidates(const Product& published, const Product& searched) {
     CHECK(published.n_detections == searched.n_detections);
     CHECK(published.snr == searched.snr);
     CHECK(published.params == searched.params);
+    CHECK(published.in_zap_window == searched.in_zap_window);
 }
 
 void check_same(const Product& published, const Product& searched) {
@@ -338,4 +349,49 @@ TEST_CASE("publish CLI publishes a kept spool as the search would", "[cli]") {
         CHECK(stats.hasAttribute("timing_total_s"));
         CHECK(stats.hasAttribute("timing_publish_s"));
     }
+}
+
+TEST_CASE("search and publish flag candidates at the birdies", "[cli]") {
+    if (std::string(LOKI_APP_PATH).empty()) {
+        SKIP("loki_app was not built (LOKI_APP_PATH undefined)");
+    }
+    const loki::test::TempDir dir("loki-cli-zap-window");
+    const auto log = dir / "zap.log";
+    // The pulsar is at 100 Hz; a birdie at its second harmonic flags it.
+    const auto config = write_case(dir, "ffa", "birdies = [[200.0, 0.4]]\n");
+    const auto [ok, ok_log] =
+        run_cli(fmt::format(R"(search ffa -c "{}" -o "{}" -p run)",
+                            config.string(), (dir / "ok").string()),
+                log);
+    INFO(ok_log);
+    REQUIRE(ok == 0);
+    const auto searched = read_product(dir / "ok" / "run_ffa_results.h5");
+    REQUIRE(searched.f0.size() == searched.in_zap_window.size());
+    std::size_t flagged = 0;
+    for (std::size_t i = 0; i < searched.f0.size(); ++i) {
+        INFO("f0 = " << searched.f0[i]);
+        const bool in = std::abs((2 * searched.f0[i]) - 200.0) <= 0.2;
+        CHECK(searched.in_zap_window[i] == (in ? 1 : 0));
+        flagged += searched.in_zap_window[i];
+    }
+    CHECK(flagged > 0);
+
+    // A publish of the kept spool flags the same rows.
+    const auto bad_tempdir = dir / "not_a_dir" / "x";
+    std::ofstream(dir / "not_a_dir") << "x";
+    const auto [failed, failed_log] = run_cli(
+        fmt::format(
+            R"(search ffa -c "{}" -o "{}" -p run --candidate-tempdir "{}")",
+            config.string(), (dir / "kept").string(), bad_tempdir.string()),
+        log);
+    REQUIRE(failed != 0);
+    const auto spool = dir / "kept" / "run_ffa_spool.h5";
+    const auto [status, text] =
+        run_cli(fmt::format(R"(publish "{}" --candidate-tempdir "{}")",
+                            spool.string(), dir.path().string()),
+                log);
+    INFO(text);
+    REQUIRE(status == 0);
+    check_candidates(read_product(dir / "kept" / "run_ffa_results.h5"),
+                     searched);
 }

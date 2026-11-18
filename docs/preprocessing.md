@@ -195,7 +195,9 @@ robust|zscore`, `--filter-window`, `--fast-median/--no-fast-median` and
 - **Periodic zap.**
   - Leave `zap_periodic` off when searching for bright pulsars. Their
     harmonics are strong, narrow lines and can exceed `zap_sigma`.
-  - Prefer `birdies` for known mains and instrumental lines.
+  - Prefer `birdies` for known mains and instrumental lines. Candidates at
+    `p/q` (p, q <= 4) of a birdie window are flagged `in_zap_window`
+    (`docs/candidates.md`).
   - Keep `zap_mode = "noise"`. With `"phase_kept"`, a pulsar-like RFI line
     in a birdie window can still be folded to a detection.
 - **Masking scales.**

@@ -340,3 +340,28 @@ TEST_CASE("write_run_provenance writes and replaces root attributes",
     REQUIRE_THROWS_AS(loki::search::write_run_provenance(path, {}),
                       std::runtime_error);
 }
+
+TEST_CASE("candidate_options carries the birdies a robust preprocessing zaps",
+          "[config]") {
+    loki::search::FFATomlConfig cfg;
+    cfg.preprocessing.birdies = {{.freq = 50.0, .width = 0.4},
+                                 {.freq = 0.1, .width = 1.0}};
+    auto opts                 = cfg.candidate_options();
+    REQUIRE(opts.zap_windows.size() == 2);
+    CHECK(opts.zap_windows[0].lo == 49.8);
+    CHECK(opts.zap_windows[0].hi == 50.2);
+    CHECK(opts.zap_windows[1].lo == 0.0); // clamped at zero
+    CHECK_NOTHROW(opts.validate());
+    // The candidate settings themselves are kept.
+    cfg.candidates.flag_harmonics = true;
+    CHECK(cfg.candidate_options().flag_harmonics);
+    // Nothing is zapped without the robust preprocessing.
+    cfg.preprocessing.method = loki::io::PreprocessMethod::kZScore;
+    CHECK(cfg.candidate_options().zap_windows.empty());
+    cfg.preprocessing.method = loki::io::PreprocessMethod::kRobust;
+    cfg.preprocess           = false;
+    CHECK(cfg.candidate_options().zap_windows.empty());
+    // Not a configuration key: the TOML text is unchanged.
+    cfg.preprocess = true;
+    CHECK(cfg.to_toml_string().find("zap_windows") == std::string::npos);
+}

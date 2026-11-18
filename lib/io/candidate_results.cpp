@@ -32,6 +32,7 @@
 #include "lib/io/h5_layout.hpp"
 #include "lib/search/candidate_processing.hpp"
 #include "lib/search/harvested.hpp"
+#include "lib/search/zap_windows.hpp"
 
 namespace loki::io::detail {
 namespace {
@@ -684,13 +685,35 @@ private:
     std::vector<std::filesystem::path> m_levels;
 };
 
+/// The zapped frequency windows (CandidateOptions::zap_windows) as a (n, 2)
+/// dataset of [lo, hi] in Hz, with the ratio bound of `in_zap_window`.
+void write_zap_windows(HighFive::Group& group,
+                       std::span<const search::FrequencyWindow> windows) {
+    std::vector<double> flat;
+    flat.reserve(2 * windows.size());
+    for (const auto& w : windows) {
+        flat.push_back(w.lo);
+        flat.push_back(w.hi);
+    }
+    auto ds = group.createDataSet<double>(
+        "zap_windows", HighFive::DataSpace({windows.size(), 2}));
+    if (!flat.empty()) {
+        ds.write_raw(flat.data());
+    }
+    ds.createAttribute("units", std::string("Hz"));
+    group.createAttribute("zap_window_ratio_max",
+                          search::CandidateOptions::kZapWindowRatioMax);
+}
+
 class TableWriter {
 public:
     TableWriter(HighFive::Group group,
                 std::size_t nparams,
-                std::size_t batch_size)
+                std::size_t batch_size,
+                const search::detail::ZapWindowIndex& zap_windows)
         : m_group(std::move(group)),
-          m_nparams(nparams) {
+          m_nparams(nparams),
+          m_zap_windows(&zap_windows) {
         m_batch.reserve(batch_size);
         m_ids.reserve(batch_size);
         m_limit = batch_size;
@@ -717,6 +740,7 @@ public:
         create<std::uint8_t>("leaf_basis");
         create<float>("p_orb");
         m_group.getDataSet("p_orb").createAttribute("units", std::string("s"));
+        create<std::uint8_t>("in_zap_window");
         HighFive::DataSetCreateProps props;
         props.add(HighFive::Chunking({batch_size, nparams}));
         props.add(HighFive::Shuffle());
@@ -800,6 +824,10 @@ public:
         });
         column<float>("p_orb",
                       [](const auto& c) { return c.representative.p_orb; });
+        column<std::uint8_t>("in_zap_window", [this](const auto& c) {
+            return m_zap_windows->flags(c.representative.derivatives[0]) ? 1
+                                                                         : 0;
+        });
         append_column("cluster_id", m_ids);
         std::vector<double> params;
         params.reserve(m_batch.size() * m_nparams);
@@ -855,6 +883,7 @@ private:
     }
     HighFive::Group m_group;
     std::size_t m_nparams;
+    const search::detail::ZapWindowIndex* m_zap_windows;
     std::size_t m_limit{};
     std::size_t m_rows{};
     std::vector<CandidateCluster> m_batch;
@@ -1136,6 +1165,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
                                    options.harmonic_doppler_tolerance);
             config.createAttribute("harmonic_doppler_min_snr",
                                    options.harmonic_doppler_min_snr);
+            write_zap_windows(config, options.zap_windows);
             config.createAttribute("max_per_cell", options.max_per_cell);
             config.createAttribute("cell_bins", options.cell_bins);
             config.createAttribute("cell_log_width", options.cell_log_width);
@@ -1210,11 +1240,14 @@ void publish_candidate_results(const std::filesystem::path& spool,
             auto detection_group = options.retain_detections
                                        ? result.createGroup("detections")
                                        : result.createGroup("_discarded");
-            TableWriter detections(detection_group, nparams, batch);
-            TableWriter clusters(result.createGroup("clusters"), nparams,
-                                 batch);
+            const search::detail::ZapWindowIndex zap_windows(
+                options.zap_windows);
+            TableWriter detections(detection_group, nparams, batch,
+                                   zap_windows);
+            TableWriter clusters(result.createGroup("clusters"), nparams, batch,
+                                 zap_windows);
             TableWriter candidates(result.createGroup("candidates"), nparams,
-                                   batch);
+                                   batch, zap_windows);
             const bool singleton_stream =
                 !options.cluster && !options.flag_harmonics;
             progress.phase(singleton_stream ? "writing detections"

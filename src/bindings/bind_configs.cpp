@@ -25,6 +25,13 @@ namespace py = pybind11;
 void bind_configs(py::module_& m) {
     auto m_configs = m.def_submodule("configs", "Configs submodule");
     PYBIND11_NUMPY_DTYPE(ParamLimit, min, max);
+    using FW = search::FrequencyWindow;
+    py::class_<FW>(m_configs, "FrequencyWindow")
+        .def(py::init(
+                 [](double lo, double hi) { return FW{.lo = lo, .hi = hi}; }),
+             py::arg("lo"), py::arg("hi"))
+        .def_readwrite("lo", &FW::lo)
+        .def_readwrite("hi", &FW::hi);
     using CO = search::CandidateOptions;
     py::class_<CO>(m_configs, "CandidateOptions")
         .def(py::init<>())
@@ -44,6 +51,7 @@ void bind_configs(py::module_& m) {
                        &CO::harmonic_doppler_tolerance)
         .def_readwrite("harmonic_doppler_min_snr",
                        &CO::harmonic_doppler_min_snr)
+        .def_readwrite("zap_windows", &CO::zap_windows)
         .def_readwrite("max_per_cell", &CO::max_per_cell)
         .def_readwrite("cell_bins", &CO::cell_bins)
         .def_readwrite("cell_log_width", &CO::cell_log_width)
@@ -327,6 +335,7 @@ void bind_configs(py::module_& m) {
         .def_readwrite("outdir", &FTC::outdir)
         .def_readwrite("prefix", &FTC::prefix)
         .def("to_preprocess_options", &FTC::to_preprocess_options)
+        .def("candidate_options", &FTC::candidate_options)
         .def("to_search_config", &FTC::to_search_config,
              py::arg("nsamps") = std::nullopt, py::arg("tsamp") = std::nullopt)
         .def("to_toml_string", &FTC::to_toml_string)

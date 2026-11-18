@@ -579,7 +579,8 @@ zap_whiten_bins = 1001
 zap_mode = "noise"
 # zap_seed = 12345
 
-# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
+# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...].
+# Candidates at a ratio p/q (p, q <= 4) of one are flagged in_zap_window.
 birdies = []
 
 [search]
@@ -761,6 +762,19 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
 
 FFATomlConfig FFATomlConfig::load(const std::filesystem::path& path) {
     return toml_utils::load_file(path, &FFATomlConfig::from_string);
+}
+
+CandidateOptions FFATomlConfig::candidate_options() const {
+    CandidateOptions out = candidates;
+    out.zap_windows.clear();
+    if (preprocess && preprocessing.method == io::PreprocessMethod::kRobust) {
+        for (const auto& b : preprocessing.birdies) {
+            out.zap_windows.push_back(
+                {.lo = std::max(0.0, b.freq - (0.5 * b.width)),
+                 .hi = b.freq + (0.5 * b.width)});
+        }
+    }
+    return out;
 }
 
 io::PreprocessOptions FFATomlConfig::to_preprocess_options() const {
@@ -2330,7 +2344,8 @@ zap_whiten_bins = 1001
 zap_mode = "noise"
 # zap_seed = 12345
 
-# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
+# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...].
+# Candidates at a ratio p/q (p, q <= 4) of one are flagged in_zap_window.
 birdies = []
 
 [search]

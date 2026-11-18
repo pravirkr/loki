@@ -736,3 +736,53 @@ TEST_CASE("CellCap halving at budget boundary does not double-halve full cell",
     REQUIRE(ids_a.size() == n_fit);
     REQUIRE(ids_a == ids_b);
 }
+
+TEST_CASE("Rows at a ratio p/q <= 4 of a zapped window are flagged",
+          "[candidates][hdf5]") {
+    const loki::test::TempDir dir("loki-candidate-zap-window");
+    const auto raw = dir / "raw.h5";
+    spool(raw, 40); // frequencies 10, 11, 12 and 13 Hz
+    loki::search::CandidateOptions options;
+    // 10 Hz at 2/1, 13 Hz at 1/2. 11 and 12 Hz are at no ratio p/q <= 4 of
+    // either window (12 * 5/3 = 20 needs p = 5).
+    options.zap_windows = {{.lo = 19.9, .hi = 20.1}, {.lo = 6.45, .hi = 6.55}};
+    const auto out      = dir / "flagged.h5";
+    loki::io::detail::write_candidate_results(raw, out, {}, options);
+    const HighFive::File file(out.string(), HighFive::File::ReadOnly);
+    for (const auto* table : {"detections", "clusters", "candidates"}) {
+        INFO(table);
+        const auto f0 = column<double>(file, std::string(table) + "/f0");
+        const auto flag =
+            column<std::uint8_t>(file, std::string(table) + "/in_zap_window");
+        REQUIRE(f0.size() == flag.size());
+        REQUIRE_FALSE(f0.empty());
+        for (std::size_t i = 0; i < f0.size(); ++i) {
+            const bool expected =
+                std::abs(f0[i] - 10) < 1e-9 || std::abs(f0[i] - 13) < 1e-9;
+            CHECK(flag[i] == (expected ? 1 : 0));
+        }
+    }
+    std::vector<std::vector<double>> windows;
+    file.getDataSet("processing/zap_windows").read(windows);
+    REQUIRE(windows.size() == 2);
+    CHECK(windows[0] == std::vector<double>{19.9, 20.1});
+    std::uint32_t ratio_max = 0;
+    file.getGroup("processing")
+        .getAttribute("zap_window_ratio_max")
+        .read(ratio_max);
+    CHECK(ratio_max == 4);
+
+    // No windows: the column is all zero and the window table empty.
+    const auto plain = dir / "plain.h5";
+    loki::io::detail::write_candidate_results(raw, plain, {}, {});
+    const HighFive::File none(plain.string(), HighFive::File::ReadOnly);
+    for (const auto v :
+         column<std::uint8_t>(none, "candidates/in_zap_window")) {
+        CHECK(v == 0);
+    }
+    CHECK(none.getDataSet("processing/zap_windows").getDimensions() ==
+          std::vector<std::size_t>{0, 2});
+
+    options.zap_windows = {{.lo = 2.0, .hi = 1.0}};
+    CHECK_THROWS_AS(options.validate(), std::invalid_argument);
+}

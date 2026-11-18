@@ -299,6 +299,13 @@ void CandidateOptions::validate() const {
         throw std::invalid_argument(
             "harmonic Doppler minimum S/N must be finite and non-negative");
     }
+    for (const auto& w : zap_windows) {
+        if (!utils::is_finite(w.lo) || !utils::is_finite(w.hi) || w.lo < 0 ||
+            w.hi < w.lo) {
+            throw std::invalid_argument(
+                "candidate zap windows must be finite with 0 <= lo <= hi");
+        }
+    }
     positive(harmonic_phase_distance,
              "harmonic phase distance must be positive");
     positive(harmonic_snr_distance, "harmonic S/N distance must be positive");
