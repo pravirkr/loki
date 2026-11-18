@@ -15,6 +15,10 @@ loki-survey run myrun           # check, prep, plan, submit; then collect,
 loki-survey status myrun
 ```
 
+The two `pip install` lines build loki, so they need loki's build tools:
+[docs/tutorial.md](docs/tutorial.md#install) sets them up with conda or a
+Python virtual environment.
+
 [docs/tutorial.md](docs/tutorial.md) walks through a run on simulated data,
 and [docs/outputs.md](docs/outputs.md) describes every file a run writes.
 `loki-survey new` writes templates of both configuration files with every
