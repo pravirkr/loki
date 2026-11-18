@@ -34,10 +34,11 @@ kernel_poly_taylor_seed(const SizeType* __restrict__ param_grid_count_init,
         return;
     }
 
-    const auto n_accel_init  = param_grid_count_init[n_params - 2];
-    const auto n_freq_init   = param_grid_count_init[n_params - 1];
-    const auto d_freq_cur    = dparams_init[n_params - 1];
-    const uint32_t accel_idx = ileaf / n_freq_init;
+    const auto n_accel_init = param_grid_count_init[n_params - 2];
+    const auto n_freq_init  = param_grid_count_init[n_params - 1];
+    const auto d_freq_cur   = dparams_init[n_params - 1];
+    // The FFA's coordinate order: jerk (slowest), acceleration, frequency
+    const uint32_t accel_idx = (ileaf / n_freq_init) % n_accel_init;
     const uint32_t freq_idx  = ileaf % n_freq_init;
 
     const double a_cur = utils::get_param_val_at_idx_device(
@@ -65,6 +66,18 @@ kernel_poly_taylor_seed(const SizeType* __restrict__ param_grid_count_init,
     seed_leaves[lo + ((n_params + 1) * kParamStride) + 0] = f_cur;
     // Store basis flag (0: Polynomial, 1: Physical)
     seed_leaves[lo + ((n_params + 1) * kParamStride) + 1] = 0;
+    // A multi-point jerk grid: the leaf takes its point's jerk (one point
+    // keeps zero, the centre of symmetric limits)
+    if (n_params > 2) {
+        const auto n_jerk_init = param_grid_count_init[n_params - 3];
+        if (n_jerk_init > 1) {
+            const uint32_t jerk_idx = ileaf / (n_accel_init * n_freq_init);
+            seed_leaves[lo + ((n_params - 3) * kParamStride)] =
+                utils::get_param_val_at_idx_device(
+                    param_limits[n_params - 3].min,
+                    param_limits[n_params - 3].max, n_jerk_init, jerk_idx);
+        }
+    }
 }
 
 __global__ void

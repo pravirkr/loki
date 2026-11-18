@@ -81,7 +81,11 @@ TEST_CASE("CUDA prune transform treats an empty mask as all valid",
                  std::pair<std::string, SizeType>{"chebyshev", 4});
     CAPTURE(basis, nparams);
 
-    const std::vector<SizeType> grid(nparams, 4U);
+    // Four points of acceleration and frequency, one above: the polynomial
+    // bases refuse an FFA jerk grid
+    std::vector<SizeType> grid(nparams, 1U);
+    grid[nparams - 1] = 4U;
+    grid[nparams - 2] = 4U;
     const std::vector<double> dparams(nparams, 0.1);
     const auto functs = loki::core::create_prune_dp_functs_cuda<float>(
         basis, grid, dparams, /*nseg_ffa=*/8, /*tseg_ffa=*/1.0,

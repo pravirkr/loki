@@ -380,6 +380,7 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
                                  cuda::std::pair<double, double> coord_add,
                                  cuda::std::pair<double, double> coord_cur,
                                  cuda::std::pair<double, double> coord_init,
+                                 uint32_t n_jerk_init,
                                  uint32_t n_accel_init,
                                  uint32_t n_freq_init,
                                  uint32_t nbins,
@@ -423,7 +424,8 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
     const double v_t_cur  = leaves_tree[lo + 8];
     const double f0       = leaves_tree[lo + 12];
 
-    double a_new, delta_v, delta_d;
+    // j_new: the jerk at the added segment, for the FFA's jerk planes
+    double a_new, delta_v, delta_d, j_new;
     const uint32_t mask_circular = get_circ_taylor_mask_device(
         c_t_cur, dc_t_cur, s_t_cur, ds_t_cur, j_t_cur, dj_t_cur, a_t_cur,
         da_t_cur, propagator_significance);
@@ -435,6 +437,8 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
         delta_d = (v_t_cur * dt) + (a_t_cur * half_dt2) +
                   (j_t_cur * sixth_dt3) + (s_t_cur * twenty_fourth_dt4) +
                   (c_t_cur * onehundred_twenty_dt5);
+        j_new =
+            j_t_cur + (s_t_cur * dt_add) + (c_t_cur * 0.5 * dt_add * dt_add);
     } else {
         const double omega_orb_sq =
             mask_circular == 1 ? -s_t_cur / a_t_cur : -c_t_cur / j_t_cur;
@@ -459,6 +463,7 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
         delta_v = (-j_t_add / omega_orb_sq) - (-j_t_init / omega_orb_sq);
         delta_d = (-a_t_add / omega_orb_sq) - (-a_t_init / omega_orb_sq) +
                   ((v_t_cur + (j_t_cur / omega_orb_sq)) * dt);
+        j_new   = j_t_add;
     }
     const double f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
     const double delay_rel = delta_d * utils::kInvCval;
@@ -467,7 +472,14 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
         a_new, param_limits[3].min, param_limits[3].max, n_accel_init);
     const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
         f_new, param_limits[4].min, param_limits[4].max, n_freq_init);
-    param_indices[tid] = (idx_a * n_freq_init) + idx_f;
+    uint32_t param_idx = (idx_a * n_freq_init) + idx_f;
+    if (n_jerk_init > 1) {
+        param_idx +=
+            utils::get_nearest_idx_analytical_device(
+                j_new, param_limits[2].min, param_limits[2].max, n_jerk_init) *
+            n_accel_init * n_freq_init;
+    }
+    param_indices[tid] = param_idx;
     phase_shift[tid]   = utils::get_phase_idx_device(dt, f0, nbins, delay_rel);
 }
 
@@ -478,6 +490,7 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
     const ParamLimit* __restrict__ param_limits,
     const cuda::std::pair<double, double>* __restrict__ coord_segments,
     cuda::std::pair<double, double> coord_cur,
+    uint32_t n_jerk_init,
     uint32_t n_accel_init,
     uint32_t n_freq_init,
     uint32_t nbins,
@@ -516,7 +529,8 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
     const double d_cur  = leaves_tree[lo + 10];
     const double f0     = leaves_tree[lo + 12];
 
-    double a_new, v_new, d_new;
+    // j_seg: the jerk at the segment, for the FFA's jerk planes
+    double a_new, v_new, d_new, j_seg;
     const uint32_t mask_circular =
         get_circ_taylor_mask_device(c_cur, dc_cur, s_cur, ds_cur, j_cur, dj_cur,
                                     a_cur, da_cur, propagator_significance);
@@ -527,6 +541,7 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
         d_new = d_cur + (v_cur * dt) + (a_cur * half_dt2) +
                 (j_cur * sixth_dt3) + (s_cur * twenty_fourth_dt4) +
                 (c_cur * onehundred_twenty_dt5);
+        j_seg = j_cur + (s_cur * dt) + (c_cur * 0.5 * dt * dt);
     } else {
         const double omega_orb_sq =
             mask_circular == 1 ? -s_cur / a_cur : -c_cur / j_cur;
@@ -544,6 +559,7 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
         const double d_circ_cur = -a_cur / omega_orb_sq;
         v_new                   = v_circ_new + (v_cur - v_circ_cur);
         d_new = d_circ_new + (d_cur - d_circ_cur) + ((v_cur - v_circ_cur) * dt);
+        j_seg = j_new;
     }
     const double f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
     const double delay_rel = d_new * utils::kInvCval;
@@ -552,9 +568,16 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
         a_new, param_limits[3].min, param_limits[3].max, n_accel_init);
     const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
         f_new, param_limits[4].min, param_limits[4].max, n_freq_init);
+    uint32_t param_idx = (idx_a * n_freq_init) + idx_f;
+    if (n_jerk_init > 1) {
+        param_idx +=
+            utils::get_nearest_idx_analytical_device(
+                j_seg, param_limits[2].min, param_limits[2].max, n_jerk_init) *
+            n_accel_init * n_freq_init;
+    }
 
     const uint32_t out_idx = (iseg * n_leaves) + tid;
-    param_indices[out_idx] = (idx_a * n_freq_init) + idx_f;
+    param_indices[out_idx] = param_idx;
     phase_shift[out_idx] =
         utils::get_phase_idx_device(dt, f0, nbins, delay_rel);
 }
@@ -892,6 +915,7 @@ void circ_taylor_resolve_batch_cuda(
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
+    SizeType n_jerk_init,
     SizeType n_accel_init,
     SizeType n_freq_init,
     SizeType nbins,
@@ -908,7 +932,7 @@ void circ_taylor_resolve_batch_cuda(
     kernel_circ_taylor_resolve_batch<<<grid_dim, block_dim, 0, stream>>>(
         leaves_branch.data(), validation_mask.data(), param_indices.data(),
         phase_shift.data(), param_limits.data(), coord_add, coord_cur,
-        coord_init, n_accel_init, n_freq_init, nbins, n_leaves,
+        coord_init, n_jerk_init, n_accel_init, n_freq_init, nbins, n_leaves,
         propagator_significance);
     cuda_utils::check_last_cuda_error(
         "Circular Taylor resolve kernel launch failed");
@@ -922,6 +946,7 @@ void circ_taylor_ascend_resolve_batch_cuda(
     cuda::std::span<const ParamLimit> param_limits,
     cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
     std::pair<double, double> coord_cur,
+    SizeType n_jerk_init,
     SizeType n_accel_init,
     SizeType n_freq_init,
     SizeType nbins,
@@ -939,8 +964,9 @@ void circ_taylor_ascend_resolve_batch_cuda(
 
     kernel_circ_taylor_ascend_resolve_batch<<<grid_dim, block_dim, 0, stream>>>(
         leaves_tree.data(), param_indices.data(), phase_shift.data(),
-        param_limits.data(), coord_segments.data(), coord_cur, n_accel_init,
-        n_freq_init, nbins, n_leaves, n_segments, propagator_significance);
+        param_limits.data(), coord_segments.data(), coord_cur, n_jerk_init,
+        n_accel_init, n_freq_init, nbins, n_leaves, n_segments,
+        propagator_significance);
     cuda_utils::check_last_cuda_error(
         "Circular Taylor ascend resolve kernel launch failed");
     // No need to sync, the next kernel will do it

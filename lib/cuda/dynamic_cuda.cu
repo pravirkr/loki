@@ -64,6 +64,8 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
         "BasePruneDPFunctsCUDA: need at least the accel and freq grids");
     m_n_accel_init = param_grid_count_init[n_counts - 2];
     m_n_freq_init  = param_grid_count_init[n_counts - 1];
+    m_n_jerk_init =
+        (n_counts > 2) ? param_grid_count_init[n_counts - 3] : SizeType{1};
     m_param_grid_count_init_d.resize(param_grid_count_init.size());
     m_dparams_init_d.resize(dparams_init.size());
     m_param_limits_d.resize(param_limits.size());
@@ -348,6 +350,12 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA>::seed(
     cuda::std::span<float> seed_scores,
     std::pair<double, double> coord_init,
     cudaStream_t stream) {
+    // The FFA folds over jerk, acceleration and frequency only, and the seed
+    // kernel lays its leaves out in that order
+    error_check::check_equal(this->m_n_coords_init,
+                             this->m_n_jerk_init * this->m_n_accel_init *
+                                 this->m_n_freq_init,
+                             "n_leaves mismatch");
     poly_taylor_seed_cuda(cuda_utils::as_span(this->m_param_grid_count_init_d),
                           cuda_utils::as_span(this->m_dparams_init_d),
                           cuda_utils::as_span(this->m_param_limits_d),
@@ -383,6 +391,10 @@ void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA>::seed(
     std::pair<double, double> coord_init,
     cudaStream_t stream) {
     // First seed in Taylor basis
+    error_check::check_equal(this->m_n_coords_init,
+                             this->m_n_jerk_init * this->m_n_accel_init *
+                                 this->m_n_freq_init,
+                             "n_leaves mismatch");
     poly_taylor_seed_cuda(cuda_utils::as_span(this->m_param_grid_count_init_d),
                           cuda_utils::as_span(this->m_dparams_init_d),
                           cuda_utils::as_span(this->m_param_limits_d),
@@ -433,7 +445,11 @@ PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
            batch_size,
            branch_max,
            device_id,
-           stream) {}
+           stream) {
+    // Only the circular-orbit resolve looks up the FFA's jerk planes
+    error_check::check_equal(this->m_n_jerk_init, SizeType{1},
+                             "FFA jerk grid needs the circular basis");
+}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -599,7 +615,11 @@ PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::PrunePolyChebyshevDPFunctsCUDA(
            batch_size,
            branch_max,
            device_id,
-           stream) {}
+           stream) {
+    // Only the circular-orbit resolve looks up the FFA's jerk planes
+    error_check::check_equal(this->m_n_jerk_init, SizeType{1},
+                             "FFA jerk grid needs the circular basis");
+}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -820,8 +840,9 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::resolve(
     circ_taylor_resolve_batch_cuda(
         leaves_branch, validation_mask, param_indices, phase_shift,
         cuda_utils::as_span(this->m_param_limits_d), coord_add, coord_cur,
-        coord_init, n_accel_init, n_freq_init, this->m_cfg.get_nbins(),
-        n_leaves, this->m_cfg.get_propagator_significance(), stream);
+        coord_init, this->m_n_jerk_init, n_accel_init, n_freq_init,
+        this->m_cfg.get_nbins(), n_leaves,
+        this->m_cfg.get_propagator_significance(), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -863,8 +884,8 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
     circ_taylor_ascend_resolve_batch_cuda(
         leaves_tree, scratch_param_indices, scratch_phase_shift,
         cuda_utils::as_span(this->m_param_limits_d), coord_segments, coord_cur,
-        n_accel_init, n_freq_init, nbins, n_leaves, n_segments,
-        this->m_cfg.get_propagator_significance(), stream);
+        this->m_n_jerk_init, n_accel_init, n_freq_init, nbins, n_leaves,
+        n_segments, this->m_cfg.get_propagator_significance(), stream);
 
     // Copy scores to scores_ep for future backup
     cuda_utils::check_cuda_call(

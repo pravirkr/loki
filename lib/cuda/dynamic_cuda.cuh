@@ -212,8 +212,10 @@ protected:
     SizeType m_batch_size;
     SizeType m_branch_max;
     SizeType m_n_coords_init{};
-    // Host copies of the last two grid counts: reading the device vector
-    // element by element blocks on the stream.
+    // Host copies of the last three grid counts (the FFA folds over jerk,
+    // acceleration and frequency): reading the device vector element by
+    // element blocks on the stream.
+    SizeType m_n_jerk_init{1};
     SizeType m_n_accel_init{};
     SizeType m_n_freq_init{};
     thrust::device_vector<SizeType> m_param_grid_count_init_d;
