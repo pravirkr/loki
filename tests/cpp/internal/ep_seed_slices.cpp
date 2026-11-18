@@ -21,6 +21,7 @@
 
 #include "lib/pipelines/ep_sweep_common.hpp"
 #include "lib/search/cands.hpp"
+#include "lib/search/slice_scratch.hpp"
 
 namespace loki::test {
 
@@ -292,9 +293,23 @@ circular_rows(const search::PruneStatsCollection& stats) {
 } // namespace
 
 RunResults to_run_results(const pipelines::detail::EPResultPayload& payload) {
+    std::vector<double> leaves       = payload.leaves;
+    std::vector<float> scores        = payload.scores;
+    std::vector<float> scores_ep     = payload.scores_ep;
+    std::vector<std::uint32_t> width = payload.widths;
+    if (payload.scratch) {
+        // A run pruned in seed slices: its rows are on disk.
+        auto& scratch = *payload.scratch;
+        scratch.seal();
+        const auto n = scratch.rows();
+        leaves.resize(n * scratch.leaves_stride());
+        scores.resize(n);
+        scores_ep.resize(n);
+        width.resize(scratch.has_widths() ? n : 0);
+        scratch.read(0, n, leaves, scores, scores_ep, width);
+    }
     return {.name              = payload.run_name,
-            .leaves            = make_leaves(payload.leaves, payload.scores,
-                                             payload.scores_ep, payload.widths),
+            .leaves            = make_leaves(leaves, scores, scores_ep, width),
             .stats             = payload.stats.get_packed_data().first,
             .circular          = circular_rows(payload.stats),
             .n_harvested_total = payload.n_harvested_total,

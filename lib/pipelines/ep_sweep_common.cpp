@@ -22,6 +22,7 @@
 #include "lib/algorithms/ep_memory.hpp"
 #include "lib/io/h5_layout.hpp"
 #include "lib/search/harvested.hpp"
+#include "lib/search/slice_scratch.hpp"
 
 namespace loki::pipelines::detail {
 
@@ -260,15 +261,24 @@ void EPSweepWriter::run() {
             search::PruneResultWriter writer(
                 m_partial_file, search::PruneResultWriter::Mode::kAppend,
                 fmt::format("chunks/chunk_{:04d}", payload.chunk_id));
-            writer.write_run_results(
-                payload.run_name, payload.snail_scheme,
-                {std::span<double>(payload.leaves), {}},
-                {std::span<float>(payload.scores), {}},
-                {std::span<float>(payload.scores_ep), {}}, payload.gflops,
-                payload.scores.size(), payload.nparams, payload.stats,
-                payload.widths,
-                m_reductions.empty() ? nullptr
-                                     : &m_reductions[payload.chunk_id]);
+            const auto* reduction = m_reductions.empty()
+                                        ? nullptr
+                                        : &m_reductions[payload.chunk_id];
+            if (payload.scratch) {
+                search::detail::log_scratch_volume(*payload.scratch,
+                                                   payload.run_name);
+                writer.write_run_results(
+                    payload.run_name, payload.snail_scheme, *payload.scratch,
+                    payload.gflops, payload.nparams, payload.stats, reduction);
+            } else {
+                writer.write_run_results(
+                    payload.run_name, payload.snail_scheme,
+                    {std::span<double>(payload.leaves), {}},
+                    {std::span<float>(payload.scores), {}},
+                    {std::span<float>(payload.scores_ep), {}}, payload.gflops,
+                    payload.scores.size(), payload.nparams, payload.stats,
+                    payload.widths, reduction);
+            }
             std::visit(
                 [&]<typename H>(const H& harvest) {
                     if constexpr (!std::is_same_v<H, std::monostate>) {

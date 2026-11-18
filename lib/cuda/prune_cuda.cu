@@ -43,6 +43,7 @@
 #include "lib/search/cands.hpp"
 #include "lib/search/ep_support.hpp"
 #include "lib/search/prune_mask.hpp"
+#include "lib/search/slice_scratch.hpp"
 
 namespace loki::algorithms {
 
@@ -329,7 +330,14 @@ public:
         } else {
             // Prune the seeds slice by slice over the same FFA output and
             // report one merged result for the run.
+            // Each finished slice's final leaves go to a scratch beside the
+            // result file in batch-sized pieces, so the host never holds a
+            // slice.
             RunResults results;
+            results.scratch = std::make_unique<search::detail::SliceScratch>(
+                search::detail::slice_scratch_stem(actual_result_file,
+                                                   run_name),
+                world_tree.get_leaves_stride());
             SizeType prune_level = 0;
             for (SizeType s = 0; s < n_slices; ++s) {
                 initialize(ffa_fold, ref_seg, m_stream,
@@ -338,7 +346,7 @@ public:
                 prune_seeds(ffa_fold, ascend_levels);
                 peak_live = std::max(peak_live, world_tree.peak_live());
                 n_overloads += world_tree.overload_count();
-                collect_survivors(results);
+                collect_survivors_to(*results.scratch);
                 // Resolved leaves are not counted on the GPU.
                 results.stats.merge_slice(m_pstats, /*sum_resolved=*/false);
                 prune_level = std::max(prune_level, m_prune_level);
@@ -991,15 +999,121 @@ private:
                        scores_ep_cv.second);
     }
 
-    /// Final leaves of a run on the host: one seed slice after another.
+    /// Final leaves of a run: on the host (one prune), or on disk (seed
+    /// slices, one slice after another).
     struct RunResults {
         std::vector<double> leaves;
         std::vector<float> scores;
         std::vector<float> scores_ep;
         std::vector<std::uint32_t> widths;
+        std::unique_ptr<search::detail::SliceScratch> scratch;
         /// The merged level stats of the slices (unused with one slice).
         search::PruneStatsCollection stats;
     };
+
+    /// Appends the tree's final leaves to @p scratch, as collect_survivors()
+    /// does to host vectors, but through host buffers of m_batch_size rows:
+    /// the widths (Taylor basis), then the leaves transformed to the middle
+    /// of the data.
+    void collect_survivors_to(search::detail::SliceScratch& scratch) {
+        auto& ws          = get_workspace();
+        auto& world_tree  = ws.world_tree;
+        const auto stride = world_tree.get_leaves_stride();
+        std::vector<double> leaves_h(m_batch_size * stride);
+        std::vector<float> floats_h(m_batch_size);
+        std::vector<std::uint32_t> widths_h(m_batch_size);
+        const auto sync = [&] {
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(m_stream),
+                "cudaStreamSynchronize slice scratch failed");
+        };
+        if (m_poly_basis == "taylor") {
+            const auto folds   = world_tree.get_folds_circular_view();
+            auto& prune_ws     = ws.prune;
+            const auto collect = [&](auto region) {
+                const auto fstride = world_tree.get_folds_stride();
+                const auto count   = region.size() / fstride;
+                for (SizeType p = 0; p < count; p += m_batch_size) {
+                    const auto n = std::min(m_batch_size, count - p);
+                    auto widths =
+                        cuda_utils::as_span(prune_ws.branched_indices_d)
+                            .first(n);
+                    auto scores =
+                        cuda_utils::as_span(prune_ws.branched_scores_d)
+                            .first(n);
+                    m_prune_funcs->final_widths(
+                        region.subspan(p * fstride, n * fstride), widths,
+                        scores, m_stream);
+                    cuda_utils::check_cuda_call(
+                        cudaMemcpyAsync(widths_h.data(), widths.data(),
+                                        n * sizeof(std::uint32_t),
+                                        cudaMemcpyDeviceToHost, m_stream),
+                        "copy final EP widths failed");
+                    sync();
+                    scratch.append_widths(std::span(widths_h).first(n));
+                }
+            };
+            collect(folds.first);
+            collect(folds.second);
+        }
+
+        memory::CircularViewCUDA<double> leaves_view =
+            world_tree.get_leaves_circular_view();
+        const auto n1 = leaves_view.first.size() / stride;
+        const auto n2 = leaves_view.second.size() / stride;
+        if (n1 + n2 > 0) {
+            // Transform the suggestion params to middle of the data
+            const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
+            search::detail::check_report_epoch(m_cfg, coord_mid.first,
+                                               "EPMultiPass::report");
+            m_prune_funcs->report(leaves_view.first, coord_mid, n1, m_stream);
+            if (n2 > 0) {
+                m_prune_funcs->report(leaves_view.second, coord_mid, n2,
+                                      m_stream);
+            }
+        }
+        // Copies a device column to the scratch, m_batch_size rows at a
+        // time.
+        const auto copy_rows = [&](const auto* device, SizeType rows,
+                                   SizeType row_size, auto* host,
+                                   const auto& append) {
+            for (SizeType p = 0; p < rows; p += m_batch_size) {
+                const auto n = std::min(m_batch_size, rows - p);
+                cuda_utils::check_cuda_call(
+                    cudaMemcpyAsync(host, device + (p * row_size),
+                                    n * row_size * sizeof(*host),
+                                    cudaMemcpyDeviceToHost, m_stream),
+                    "copy final EP leaves to the slice scratch failed");
+                sync();
+                append(n);
+            }
+        };
+        const auto append_leaves = [&](SizeType n) {
+            scratch.append_leaves(std::span(leaves_h).first(n * stride));
+        };
+        copy_rows(leaves_view.first.data(), n1, stride, leaves_h.data(),
+                  append_leaves);
+        copy_rows(leaves_view.second.data(), n2, stride, leaves_h.data(),
+                  append_leaves);
+        const auto scores_view    = world_tree.get_scores_circular_view();
+        const auto scores_ep_view = world_tree.get_scores_ep_circular_view();
+        const auto append_scores  = [&](SizeType n) {
+            scratch.append_scores(std::span(floats_h).first(n));
+        };
+        const auto append_scores_ep = [&](SizeType n) {
+            scratch.append_scores_ep(std::span(floats_h).first(n));
+        };
+        copy_rows(scores_view.first.data(), n1, 1, floats_h.data(),
+                  append_scores);
+        copy_rows(scores_view.second.data(), n2, 1, floats_h.data(),
+                  append_scores);
+        copy_rows(scores_ep_view.first.data(), n1, 1, floats_h.data(),
+                  append_scores_ep);
+        copy_rows(scores_ep_view.second.data(), n2, 1, floats_h.data(),
+                  append_scores_ep);
+        // The tree may now be reseeded.
+        sync();
+    }
 
     /// Appends the tree's final leaves to @p out: their widths (Taylor
     /// basis), then the leaves transformed to the middle of the data.
@@ -1134,6 +1248,7 @@ private:
                 .scores            = std::move(scores_report_h),
                 .scores_ep         = std::move(scores_ep_report_h),
                 .widths            = std::move(widths_report_h),
+                .scratch           = std::move(results.scratch),
                 .gflops            = compute_total_prune_gflops(),
                 .nparams           = m_cfg.get_nparams(),
                 .stats             = m_pstats,
@@ -1149,6 +1264,15 @@ private:
         }
         error_check::check(m_rfi == nullptr,
                            "PruneCUDAImpl: RFI control needs the sweep writer");
+        if (results.scratch) {
+            search::detail::log_scratch_volume(*results.scratch, run_name);
+            auto result_writer = search::PruneResultWriter(
+                actual_result_file, search::PruneResultWriter::Mode::kAppend);
+            result_writer.write_run_results(
+                run_name, m_snail_scheme.get_data(), *results.scratch,
+                compute_total_prune_gflops(), m_cfg.get_nparams(), m_pstats);
+            return;
+        }
         // Both host vectors are now contiguous — wrap as single-span views
         memory::CircularView<double> leaves_report_view{
             std::span<double>(leaves_report_h), std::span<double>{}};

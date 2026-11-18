@@ -600,6 +600,35 @@ forecast leaf, as the forecasts run about 1.65 times the measured
 populations. It only ranks plans: at 2 GB it chose 1 chunk with 6 slices at
 batch 32768 over 2 chunks with up to 64 slices at 65536.
 
+**Final leaves on disk (slice scratch).** A run pruned in seed slices kept
+every finished slice's final leaves on the host until it wrote them. A bright
+line that is not zapped fills each slice's tree, so the host memory grew with
+the number of slices. Measured 2026-11-18, L40, a real 2^26-sample series
+with a sinusoid at 420 Hz added (amplitude 0.02, 0.05 and 0.2 of the noise
+RMS), circular Taylor search (crackle orbit, nbins 16, eta 1), 400-445 Hz,
+one run, one chunk of 10 seed slices, CUDA, 30 GB; outputs on local disk:
+
+| Series | Before: peak host RSS | After: peak host RSS | Final leaves | Scratch | Search after |
+|---|---|---|---|---|---|
+| noise | 0.77 GB | 0.77 GB | 6,425 | 0.8 MB | 33.6 s (33.8 before) |
+| line, 0.02 | 12.1 GB (search 83.5 s) | 0.77 GB | 50-78 M | 5.8-9 GB | 81.9-93.1 s |
+| line, 0.05 | killed above 14.4 GB | 0.77 GB | 110 M | 12.8 GB | 106 s |
+| line, 0.2 | killed above 15.1 GB | 0.77 GB | 312 M | 36.0 GB | 235 s |
+
+- The host memory no longer depends on the leaves; the disk takes them. Noise
+  runs write almost nothing and run as before.
+- The writes stall the pruning: the 36 GB took 70.9 s of the 235 s search
+  (buffered writes at about 0.5 GB/s on that disk, against 2.3 GB/s with direct
+  I/O), and reading them back for the per-run reduction made the
+  postprocessing 64-83 s.
+- Final-leaf counts of an overloaded CUDA run are not reproducible: two runs
+  of the same 0.02 series gave 50.5 M and 78.0 M final leaves (23 overload
+  trims each). The candidates above threshold matched (top S/N 82.63).
+- A 0.02 run failed with a full disk quota when its scratch went to a home
+  directory with a quota; the scratch was removed and the run stopped with an
+  error. Put the output directory on a disk with room for such runs, or zap,
+  mask or harvest the line.
+
 Whole searches, plan only (2^26 samples, CUDA, 32 runs):
 
 | Search | Before | After |

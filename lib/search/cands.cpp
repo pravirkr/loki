@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <ios>
 #include <mutex>
 #include <numeric>
@@ -38,6 +39,7 @@
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
 #include "lib/io/h5_layout.hpp"
+#include "lib/search/slice_scratch.hpp"
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
@@ -1090,6 +1092,180 @@ void PruneResultWriter::write_run_results(
         widths         = kept_widths;
         n_leaves       = n;
     }
+    const auto leaves_stride = (n_params + 2) * 2;
+    const auto n1            = leaves_view.first.size() / leaves_stride;
+    const auto n2            = leaves_view.second.size() / leaves_stride;
+    error_check::check_equal(n1 + n2, n_leaves,
+                             "write_run_results: circular view size mismatch");
+    if (!widths.empty() || n_leaves == 0) {
+        error_check::check_equal(widths.size(), n_leaves,
+                                 "write_run_results: width count mismatch");
+    }
+    const auto write_rows = [&](const RunDatasets& ds) {
+        const auto write_part = [&](std::span<const double> leaves,
+                                    std::span<const float> scores,
+                                    std::span<const float> scores_ep,
+                                    SizeType offset) {
+            const auto n = scores.size();
+            if (n == 0) {
+                return;
+            }
+            ds.param_sets
+                .select({offset, 0UL, 0UL}, {n, n_params + 2, SizeType{2}})
+                .write_raw(leaves.data(), HighFive::create_datatype<double>());
+            ds.scores.select({offset}, {n})
+                .write_raw(scores.data(), HighFive::create_datatype<float>());
+            ds.scores_ep.select({offset}, {n})
+                .write_raw(scores_ep.data(),
+                           HighFive::create_datatype<float>());
+        };
+        write_part(leaves_view.first, scores_view.first, scores_ep_view.first,
+                   0);
+        write_part(leaves_view.second, scores_view.second,
+                   scores_ep_view.second, n1);
+        if (ds.width && n_leaves > 0) {
+            ds.width->select({0UL}, {n_leaves})
+                .write_raw(widths.data(),
+                           HighFive::create_datatype<std::uint32_t>());
+        }
+    };
+    write_run_group(run_name, snail_scheme, total_pruning_gflops, n_leaves,
+                    n_params, pstats, !widths.empty() || n_leaves == 0,
+                    reduced ? &*reduced : nullptr, reduction, write_rows);
+}
+
+void PruneResultWriter::write_run_results(
+    std::string_view run_name,
+    std::span<const SizeType> snail_scheme,
+    detail::SliceScratch& scratch,
+    double total_pruning_gflops,
+    SizeType n_params,
+    const PruneStatsCollection& pstats,
+    const detail::LeafReductionSpec* reduction) {
+    const auto stride = (n_params + 2) * 2;
+    error_check::check_equal(scratch.leaves_stride(), stride,
+                             "write_run_results: scratch leaf stride");
+    scratch.seal();
+    const auto n_total    = scratch.rows();
+    const bool has_widths = scratch.has_widths();
+    // Rows are read in batches of this many: the host holds one batch of
+    // the scratch at a time.
+    constexpr SizeType kBatch = SizeType{1} << 16U;
+    std::vector<double> leaves(kBatch * stride);
+    std::vector<float> scores(kBatch);
+    std::vector<float> scores_ep(kBatch);
+    std::vector<std::uint32_t> widths(has_widths ? kBatch : 0);
+    // Calls fn(begin, n) after reading rows [begin, begin + n) into the
+    // batch buffers.
+    const auto for_each_batch = [&](const auto& fn) {
+        for (SizeType begin = 0; begin < n_total; begin += kBatch) {
+            const auto n = std::min(kBatch, n_total - begin);
+            scratch.read(begin, n, std::span(leaves).first(n * stride),
+                         std::span(scores).first(n),
+                         std::span(scores_ep).first(n),
+                         has_widths ? std::span(widths).first(n)
+                                    : std::span<std::uint32_t>{});
+            fn(begin, n);
+        }
+    };
+    if (reduction != nullptr) {
+        if (!has_widths && n_total > 0) {
+            throw std::invalid_argument(
+                "leaf reduction needs one width per leaf");
+        }
+        // Pass 1: the reduction, streamed. Pass 2: the retained rows, in
+        // ascending leaf order, as the in-memory path writes them.
+        detail::RunLeafReducer reducer(*reduction, n_params);
+        for_each_batch([&](SizeType begin, SizeType n) {
+            for (SizeType k = 0; k < n; ++k) {
+                reducer.add(
+                    begin + k,
+                    std::span<const double>(leaves).subspan(k * stride, stride),
+                    scores[k], widths[k]);
+            }
+        });
+        const auto reduced = reducer.finish(n_total);
+        const auto n_kept  = reduced.retained.size();
+        std::vector<double> kept_leaves;
+        std::vector<float> kept_scores;
+        std::vector<float> kept_scores_ep;
+        std::vector<std::uint32_t> kept_widths;
+        kept_leaves.reserve(n_kept * stride);
+        kept_scores.reserve(n_kept);
+        kept_scores_ep.reserve(n_kept);
+        kept_widths.reserve(n_kept);
+        auto next = reduced.retained.begin();
+        for_each_batch([&](SizeType begin, SizeType n) {
+            for (; next != reduced.retained.end() && *next < begin + n;
+                 ++next) {
+                const auto k = *next - begin;
+                kept_leaves.insert(
+                    kept_leaves.end(),
+                    leaves.begin() + static_cast<std::ptrdiff_t>(k * stride),
+                    leaves.begin() +
+                        static_cast<std::ptrdiff_t>((k + 1) * stride));
+                kept_scores.push_back(scores[k]);
+                kept_scores_ep.push_back(scores_ep[k]);
+                kept_widths.push_back(widths[k]);
+            }
+        });
+        const auto write_rows = [&](const RunDatasets& ds) {
+            if (n_kept == 0) {
+                return;
+            }
+            ds.param_sets
+                .select({0UL, 0UL, 0UL}, {n_kept, n_params + 2, SizeType{2}})
+                .write_raw(kept_leaves.data(),
+                           HighFive::create_datatype<double>());
+            ds.scores.select({0UL}, {n_kept})
+                .write_raw(kept_scores.data(),
+                           HighFive::create_datatype<float>());
+            ds.scores_ep.select({0UL}, {n_kept})
+                .write_raw(kept_scores_ep.data(),
+                           HighFive::create_datatype<float>());
+            ds.width->select({0UL}, {n_kept})
+                .write_raw(kept_widths.data(),
+                           HighFive::create_datatype<std::uint32_t>());
+        };
+        write_run_group(run_name, snail_scheme, total_pruning_gflops, n_kept,
+                        n_params, pstats, true, &reduced, reduction,
+                        write_rows);
+        return;
+    }
+    // Every row, copied batch by batch.
+    const auto write_rows = [&](const RunDatasets& ds) {
+        for_each_batch([&](SizeType begin, SizeType n) {
+            ds.param_sets
+                .select({begin, 0UL, 0UL}, {n, n_params + 2, SizeType{2}})
+                .write_raw(leaves.data(), HighFive::create_datatype<double>());
+            ds.scores.select({begin}, {n})
+                .write_raw(scores.data(), HighFive::create_datatype<float>());
+            ds.scores_ep.select({begin}, {n})
+                .write_raw(scores_ep.data(),
+                           HighFive::create_datatype<float>());
+            if (ds.width) {
+                ds.width->select({begin}, {n})
+                    .write_raw(widths.data(),
+                               HighFive::create_datatype<std::uint32_t>());
+            }
+        });
+    };
+    write_run_group(run_name, snail_scheme, total_pruning_gflops, n_total,
+                    n_params, pstats, has_widths || n_total == 0, nullptr,
+                    nullptr, write_rows);
+}
+
+void PruneResultWriter::write_run_group(
+    std::string_view run_name,
+    std::span<const SizeType> snail_scheme,
+    double total_pruning_gflops,
+    SizeType n_leaves,
+    SizeType n_params,
+    const PruneStatsCollection& pstats,
+    bool write_widths,
+    const detail::RunLeafReduction* reduced,
+    const detail::LeafReductionSpec* reduction,
+    const std::function<void(const RunDatasets&)>& write_rows) {
     const std::scoped_lock lock(m_hdf5_mutex);
 
     HighFive::File file        = open_file();
@@ -1105,7 +1281,6 @@ void PruneResultWriter::write_run_results(
     auto [level_stats, timer_stats] = pstats.get_packed_data();
 
     constexpr SizeType kParamStride             = 2U;
-    const auto leaves_stride                    = (n_params + 2) * kParamStride;
     const std::vector<SizeType> param_sets_dims = {
         n_leaves,
         n_params + 2,
@@ -1114,65 +1289,28 @@ void PruneResultWriter::write_run_results(
     const HighFive::DataSpace param_sets_space(param_sets_dims);
     // Uncompressed: deflate halves these float64 rows at best and cost
     // seconds of CPU per run, while the raw write takes a fraction of that.
-    const auto param_ds = run_group.createDataSet(
-        "param_sets", param_sets_space, HighFive::create_datatype<double>());
-    const auto n1 = leaves_view.first.size() / leaves_stride;
-    const auto n2 = leaves_view.second.size() / leaves_stride;
-    error_check::check_equal(n1 + n2, n_leaves,
-                             "write_run_results: circular view size mismatch");
-    if (n1 > 0) {
-        param_ds.select({0UL, 0UL, 0UL}, {n1, n_params + 2, kParamStride})
-            .write_raw(leaves_view.first.data(),
-                       HighFive::create_datatype<double>());
-    }
-    if (n2 > 0) {
-        param_ds.select({n1, 0UL, 0UL}, {n2, n_params + 2, kParamStride})
-            .write_raw(leaves_view.second.data(),
-                       HighFive::create_datatype<double>());
-    }
-
-    // --- scores dataset ---
-    const auto scores_ds =
-        run_group.createDataSet("scores", HighFive::DataSpace({n_leaves}),
-                                HighFive::create_datatype<float>());
-
-    const auto write_chunk_score = [&](std::span<const float> chunk,
-                                       size_t offset) {
-        if (!chunk.empty()) {
-            scores_ds.select({offset}, {chunk.size()})
-                .write_raw(chunk.data(), HighFive::create_datatype<float>());
-        }
+    RunDatasets ds{
+        .param_sets =
+            run_group.createDataSet("param_sets", param_sets_space,
+                                    HighFive::create_datatype<double>()),
+        .scores =
+            run_group.createDataSet("scores", HighFive::DataSpace({n_leaves}),
+                                    HighFive::create_datatype<float>()),
+        .scores_ep = run_group.createDataSet(
+            "scores_ep", HighFive::DataSpace({n_leaves}),
+            HighFive::create_datatype<float>()),
+        .width = std::nullopt,
     };
-
-    const auto scores_ep_ds =
-        run_group.createDataSet("scores_ep", HighFive::DataSpace({n_leaves}),
-                                HighFive::create_datatype<float>());
-
-    const auto write_chunk_scores_ep = [&](std::span<const float> chunk,
-                                           size_t offset) {
-        if (!chunk.empty()) {
-            scores_ep_ds.select({offset}, {chunk.size()})
-                .write_raw(chunk.data(), HighFive::create_datatype<float>());
-        }
-    };
-
-    SizeType offset_s = 0;
-    write_chunk_score(scores_view.first, offset_s);
-    offset_s += scores_view.first.size();
-    write_chunk_score(scores_view.second, offset_s);
-    offset_s = 0;
-    write_chunk_scores_ep(scores_ep_view.first, offset_s);
-    offset_s += scores_ep_view.first.size();
-    write_chunk_scores_ep(scores_ep_view.second, offset_s);
 
     run_group.createDataSet(
         "snail_scheme", snail_scheme,
         io::detail::small_table_props({snail_scheme.size()}));
-    if (!widths.empty() || n_leaves == 0) {
-        error_check::check_equal(widths.size(), n_leaves,
-                                 "write_run_results: width count mismatch");
-        run_group.createDataSet("width", widths);
+    if (write_widths) {
+        ds.width =
+            run_group.createDataSet("width", HighFive::DataSpace({n_leaves}),
+                                    HighFive::create_datatype<std::uint32_t>());
     }
+    write_rows(ds);
     if (!level_stats.empty()) {
         run_group.createDataSet(
             "level_stats", level_stats,
@@ -1187,7 +1325,7 @@ void PruneResultWriter::write_run_results(
     if (!timer_stats.empty()) {
         run_group.createDataSet("timer_stats", timer_stats);
     }
-    if (reduced) {
+    if (reduced != nullptr) {
         run_group.createDataSet("leaf_index", reduced->retained)
             .createAttribute("description",
                              std::string("leaf of each row among the run's "

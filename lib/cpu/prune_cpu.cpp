@@ -40,6 +40,7 @@
 #include "lib/search/cands.hpp"
 #include "lib/search/ep_support.hpp"
 #include "lib/search/prune_mask.hpp"
+#include "lib/search/slice_scratch.hpp"
 #include "lib/utils/workspace_impl.hpp"
 #include "lib/utils/world_tree.hpp"
 
@@ -172,8 +173,17 @@ public:
             report_survivors(actual_result_file, run_name);
         } else {
             // Prune the seeds slice by slice over the same FFA output and
-            // write one merged result for the run.
-            SliceResults merged;
+            // write one merged result for the run. Each finished slice's
+            // final leaves go to a scratch beside the result file, so the
+            // host never holds more than the tree.
+            SliceResults merged{
+                .scratch = std::make_unique<search::detail::SliceScratch>(
+                    search::detail::slice_scratch_stem(actual_result_file,
+                                                       run_name),
+                    get_workspace().world_tree.get_leaves_stride()),
+                .stats       = {},
+                .prune_level = 0,
+            };
             for (SizeType s = 0; s < n_slices; ++s) {
                 std::ofstream slice_log(actual_log_file, std::ios::app);
                 slice_log << fmt::format("Seed slice {} of {}\n", s + 1,
@@ -411,12 +421,10 @@ private:
         }
     }
 
-    /// The final leaves of a run pruned in seed slices, and its stats.
+    /// The final leaves of a run pruned in seed slices (on disk), and its
+    /// stats.
     struct SliceResults {
-        std::vector<double> leaves;
-        std::vector<float> scores;
-        std::vector<float> scores_ep;
-        std::vector<std::uint32_t> widths;
+        std::unique_ptr<search::detail::SliceScratch> scratch;
         search::PruneStatsCollection stats;
         /// Deepest level any slice reached.
         SizeType prune_level{0};
@@ -458,14 +466,17 @@ private:
     void collect_slice(SliceResults& merged) {
         const auto widths      = finalize_survivors();
         const auto& world_tree = get_workspace().world_tree;
-        const auto append      = [](auto& dst, const auto& view) {
-            dst.insert(dst.end(), view.first.begin(), view.first.end());
-            dst.insert(dst.end(), view.second.begin(), view.second.end());
-        };
-        append(merged.leaves, world_tree.get_leaves_circular_view());
-        append(merged.scores, world_tree.get_scores_circular_view());
-        append(merged.scores_ep, world_tree.get_scores_ep_circular_view());
-        merged.widths.insert(merged.widths.end(), widths.begin(), widths.end());
+        auto& scratch          = *merged.scratch;
+        const auto leaves      = world_tree.get_leaves_circular_view();
+        const auto scores      = world_tree.get_scores_circular_view();
+        const auto scores_ep   = world_tree.get_scores_ep_circular_view();
+        scratch.append_leaves(leaves.first);
+        scratch.append_leaves(leaves.second);
+        scratch.append_scores(scores.first);
+        scratch.append_scores(scores.second);
+        scratch.append_scores_ep(scores_ep.first);
+        scratch.append_scores_ep(scores_ep.second);
+        scratch.append_widths(widths);
         merged.stats.merge_slice(m_pstats);
         merged.prune_level = std::max(merged.prune_level, m_prune_level);
     }
@@ -480,13 +491,10 @@ private:
         const auto total_pruning_gflops = compute_total_prune_gflops();
         auto result_writer              = search::PruneResultWriter(
             actual_result_file, search::PruneResultWriter::Mode::kAppend);
+        search::detail::log_scratch_volume(*merged.scratch, run_name);
         result_writer.write_run_results(
-            run_name, m_snail_scheme.get_data(),
-            {std::span<double>(merged.leaves), {}},
-            {std::span<float>(merged.scores), {}},
-            {std::span<float>(merged.scores_ep), {}}, total_pruning_gflops,
-            merged.scores.size(), m_cfg.get_nparams(), m_pstats, merged.widths,
-            m_reduction);
+            run_name, m_snail_scheme.get_data(), *merged.scratch,
+            total_pruning_gflops, m_cfg.get_nparams(), m_pstats, m_reduction);
         if (m_rfi->has_harvest()) {
             result_writer.write_run_harvest(
                 run_name, m_harvest, m_cfg.get_nparams(), m_n_harvested_total);

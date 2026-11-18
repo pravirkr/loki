@@ -589,6 +589,59 @@ Candidate ep_leaf_candidate(std::span<const double> leaf,
     return c;
 }
 
+RunLeafReducer::RunLeafReducer(const LeafReductionSpec& spec,
+                               std::size_t nparams)
+    : m_spec(&spec),
+      m_nparams(nparams),
+      m_cap(spec.options, spec.tobs) {}
+
+void RunLeafReducer::add(std::size_t index,
+                         std::span<const double> leaf,
+                         float score,
+                         std::uint32_t width) {
+    if (index > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error(
+            "EP leaf index exceeds detection identity capacity");
+    }
+    if (m_added++ % 65536 == 0) {
+        loki::check_interrupt();
+    }
+    if (!utils::is_finite(score)) {
+        throw std::invalid_argument("non-finite final EP score");
+    }
+    if (score < m_spec->snr_min) {
+        return;
+    }
+    ++m_above;
+    m_cap.add(ep_leaf_candidate(leaf, m_nparams, score, width, m_spec->nbins, 0,
+                                static_cast<std::uint32_t>(index)));
+}
+
+RunLeafReduction RunLeafReducer::finish(std::size_t n_leaves) {
+    RunLeafReduction out;
+    out.final_leaves         = n_leaves;
+    out.above_snr_min        = m_above;
+    out.max_cell_dropped_snr = m_cap.max_dropped_snr();
+    out.cell_dropped         = m_cap.dropped();
+    out.max_per_cell_used    = m_cap.max_per_cell_used();
+    if (out.max_per_cell_used < m_spec->options.max_per_cell) {
+        spdlog::warn("EP run cells kept {} leaves each instead of {} to fit "
+                     "candidate memory_gb",
+                     out.max_per_cell_used, m_spec->options.max_per_cell);
+    }
+    auto kept = m_cap.take();
+    if (m_spec->options.dominance_kappa > 0) {
+        out.dominated =
+            DominanceReducer(m_spec->tobs, m_spec->options).reduce(kept);
+    }
+    out.retained.reserve(kept.size());
+    for (const auto& c : kept) {
+        out.retained.push_back(c.source_index);
+    }
+    std::ranges::sort(out.retained);
+    return out;
+}
+
 RunLeafReduction reduce_run_leaves(
     const LeafReductionSpec& spec,
     std::size_t n_leaves,
@@ -603,42 +656,11 @@ RunLeafReduction reduce_run_leaves(
         throw std::overflow_error(
             "EP leaf index exceeds detection identity capacity");
     }
-    CellCap cap(spec.options, spec.tobs);
-    RunLeafReduction out;
-    out.final_leaves = n_leaves;
+    RunLeafReducer reducer(spec, nparams);
     for (std::size_t i = 0; i < n_leaves; ++i) {
-        if (i % 65536 == 0) {
-            loki::check_interrupt();
-        }
-        const float s = score(i);
-        if (!utils::is_finite(s)) {
-            throw std::invalid_argument("non-finite final EP score");
-        }
-        if (s < spec.snr_min) {
-            continue;
-        }
-        ++out.above_snr_min;
-        cap.add(ep_leaf_candidate(leaf(i), nparams, s, widths[i], spec.nbins, 0,
-                                  static_cast<std::uint32_t>(i)));
+        reducer.add(i, leaf(i), score(i), widths[i]);
     }
-    out.max_cell_dropped_snr = cap.max_dropped_snr();
-    out.cell_dropped         = cap.dropped();
-    out.max_per_cell_used    = cap.max_per_cell_used();
-    if (out.max_per_cell_used < spec.options.max_per_cell) {
-        spdlog::warn("EP run cells kept {} leaves each instead of {} to fit "
-                     "candidate memory_gb",
-                     out.max_per_cell_used, spec.options.max_per_cell);
-    }
-    auto kept = cap.take();
-    if (spec.options.dominance_kappa > 0) {
-        out.dominated = DominanceReducer(spec.tobs, spec.options).reduce(kept);
-    }
-    out.retained.reserve(kept.size());
-    for (const auto& c : kept) {
-        out.retained.push_back(c.source_index);
-    }
-    std::ranges::sort(out.retained);
-    return out;
+    return reducer.finish(n_leaves);
 }
 
 std::vector<Candidate> CellCap::take() {

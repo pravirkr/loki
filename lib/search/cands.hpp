@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -22,6 +23,9 @@
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
+namespace detail {
+class SliceScratch;
+} // namespace detail
 
 struct FFATimerStatsPacked {
     float brutefold{};
@@ -440,7 +444,39 @@ public:
                       std::span<const std::uint32_t> widths      = {},
                       const detail::LeafReductionSpec* reduction = nullptr);
 
+    /// write_run_results() of a run whose final leaves are in @p scratch
+    /// (seed slices): the same datasets, read from disk in bounded batches.
+    void
+    write_run_results(std::string_view run_name,
+                      std::span<const SizeType> snail_scheme,
+                      detail::SliceScratch& scratch,
+                      double total_pruning_gflops,
+                      SizeType n_params,
+                      const PruneStatsCollection& pstats,
+                      const detail::LeafReductionSpec* reduction = nullptr);
+
 private:
+    /// The row datasets of a run, created before its rows are written.
+    struct RunDatasets {
+        HighFive::DataSet param_sets;
+        HighFive::DataSet scores;
+        HighFive::DataSet scores_ep;
+        std::optional<HighFive::DataSet> width;
+    };
+    /// Creates the run group with its datasets and attributes; @p write_rows
+    /// fills the row datasets.
+    void
+    write_run_group(std::string_view run_name,
+                    std::span<const SizeType> snail_scheme,
+                    double total_pruning_gflops,
+                    SizeType n_leaves,
+                    SizeType n_params,
+                    const PruneStatsCollection& pstats,
+                    bool write_widths,
+                    const detail::RunLeafReduction* reduced,
+                    const detail::LeafReductionSpec* reduction,
+                    const std::function<void(const RunDatasets&)>& write_rows);
+
     std::filesystem::path m_filepath;
     Mode m_mode;
     std::string m_group_path;

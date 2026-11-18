@@ -655,15 +655,22 @@ make the slices' forecasts as equal as possible (`seed_slice_edges`, stored in
 the plan cache). A chunk that needs slices may widen only while its own FFA
 buffers take at most a quarter of the limit: those buffers are shared by the
 whole sweep, and wider sliced chunks would hand them the room the slices
-free. On the CPU a run keeps its finished slices' final leaves (the
-leaf, two scores and a width, doubled for vector growth) until it writes them,
-`L_final` leaves per worker (`held_final_leaves`); the CUDA engine keeps them
-on the host, which the CUDA policy does not model. `L_final` is the noise
-forecast: a bright source or RFI that is not zapped, masked or harvested can
-fill every slice's tree, and a run then holds up to K times `max_sugg` final
-leaves on the host until it is written (per CPU worker; per run snapshot on
-CUDA). Where such a tree overflowed, the overload summary at the end of a
-search names the chunk. On CUDA
+free. A run's finished slices' final leaves go to a scratch on disk beside
+the run's result file (`lib/search/slice_scratch.hpp`: one raw file per
+column, in the sweep's temporary directory, removed on every exit), and the
+run is written from it in batches of 2^16 rows, with the same datasets, bit
+for bit, as when they stayed in memory. The per-run reduction streams over the
+scratch twice: once into the cell cap, once to gather the rows it keeps. So
+the host holds no slice: the CPU writes a slice straight from the tree, and
+the CUDA engine copies it to the scratch in pieces of one batch. A bright
+source or RFI that is not zapped, masked or harvested can still fill every
+slice's tree, up to K times `max_sugg` final leaves per run; they now cost
+disk instead of host memory, and a run that writes more than 1 GB of scratch
+says so. Where a tree overflowed, the overload summary at the end of a
+search names the chunk. The planner still counts `L_final` final leaves per
+worker (`held_final_leaves`, the noise forecast) on the CPU: a conservative
+term now, kept so that plans do not change. A run of one slice holds its
+tree's final leaves on the host while it is written, as before. On CUDA
 a sliced run also keeps a device list of its slice's seed indices (4 bytes per
 FFA coordinate), which the model counts only with RFI control
 (`ep_cuda_rfi_bytes`). Every slice repeats all
