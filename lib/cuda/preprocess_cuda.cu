@@ -1074,6 +1074,8 @@ public:
         kernel_mask_blocks<<<grid_for(m_n), 256, 0, m_stream>>>(
             ptr(m_mask), m_n, g.block, ptr(m_bad));
         cuda_utils::check_last_cuda_error("preprocess: mask_blocks");
+        // The caller's flags may die on return: finish the upload first.
+        sync("preprocess: mask_blocks sync failed");
     }
 
     SizeType zap(const BlockGrid& grid,
@@ -1401,6 +1403,8 @@ private:
         kernel_mean_interp<<<grid_blocks(nb), kThreads, 0, m_stream>>>(
             to_dev(fgrid), ptr(f.a), ptr(m_mean));
         cuda_utils::check_last_cuda_error("preprocess: mean_interp");
+        // fmean is freed at scope end: finish its upload first.
+        sync("preprocess: mean upload sync failed");
     }
 
     /// zap_spectrum() on the device, on m_z with the sample mask m_mask
@@ -1608,8 +1612,14 @@ private:
                                                     cudaMemcpyDeviceToHost,
                                                     m_stream),
                                     "preprocess: download failed");
-        cuda_utils::check_cuda_call(cudaStreamSynchronize(m_stream),
-                                    "preprocess: synchronize failed");
+        sync("preprocess: synchronize failed");
+    }
+
+    /// Waits for m_stream. The driver stages a pageable copy_up() source
+    /// before the call returns; syncing before the source dies does not
+    /// rely on that.
+    void sync(const char* what) const {
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(m_stream), what);
     }
 };
 

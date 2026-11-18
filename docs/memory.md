@@ -148,12 +148,13 @@ measured):
 - loading and preprocessing: the series and its variance, 8 bytes a sample
   (16 with the z-score preprocessing, which runs on the host);
 - searching: the final leaves of three runs (the one the engine fills, the
-  one the writer writes and one waiting), at most `slice_spill_rows()` each
+  one the writer writes and one waiting), at most `slice_spill_rows()` each,
+  doubled for the growth of the vectors that collect them
   (`EPCudaHostMemory`, `ep_cuda_host_memory`), then the candidate budget
   `candidates.memory_gb`, which starts once the writer has drained.
 
 A 2^26-sample circular search forecasts 0.65 GB loading (0.64 GB measured)
-and 0.51 GB searching without candidates (0.15 GB measured on noise). The
+and 0.88 GB searching without candidates (0.15 GB measured on noise). The
 forecast does not bound a run of one seed slice: it holds all of its tree's
 final leaves, up to the chunk's `max_sugg`, while it is written. Noise runs
 end with tens of them; a source that is not zapped, masked or harvested can
@@ -421,8 +422,11 @@ and uploaded again. The EP sweep counts uploaded inputs in its
 device-memory check; resident ones are already out of the free memory it
 reads. The planner reads the free memory after the series is resident, so
 when the free memory rather than the user limit sets the budget, the budget
-is 8 bytes per sample smaller (1.07 GB at 2^27). In production the user
-limit binds (30 GB against 43 GB usable on an L40), and plans are the same.
+is 8 bytes per sample smaller (1.07 GB at 2^27). A dry run plans before
+any series is resident, so in that case the plan cache it writes may need
+more than the search allows; the search then warns, replans and overwrites
+it. In production the user limit binds (30 GB against 43 GB usable on an
+L40), and plans are the same.
 Everything else preprocessing allocates is freed before the sweep is
 planned, so it is not part of the plan. The robust passes hold the series
 three times (`x`, `z` as floats and a byte mask: 9 bytes per sample) plus
@@ -679,7 +683,9 @@ the plan cache). A chunk that needs slices may widen only while its own FFA
 buffers take at most a quarter of the limit: those buffers are shared by the
 whole sweep, and wider sliced chunks would hand them the room the slices
 free. A run's finished slices' final leaves stay on the host up to
-`slice_spill_rows()` rows (2^20, about 0.1 GB for a circular search). Real
+`slice_spill_rows()` rows (2^20, about 0.1 GB for a circular search). On the
+CPU the workers share that cap, each holding up to `slice_spill_rows() /
+n_workers` rows: a bright line fills every concurrent run at once. Real
 searches end far below that: runs of a few tens of final leaves are typical
 and about 45,000 the most seen. A run whose slices would go past
 the cap moves all its rows to a scratch on disk beside the run's result file

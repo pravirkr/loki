@@ -233,6 +233,23 @@ TEST_CASE("An EP leaf gives its cell widths, basis and orbital period",
     const auto crackle = make(LeafBasis::kCircularCrackle);
     CHECK(crackle.leaf_basis == LeafBasis::kCircularCrackle);
     CHECK_THAT(crackle.p_orb, Catch::Matchers::WithinRel(period(4e-6), 1e-6F));
+    // A basis pair whose denominator is exactly zero falls back to the
+    // other pair: acceleration 0 (snap 0) uses crackle / jerk ...
+    const std::array<double, 2> accel = {leaf[6], leaf[2]};
+    leaf[6]                           = 0.0;
+    leaf[2]                           = 0.0;
+    CHECK_THAT(make(LeafBasis::kCircularSnap).p_orb,
+               Catch::Matchers::WithinRel(period(4e-6), 1e-6F));
+    leaf[6] = accel[0];
+    leaf[2] = accel[1];
+    // ... and jerk 0 (crackle 0) uses snap / acceleration.
+    const std::array<double, 2> jerk = {leaf[4], leaf[0]};
+    leaf[4]                          = 0.0;
+    leaf[0]                          = 0.0;
+    CHECK_THAT(make(LeafBasis::kCircularCrackle).p_orb,
+               Catch::Matchers::WithinRel(period(1e-6), 1e-6F));
+    leaf[4] = jerk[0];
+    leaf[0] = jerk[1];
     // Codes outside the documented set are rejected, never guessed.
     leaf.back() = 3.0;
     CHECK_THROWS_AS(

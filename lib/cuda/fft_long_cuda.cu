@@ -1,6 +1,7 @@
 #include "lib/cuda/fft_long_cuda.cuh"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -127,25 +128,37 @@ public:
             throw std::invalid_argument(
                 fmt::format("LongRealFFT: length must be >= 2 (got {})", n));
         }
+        // The handles, plans and work area all live on m_device; a setup
+        // that throws releases what it made before the guard ends.
         const cuda_utils::CudaSetDeviceGuard guard(m_device);
-        const SizeType w_r2c = m_r2c.make(n, CUFFT_R2C);
-        const SizeType w_c2r = m_c2r.make(n, CUFFT_C2R);
-        const SizeType work  = std::max(w_r2c, w_c2r);
-        if (work > 0) {
-            cuda_utils::check_cuda_call(cudaMalloc(&m_work, work),
-                                        "LongRealFFT: work area allocation");
+        try {
+            m_r2c.emplace();
+            m_c2r.emplace();
+            const SizeType w_r2c = m_r2c->make(n, CUFFT_R2C);
+            const SizeType w_c2r = m_c2r->make(n, CUFFT_C2R);
+            const SizeType work  = std::max(w_r2c, w_c2r);
+            if (work > 0) {
+                cuda_utils::check_cuda_call(
+                    cudaMalloc(&m_work, work),
+                    "LongRealFFT: work area allocation");
+            }
+            check_cufft(cufftSetWorkArea(m_r2c->get(), m_work),
+                        "cufftSetWorkArea");
+            check_cufft(cufftSetWorkArea(m_c2r->get(), m_work),
+                        "cufftSetWorkArea");
+            check_cufft(cufftSetStream(m_r2c->get(), m_stream),
+                        "cufftSetStream");
+            check_cufft(cufftSetStream(m_c2r->get(), m_stream),
+                        "cufftSetStream");
+        } catch (...) {
+            release();
+            throw;
         }
-        check_cufft(cufftSetWorkArea(m_r2c.get(), m_work), "cufftSetWorkArea");
-        check_cufft(cufftSetWorkArea(m_c2r.get(), m_work), "cufftSetWorkArea");
-        check_cufft(cufftSetStream(m_r2c.get(), m_stream), "cufftSetStream");
-        check_cufft(cufftSetStream(m_c2r.get(), m_stream), "cufftSetStream");
     }
 
     ~Impl() {
-        if (m_work != nullptr) {
-            const cuda_utils::CudaSetDeviceGuard guard(m_device);
-            cudaFree(m_work);
-        }
+        const cuda_utils::CudaSetDeviceGuard guard(m_device);
+        release();
     }
 
     Impl(const Impl&)            = delete;
@@ -158,7 +171,7 @@ public:
     void rfft(const float* x_d, ComplexTypeCUDA* spec_d) {
         const cuda_utils::CudaSetDeviceGuard guard(m_device);
         // Out of place, R2C leaves its input unchanged.
-        check_cufft(cufftExecR2C(m_r2c.get(),
+        check_cufft(cufftExecR2C(m_r2c->get(),
                                  const_cast<cufftReal*>( // NOLINT
                                      reinterpret_cast<const cufftReal*>(x_d)),
                                  reinterpret_cast<cufftComplex*>(spec_d)),
@@ -167,7 +180,7 @@ public:
 
     void irfft(ComplexTypeCUDA* spec_d, float* x_d) {
         const cuda_utils::CudaSetDeviceGuard guard(m_device);
-        check_cufft(cufftExecC2R(m_c2r.get(),
+        check_cufft(cufftExecC2R(m_c2r->get(),
                                  reinterpret_cast<cufftComplex*>(spec_d),
                                  reinterpret_cast<cufftReal*>(x_d)),
                     "cufftExecC2R");
@@ -185,11 +198,21 @@ public:
     }
 
 private:
+    /// Destroys the plans, then the work area they use (on m_device).
+    void release() noexcept {
+        m_c2r.reset();
+        m_r2c.reset();
+        if (m_work != nullptr) {
+            cudaFree(m_work);
+            m_work = nullptr;
+        }
+    }
+
     SizeType m_n;
     int m_device;
     cudaStream_t m_stream;
-    Plan m_r2c;
-    Plan m_c2r;
+    std::optional<Plan> m_r2c;
+    std::optional<Plan> m_c2r;
     void* m_work{nullptr};
 };
 

@@ -940,8 +940,8 @@ void print_ep_host_memory(
     const loki::algorithms::EPRegionPlanner<FoldType>& planner,
     const loki::search::EPTomlConfig& toml_cfg,
     const loki::search::PulsarSearchConfig& cfg) {
-    const auto forecast =
-        ep_cuda_host_forecast(toml_cfg, cfg.get_nsamps(), cfg.get_nparams());
+    const auto forecast = ep_cuda_host_forecast(
+        toml_cfg, cfg.get_nsamps_input(), cfg.get_nparams());
     const auto host = loki::algorithms::ep_cuda_host_memory(cfg.get_nparams());
     SizeType unsliced_max_sugg = 0;
     for (const auto& chunk : planner.get_chunk_cfgs()) {
@@ -1008,7 +1008,8 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
                        bool force_replan = false) {
     const auto cfg = ep_candidate_planning_config(toml_cfg, input_cfg, exec);
     // A dry run stops where the search would.
-    check_ep_host_memory(toml_cfg, exec, cfg.get_nsamps(), cfg.get_nparams());
+    check_ep_host_memory(toml_cfg, exec, cfg.get_nsamps_input(),
+                         cfg.get_nparams());
     // The same worker count the sweep uses, so the cache matches it. The GPU
     // sweep prunes its runs on one worker.
     const SizeType n_workers = loki::algorithms::ep_sweep_n_workers(
@@ -1348,7 +1349,9 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
                 std::min(*toml_cfg.n_runs, plan_base.get_nsegments_ref_pool());
         }
         // The plan cache is prepared as the search would prepare it, so a
-        // search after the dry run reuses it.
+        // search after the dry run reuses it. On a GPU whose free memory
+        // sets the budget, the search plans with its series resident and
+        // may replan (docs/memory.md, "Preprocessing on CUDA").
         plan_and_print_ep(toml_cfg, preview_cfg,
                           prepare_ep_plan_cache(toml_cfg, preview_cfg, exec),
                           exec);

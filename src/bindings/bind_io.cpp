@@ -159,9 +159,11 @@ void bind_io(py::module_& m) {
             [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
                double tsamp, std::string_view backend, int device) {
                 const auto exec = make_exec(backend, device);
-                return io::SearchSeries::from_host(to_span<const float>(ts_e),
-                                                   to_span<const float>(ts_v),
-                                                   tsamp, exec);
+                const auto e    = to_span<const float>(ts_e);
+                const auto v    = to_span<const float>(ts_v);
+                return long_call([&] {
+                    return io::SearchSeries::from_host(e, v, tsamp, exec);
+                });
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("tsamp"), py::kw_only(),
             py::arg("backend") = "cpu", py::arg("device") = 0,
@@ -180,7 +182,7 @@ void bind_io(py::module_& m) {
             [](const io::SearchSeries& s) {
                 std::vector<float> ts_e(s.size());
                 std::vector<float> ts_v(s.size());
-                s.copy_to_host(ts_e, ts_v);
+                long_call([&] { s.copy_to_host(ts_e, ts_v); });
                 return py::make_tuple(as_pyarray(std::move(ts_e)),
                                       as_pyarray(std::move(ts_v)));
             },

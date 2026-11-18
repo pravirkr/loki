@@ -205,10 +205,13 @@ struct EPCudaHostMemory {
     SizeType runs_in_flight{0};
 
     /// Bytes of the final leaves of the runs in flight, each at most
-    /// spill_leaves. A run of one slice holds all of its tree's final
-    /// leaves, up to the chunk's max_sugg, which this does not bound.
+    /// spill_leaves, doubled for the growth of the vectors that collect
+    /// them (as the CPU model counts held leaves). A run of one slice holds
+    /// all of its tree's final leaves, up to the chunk's max_sugg, which
+    /// this does not bound.
     [[nodiscard]] SizeType sweep_bytes() const noexcept {
-        return runs_in_flight * spill_leaves * leaf_bytes;
+        constexpr SizeType kGrowth = 2;
+        return kGrowth * runs_in_flight * spill_leaves * leaf_bytes;
     }
 };
 

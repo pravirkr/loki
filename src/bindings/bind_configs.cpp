@@ -327,6 +327,7 @@ void bind_configs(py::module_& m) {
             })
         .def_readwrite("device", &FTC::device)
         .def_readwrite("max_process_memory_gb", &FTC::max_process_memory_gb)
+        .def_readwrite("max_host_memory_gb", &FTC::max_host_memory_gb)
         .def_readwrite("region_growth_factor", &FTC::region_growth_factor)
         .def_readwrite("nbins_max", &FTC::nbins_max)
         .def_readwrite("nbins_min_lossy_bf", &FTC::nbins_min_lossy_bf)

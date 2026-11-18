@@ -576,7 +576,14 @@ Candidate ep_leaf_candidate(std::span<const double> leaf,
         c.leaf_basis = static_cast<LeafBasis>(basis_value);
     }
     if (c.leaf_basis != LeafBasis::kPolynomial) {
-        const bool from_snap  = c.leaf_basis == LeafBasis::kCircularSnap;
+        // The report rotated the orbit to the reference epoch and set both
+        // snap = -omega^2 * accel and crackle = -omega^2 * jerk. Where the
+        // basis pair's denominator is exactly zero there, the other pair
+        // still holds omega^2.
+        bool from_snap = c.leaf_basis == LeafBasis::kCircularSnap;
+        if ((from_snap ? c.parameters[3] : c.parameters[2]) == 0.0) {
+            from_snap = !from_snap;
+        }
         const double num      = from_snap ? c.parameters[1] : c.parameters[0];
         const double den      = from_snap ? c.parameters[3] : c.parameters[2];
         const double omega_sq = den != 0.0 ? -num / den : 0.0;

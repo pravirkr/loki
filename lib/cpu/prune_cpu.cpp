@@ -121,6 +121,12 @@ public:
         m_seed_edges.assign(f_edges.begin(), f_edges.end());
     }
 
+    /// Rows of final leaves a run of seed slices holds in memory before it
+    /// spills to its scratch: this worker's share of slice_spill_rows().
+    void set_spill_rows(SizeType rows) {
+        m_spill_rows = std::max<SizeType>(rows, 1);
+    }
+
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
                  std::span<const SizeType> ascend_levels,
@@ -174,8 +180,9 @@ public:
         } else {
             // Prune the seeds slice by slice over the same FFA output and
             // write one merged result for the run. The finished slices'
-            // final leaves stay in memory up to slice_spill_rows() rows, then
-            // go to a scratch beside the result file.
+            // final leaves stay in memory up to this worker's share of
+            // slice_spill_rows() rows, then go to a scratch beside the
+            // result file.
             SliceResults merged;
             merged.scratch_stem = search::detail::slice_scratch_stem(
                 actual_result_file, run_name);
@@ -222,6 +229,7 @@ private:
     SizeType m_total_levels;
     /// Frequency-cell edges of the seed slices; empty: one slice.
     std::vector<SizeType> m_seed_edges;
+    SizeType m_spill_rows{search::detail::slice_spill_rows()};
 
     bool m_prune_complete{false};
     SizeType m_prune_level{};
@@ -418,8 +426,9 @@ private:
 
     /// The final leaves of a run pruned in seed slices (on disk), and its
     /// stats.
-    /// Final leaves of the run's slices: in memory up to
-    /// search::detail::slice_spill_rows() rows, then all on disk.
+    /// Final leaves of the run's slices: in memory up to m_spill_rows rows
+    /// (the worker's share of search::detail::slice_spill_rows()), then all
+    /// on disk.
     struct SliceResults {
         std::vector<double> leaves;
         std::vector<float> scores;
@@ -472,8 +481,8 @@ private:
         const auto leaves      = world_tree.get_leaves_circular_view();
         const auto scores      = world_tree.get_scores_circular_view();
         const auto scores_ep   = world_tree.get_scores_ep_circular_view();
-        if (!merged.scratch && merged.scores.size() + world_tree.get_size() <=
-                                   search::detail::slice_spill_rows()) {
+        if (!merged.scratch &&
+            merged.scores.size() + world_tree.get_size() <= m_spill_rows) {
             const auto append = [](auto& dst, const auto& view) {
                 dst.insert(dst.end(), view.first.begin(), view.first.end());
                 dst.insert(dst.end(), view.second.begin(), view.second.end());
@@ -1630,6 +1639,10 @@ private:
                     m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
                 prune.set_leaf_reduction(m_reduction ? &*m_reduction : nullptr);
                 prune.set_seed_slices(m_seed_edges);
+                // The workers' runs share the in-memory cap: a bright line
+                // fills all of them at once.
+                prune.set_spill_rows(search::detail::slice_spill_rows() /
+                                     m_n_workers);
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,
