@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Golden-output harness: seeded runs to compare two loki builds (e.g. main vs a branch).
 # Usage: run_golden.sh <loki-binary> <outdir> [backends...]   (default: cpu cuda)
-# Seeded simulate -> FFA search and accelerated EP search, per backend.
+# Seeded simulate -> FFA search (plain and with the spectral zap) and an
+# accelerated EP search, per backend.
 # Compare two outdirs with compare_h5.py. Small: runs in well under a minute.
 # The EP case never overflows the world tree, so it does not exercise the
 # overflow (trimming) path; a change there needs its own check.
@@ -70,7 +71,34 @@ backend = "$be"
 outdir = "$be"
 prefix = "ep"
 EOF
+  # Spectral zap: threshold and birdies, a seeded noise fill, and a low
+  # block_sigma so that some blocks are masked (gaps: the zap's gap passes).
+  cat > "ffaz_$be.toml" <<EOF
+[input]
+timeseries = "ffa.tim"
+[preprocessing]
+preprocess = true
+block_sigma = 2.5
+zap_periodic = true
+zap_sigma = 5.0
+zap_whiten_bins = 101
+birdies = [[250.0, 1.0], [1234.5, 0.05]]
+zap_mode = "noise"
+zap_seed = 7
+[search]
+f_min = 99.0
+f_max = 101.0
+nbins = 64
+[performance]
+nthreads = 4
+max_process_memory_gb = 4.0
+backend = "$be"
+[output]
+outdir = "$be"
+prefix = "ffaz"
+EOF
   "$LOKI" -q search ffa --config "ffa_$be.toml" > "ffa_$be.log" 2>&1
+  "$LOKI" search ffa --config "ffaz_$be.toml" > "ffaz_$be.log" 2>&1
   "$LOKI" -q search ep --config "ep_$be.toml" --no-plan-cache > "ep_$be.log" 2>&1
 done
 find "$OUT" -name '*.h5' | sort

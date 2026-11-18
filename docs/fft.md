@@ -3,8 +3,8 @@
 This page covers where loki transforms profiles between the time and Fourier
 domains, which code does each transform, and how the fused inverse FFTs of the
 FFA sweeps work. Read it before changing `lib/cpu/fft_cpu.cpp`,
-`lib/cpu/lane_fft*`, `lib/cuda/fft_cuda.cu`, `lib/cuda/ffa_portable_fft.cuh`
-or `lib/cuda/ffa_score_fourier_*`.
+`lib/cpu/lane_fft*`, `lib/cuda/fft_cuda.cu`, `lib/cuda/fft_long_cuda.cu`,
+`lib/cuda/ffa_portable_fft.cuh` or `lib/cuda/ffa_score_fourier_*`.
 
 ## Conventions
 
@@ -36,11 +36,35 @@ or `lib/cuda/ffa_score_fourier_*`.
 | CPU, longer rows (`lib/cpu/fft_cpu.cpp`) | pocketfft | Preprocessing's whole-series transforms; `CpuFFT` for lengths above 1024. |
 | GPU, batched (`lib/cuda/fft_cuda.cu`) | `PortableFFT` (`GpuFFTManager`) | Lossy brute fold (R2C), unfused FFA chunks and `FFA::execute` (C2R). |
 | GPU, fused FFA Fourier scorer | `PortableFFT` (`ffa_portable_fft.cuh`) | On chip, inside the final-level kernel. |
+| GPU, whole series (`lib/cuda/fft_long_cuda.cu`) | cuFFT (`LongRealFFT`) | Preprocessing's whole-series transforms on a CUDA `Exec`. |
 
-loki uses no vendor FFT library (cuFFT and FFTW were removed in 2026-10).
+The search kernels use no vendor FFT library (cuFFT batched rows and FFTW
+were removed in 2026-10): their transforms are short and fuse into device
+code. cuFFT is used only for whole-series transforms; see below.
 pocketfft (C++ branch, header-only, BSD-3-Clause) is pinned in
 `cmake/LokiDependencies.cmake` and included by `lib/cpu/fft_cpu.cpp` only;
 the C++ tests also use it as their reference.
+
+### Whole-series transforms (cuFFT)
+
+Preprocessing transforms the whole series (up to 2^27 samples and more) a
+few times per run, called from the host. That is cuFFT's use case, and
+nothing there needs to fuse into a kernel. `math::LongRealFFT`
+(`lib/cuda/fft_long_cuda.cuh`) plans one R2C and one C2R of length `n` (any
+`n >= 2`, 64-bit sizes) on one device and stream:
+
+- Both plans share one work area that the object allocates, so the caller
+  can count it (`LongRealFFT::workspace_bytes(n)` gives it without planning).
+- C2R is scaled by `1 / n` afterwards, matching the host convention.
+- Out-of-place R2C leaves its input unchanged; C2R overwrites its input.
+- Results are deterministic on one GPU and toolkit, but differ from
+  pocketfft at float level.
+
+`lib/cuda/fft_long_cuda.cu` is the only file that includes `<cufft.h>`
+(`scripts/check_architecture.sh` enforces it). loki links the shared
+`libcufft`, so a CUDA build needs it at run time besides the driver's
+`libcuda` (the CUDA runtime itself is linked statically). A HIP build would
+use hipFFT in that one file.
 
 ### Host transforms
 
@@ -355,7 +379,8 @@ The algorithm is a Stockham FFT with register radix-E passes.
 ## Why not cuFFTDx, or cuFFT callbacks
 
 - **cuFFT** is a host library. It cannot run inside a kernel, so it cannot be
-  fused with the merge and the scorer.
+  fused with the merge and the scorer. (It does run preprocessing's whole-series
+  transforms, where nothing needs to fuse.)
   - Load callbacks could fold the last merge into the transform. Scoring
     needs whole profiles, though, so the time series would still be written
     out and read back.

@@ -33,10 +33,13 @@ RUN PATH=/opt/loki/bin:$PATH uv pip install --python /opt/loki /src/loki \
     && rm -rf /tmp/loki-build
 
 # Runtime: the CUDA runtime is linked statically, so the base image (driver
-# libraries come from the host via --nv / the NVIDIA container toolkit) is enough.
+# libraries come from the host via --nv / the NVIDIA container toolkit) plus
+# libcufft (the whole-series preprocessing FFTs) is enough.
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
+ARG CUDA_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 libhdf5-103-1 \
+        "libcufft-$(echo "${CUDA_VERSION}" | cut -d. -f1,2 | tr . -)" \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt /opt
 ENV PATH=/opt/loki/bin:$PATH

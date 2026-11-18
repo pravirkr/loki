@@ -49,7 +49,10 @@ Stage: final
     /opt/loki /opt/loki
 
 %post
-    apt-get update && apt-get install -y --no-install-recommends libgomp1 libhdf5-103-1
+    # libcufft: the whole-series preprocessing FFTs (the base image has only
+    # the driver libraries).
+    apt-get update && apt-get install -y --no-install-recommends libgomp1 libhdf5-103-1 \
+        libcufft-12-4
     rm -rf /var/lib/apt/lists/*
 
 %environment

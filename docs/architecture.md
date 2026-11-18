@@ -360,7 +360,8 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   rotation is FP32 with no `__sincosf`. The CPU computes its phase steps in
   double and rounds them once (`fill_merge_phase_steps`, `ep_phase_steps`). The Fourier brute fold seeds its phasors from the
   double phase reduced to a cycle, re-seeded every 64 samples. The GPU FFTs
-  are portable block transforms (no cuFFT). Fourier results are at float
+  of the search are portable block transforms; cuFFT runs only the
+  whole-series preprocessing transforms (`lib/cuda/fft_long_cuda.cu`). Fourier results are at float
   level relative to the CPU reference.
 - Thread counts. The caller's `nthreads` is never capped from above:
   library code clamps only from below, `nthreads = std::max(nthreads, 1)`,
