@@ -2,7 +2,6 @@
 
 #include <array>
 
-#include <xsimd/xsimd.hpp>
 #ifdef __x86_64__
 #include <immintrin.h> // For AVX-512 intrinsics
 #elif defined(__aarch64__)
@@ -10,6 +9,8 @@
 #endif
 
 #include "loki/common/types.hpp"
+
+#include "lib/cpu/xsimd.hpp"
 
 namespace loki::simd_utils {
 

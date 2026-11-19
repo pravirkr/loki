@@ -9,9 +9,9 @@
 #include <numbers>
 
 #include <omp.h>
-#include <xsimd/xsimd.hpp>
 
 #include "lib/cpu/simd_utils.hpp"
+#include "lib/cpu/xsimd.hpp"
 #include "lib/detail/error_check.hpp"
 
 namespace loki::lane_fft {
