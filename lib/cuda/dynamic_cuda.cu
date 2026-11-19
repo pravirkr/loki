@@ -48,6 +48,7 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
       m_branch_max(branch_max) {
     (void)device_id;
     search::detail::check_ep_supported(m_cfg, "CUDA EP");
+    search::detail::check_ep_seed_grid(param_grid_count_init, "CUDA EP");
     m_boxcar_widths_d        = m_cfg.get_scoring_widths();
     m_boxcar_kadane_biases_d = m_cfg.get_boxcar_kadane_biases();
     const auto param_limits  = m_cfg.get_param_limits();

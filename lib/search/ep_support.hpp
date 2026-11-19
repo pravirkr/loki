@@ -6,6 +6,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <span>
 #include <stdexcept>
@@ -36,6 +37,29 @@ inline void check_ep_supported(const PulsarSearchConfig& cfg,
         throw std::invalid_argument(
             fmt::format("{}: EP nbins_max must be <= {} (got {})", caller,
                         kEPMaxNbins, cfg.get_nbins_max()));
+    }
+}
+
+/// EP seeds pruning on the FFA's acceleration x frequency grid and branches
+/// every higher derivative (jerk, snap, crackle) in pruning, so the FFA's
+/// final grid (@p param_counts, frequency last) must hold one point of each.
+/// A derivative whose range spans more than one segment-level step gets
+/// several; more segments shorten the step's span until it fits.
+inline void check_ep_seed_grid(std::span<const SizeType> param_counts,
+                               std::string_view caller) {
+    constexpr std::array<std::string_view, 3> kNames = {"jerk", "snap",
+                                                        "crackle"};
+    const SizeType n_counts                          = param_counts.size();
+    for (SizeType i = 0; i + 2 < n_counts; ++i) {
+        if (param_counts[i] <= 1) {
+            continue;
+        }
+        const SizeType order = n_counts - 3 - i;
+        throw std::invalid_argument(fmt::format(
+            "{}: EP seeds pruning on an acceleration x frequency FFA grid, "
+            "but the FFA grids {} over {} points; use more segments",
+            caller, order < kNames.size() ? kNames[order] : "a derivative",
+            param_counts[i]));
     }
 }
 
