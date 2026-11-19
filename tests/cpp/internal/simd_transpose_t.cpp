@@ -3,11 +3,11 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
-#include <xsimd/xsimd.hpp>
 
 #include "loki/common/types.hpp"
 
 #include "lib/cpu/simd_utils.hpp"
+#include "lib/cpu/xsimd.hpp"
 
 // The block transposes of simd_utils against a scalar reference. The AVX2
 // and AVX-512 primitives compile only on x86 builds with those ISAs.

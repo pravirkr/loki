@@ -9,11 +9,11 @@
 #include <stdexcept>
 
 #include <omp.h>
-#include <xsimd/xsimd.hpp>
 
 #include "loki/common/types.hpp"
 
 #include "lib/cpu/simd_utils.hpp"
+#include "lib/cpu/xsimd.hpp"
 #include "lib/detail/error_check.hpp"
 
 namespace loki::detection {

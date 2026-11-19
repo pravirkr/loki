@@ -62,6 +62,14 @@ while IFS= read -r line; do fail "$line"; done < <(
         grep -v '^lib/cuda/fft_long_cuda\.cu$' |
         xargs grep -nE '#include <cufft|\bcufft[A-Z][A-Za-z0-9]*\(')
 
+# 3d. xsimd only through lib/cpu/xsimd.hpp, which closes the pragma region
+#     xsimd leaves open under -ffast-math on GCC 16 (Portability).
+section "xsimd only through lib/cpu/xsimd.hpp"
+while IFS= read -r line; do fail "$line"; done < <(
+    sources include lib src applications bench tests/cpp |
+        grep -v '^lib/cpu/xsimd\.hpp$' |
+        xargs grep -nE '#include <xsimd/')
+
 # 4. Public headers open only the namespaces rule 7 allows.
 section "public namespaces follow the directory"
 for h in $(find include/loki -mindepth 2 -name '*.hpp'); do

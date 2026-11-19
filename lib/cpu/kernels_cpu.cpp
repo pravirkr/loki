@@ -17,7 +17,6 @@
 #include <vector>
 
 #include <omp.h>
-#include <xsimd/xsimd.hpp>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -28,6 +27,7 @@
 
 #include "lib/algorithms/planner_memory.hpp"
 #include "lib/cpu/lane_fft.hpp"
+#include "lib/cpu/xsimd.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
 

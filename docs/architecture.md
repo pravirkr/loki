@@ -507,6 +507,10 @@ can still fail there:
 - Code under `#if defined(__AVX2__)` / `__AVX512F__` is not compiled on
   arm64. Do not add `const` to a variable that such a branch writes, and do
   not trust a local arm64 build for those branches.
+- Include xsimd only through `lib/cpu/xsimd.hpp`; `check_architecture.sh`
+  rejects `#include <xsimd/`. Under `-ffast-math`, xsimd opens a
+  `#pragma GCC push_options` region that GCC 16 never closes, and GCC then
+  stops inlining across the include. The wrapper closes the region.
 
 ## Static analysis
 
