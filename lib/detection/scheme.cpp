@@ -344,7 +344,10 @@ PilotStats pilot_stats(std::span<const float> sorted_scores,
         const auto row   = sorted_scores.subspan(s * ntrials, ntrials);
         out.window.lo[s] = row[r_lo];
         out.window.hi[s] = row[r_hi];
-        out.guess[s]     = std::min(row[ntrials / 2], trials[s]);
+        // The beam centres on the guess clamped into the window, so the reach
+        // measures offsets from the clamped guess too.
+        out.guess[s] = std::clamp(std::min(row[ntrials / 2], trials[s]),
+                                  out.window.lo[s], out.window.hi[s]);
     }
     return out;
 }

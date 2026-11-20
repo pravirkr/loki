@@ -174,3 +174,32 @@ def test_free_schemes_are_deterministic_per_seed(name: str) -> None:
 
     np.testing.assert_array_equal(run(7), run(7))
     assert not np.array_equal(run(7), run(8))
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_solve_keeps_a_bright_pulsar(backend: str) -> None:
+    # #14's pattern with the planner's settings at snr_final 16 (#43). The
+    # guess is capped at the noise threshold, far below the last stages'
+    # windows; offsets from it forced the first threshold up to 6, losing 5-10%
+    # of the signal at no gain in cost.
+    extra = {"nthreads": 2} if backend == "cpu" else {}
+    scheme = libloki.thresholds.DynamicThresholdScheme(
+        np.array([1.0, 3.0, 3.143, 1.0, 1.606, 5.604, 1.0], dtype=np.float32),
+        ref_ducy=0.1,
+        nbins=32,
+        ntrials=1024,
+        nprobs=40,
+        snr_final=16.0,
+        nthresholds=100,
+        ducy_max=0.2,
+        wtsp=1.5,
+        guess="window",
+        min_pd=0.1,
+        seed=1,
+        backend=backend,
+        **extra,
+    )
+    scheme.run(10)
+    sol = scheme.solve()
+    assert sol["delivery"] == "met"
+    assert sol["pd"] > 0.98

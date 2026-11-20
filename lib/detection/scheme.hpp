@@ -131,7 +131,7 @@ void warn_empty_stages(std::span<const State> states,
 /// Statistics of the unpruned signal scores that set the guided beam.
 struct PilotStats {
     BeamBounds window;        ///< window_scheme
-    std::vector<float> guess; ///< pilot_guess_scheme
+    std::vector<float> guess; ///< pilot_guess_scheme, clamped into window
     std::vector<float> sigma; ///< score_sigma
 };
 
