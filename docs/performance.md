@@ -881,10 +881,19 @@ What the measurements say about the existing modes:
   (24 / 67 / 142 ms at 16 / 64 / 128 bins against 109 / 234 / 434 ms for
   `shared` and 281 / 573 / 1021 ms for `robust`).
 - Last threshold (issue #42): at `min_pd` 0.1 the free last thresholds were
-  5.7-6.9, below a candidate cut of 7. Raising the last threshold to the cut
-  and shifting the others to restore Pd costs 0-7 % of C (0-18 % for a
-  per-fold false-alarm threshold); fixing it inside the descent costs about
-  5 %.
+  6.0-8.4 with the descent, below a candidate cut of 7 on 51 of 230
+  patterns (35 of the 170 up to 128 bins). On those 35, judged on
+  independent samples at equal Pd: raising the last threshold of the free
+  schedule to 7 and shifting the others costs 3.0 % of C (geometric mean,
+  -3 % to +14 %); a floor of 7 inside the descent 3.4 %, i.e. 1.004 of that
+  baseline (0.97-1.03), with the last threshold at 7.00-7.04 and Pd
+  0.099-0.105. Of the other 135 patterns 131 are bit-identical with and
+  without the floor; 4 whose free last threshold is within 0.1 of it differ
+  by -5 % to 0 % in C. Two earlier versions were worse: holding the last
+  threshold at the given value pulled it down when the free one was higher
+  (`fap` 0.01 is S/N 3.6-4.8), and not letting a block that holds the last
+  stage move down once the last threshold sat on the floor ended 1.1 %
+  above the baseline (29 of 35 patterns worse).
 
 The bank descent against the search modes, same suite, 8 seeds:
 
@@ -903,6 +912,13 @@ to the same Pd (research prototype, 13 patterns). The library mode on all
 (15), Pd on 2^16 independent trials 0.0985-0.106 for the target 0.1, free
 last thresholds 6.0-8.4.
 
+Seed scatter, 22 patterns (2-5 parameters, 16-128 bins) × 8 seeds, each
+schedule judged on the same independent samples: Pd 0.0991-0.1044 over the
+176 solves (median 0.1014; standard deviation per pattern 0.0005-0.0012,
+which is the binomial error of the 2^17-trial pin); cv of C 0.018 (median)
+and 0.045 (worst pattern, 5 parameters); the reported Pd within 2.8 % of the
+judged one.
+
 Time of one solve on 127 stages (3 parameters), by bin count:
 
 | nbins | 16 | 64 | 128 | 256 | 512 | 1024 |
@@ -917,9 +933,62 @@ genealogy after an accepted move (70-90 ms in total) and the block deltas on
 the genealogy and on the signal bank. Above 128 bins the rest is the three
 unpruned signal samples (2^15 trials for the descent, 2 × 2^17 for the pin
 and the report). It is slower than `shared` at 16 bins, equal at 64, faster
-at 128, and 0.02-0.08 s on 4-32 segments. Open: a memory budget for the
-samples and fewer final trials at large bin counts, before the planner can
-use it above 128 bins in place of the search at 64 bins and the refit.
+at 128, and 0.02-0.08 s on 4-32 segments. The sample sizes are the engine's
+solve budget (2^17 per signal bank), the same at every bin count. Open:
+fewer final trials at large bin counts, and the time of the planner's
+present path there (search at 64 bins, then the refit), which was not
+measured, before the planner can use the descent above 128 bins.
+
+Where the host time goes (16-128 bins, 127 stages, ms per solve): forward
+re-mark 65 (32 candidate evaluations of about 10^6 genealogy entries each,
+2 ns per entry: memory traffic of scores, parents, masks and the survivor
+list), pins on the signal sample 22, backward pass 19, genealogy block
+deltas 15, signal block deltas 13; 25-31 of the 32 candidates are accepted.
+
+Warm starts (`descent_start`): the solutions of similar patterns are close,
+so a solved schedule is a better start than the equal z-score one. C relative
+to the full six-pass solve from the default start, judged on independent
+samples:
+
+| start | passes | C / full (geomean) | worst | time |
+|---|---|---|---|---|
+| default | 6 (full) | 1 | | 0.24 s |
+| default | last 3 | 1.068 | 1.16 | 0.14 s |
+| default | last 2 | 1.20 | 1.61 | 0.11 s |
+| neighbouring pattern (43 pairs, same parameters and bins) | last 3 | 0.980 | 1.04 | 0.14 s |
+| neighbouring pattern | last 2 | 0.986 | 1.02 | 0.11 s |
+| one donor (3 parameters, 64 bins) for 21 patterns of 2-5 parameters, 16-128 bins, thresholds as they are | last 3 | 1.000 | 1.08 | |
+| the same donor, thresholds | last 2 | 1.086 | 1.70 | |
+| the same donor, as signal z-scores per stage | last 3 | 0.996 | 1.12 | |
+| the same donor, as signal z-scores | last 2 | 1.024 | 1.22 | |
+
+The warm solves below 1 show that the full solve is about 2 % from
+converged. Two passes from a neighbour take 0.10 / 0.12 / 0.16 s at 16 / 64 /
+128 bins, within the time of `shared` (0.11 / 0.23 / 0.43 s). The optimal
+schedules share a shape in signal z-scores (mean minus threshold over the
+standard deviation of the unpruned signal score) on the 127-stage patterns:
+0.6-2.6 at the first stage, low a quarter of the way in (-0.3 to 0.8 at
+stage 31), 0.4-1.4 half way and 1.3-1.8 at the last stage.
+
+Chains, as a planner would run its regions in order (each pattern started
+from the previous warm solution, two passes, C relative to that pattern's
+full solve):
+
+| chain | links | C / full (geomean) | first half | second half | worst |
+|---|---|---|---|---|---|
+| thresholds, one bin count and parameter count, 5 chains | 37 | 0.988 | 0.99-1.00 | 0.96-1.01 | 1.085 |
+| z-scores through 16-32-64-128-64-32-16-32-64-128 bins, 2 parameters | 9 | 0.987 | 1.006 | 0.972 | 1.023 |
+| the same, 3 parameters | 9 | 0.982 | 0.988 | 0.978 | 0.997 |
+| the same, 5 parameters | 9 | 0.982 | 0.969 | 0.993 | 1.040 |
+
+No drift: the chains stay below the full solves. Three passes instead of
+two gave 0.975-0.99 on the z-score chains. Open: the planner solving its
+regions in order this way.
+
+A shorter plan from the default start (the first two passes, then one each
+at 0.3/0.1 and 0.2/0.05) costs 2.0 % more C (worst case 5.7 %) in 160 ms
+instead of 230 ms; with hat moves it was 5.2 % more. It can be passed as
+`descent_passes` where the time matters more.
 
 Kept:
 
@@ -936,10 +1005,19 @@ Kept:
   Restricting it to the currently alive trials is wrong: a trial a downward
   move revives loses its subtree.
 
+The converged schedules are smooth in z-scores, with no structure following
+the branching of single stages (9 patterns, each solved and then warm
+started twice): a fall from 1.2-2.6 at the first stage to about 0 within 4-8
+stages, a flat minimum of -0.5 to 0.2 up to stage 16-24 (the threshold sits
+at the mean signal score there), then a near-linear rise to 1.6-1.8 at the
+last stage.
+
 Do not retry:
 
 | Idea | Why not |
 |---|---|
+| Hat-shaped block moves (the step largest at the middle of a block, falling to its edges) because the solutions are smooth | In place of the flat moves for blocks of 4 stages or more: C 1.011 of the flat moves' (9 cases × 3 seeds, 1.09 at a target of 0.02). In addition to them: 0.997 for 30 % more time. |
+| More fine passes from the default start (four passes at margin 0.2, step 0.05 instead of two) | C 1.003 at 290 ms instead of 230 ms. What the warm chains gain (2-4 %) is not reached by repeating the fine passes on one start. |
 | Importance-sampled noise bank (a mixture of boxcar-template tilts, weights instead of resampling) | Agrees with the resampling simulation within 1 % on C, but the effective sample size is about 10^-3 of the trials and falls as nbins^-1.5; a tilt along the pulse profile was worse (10^-4, biased late populations). The genealogy gives the same reuse of one noise sample without weights. |
 | `improved` as the initialiser of the descent | Saves about two genealogy builds (6-22 ms) and costs a search of 24-142 ms. The start a fixed number of signal standard deviations below the mean signal score needs no search. |
 | Sorting the genealogy by parent, or a branch-free scatter, for the backward pass | The scatter-add costs about 4 ns per element either way. |

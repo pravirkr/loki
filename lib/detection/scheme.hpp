@@ -356,14 +356,18 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
 
 /// Settings of mode "descent" (the defaults are the validated ones).
 struct DescentOptions {
-    /// Last threshold held at this S/N (<= 0: free).
+    /// Floor of the last threshold, in S/N (<= 0: none).
     float final_threshold{0.0F};
     /// Trials of the signal sample the descent counts Pd on.
     SizeType nsignal{SizeType{1} << 15U};
-    /// Passes (empty: the validated default).
+    /// Passes (empty: the validated default; a shorter one with a start).
     std::vector<DescentPass> passes;
-    /// Starting schedule (empty: the same signal z-score at every stage).
+    /// Starting schedule, e.g. the solution of a similar pattern (empty: the
+    /// same signal z-score at every stage).
     std::vector<float> start;
+    /// The start holds z-scores, (mean - threshold) / sd of the unpruned
+    /// signal score per stage, as SchemeSolution::zscores reports them.
+    bool start_zscores{false};
     int nthreads{1};
 };
 

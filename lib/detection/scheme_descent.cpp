@@ -156,10 +156,12 @@ public:
     }
 
     /// Exact change of Pd when the thresholds of one block move by +d
-    /// (@p up, <= 0) or -d (@p dn, >= 0), every other threshold fixed.
+    /// (@p up, <= 0) or down by @p down per stage (@p dn, >= 0), every
+    /// other threshold fixed.
     void block_deltas(std::span<const float> g,
                       std::span<const Block> blocks,
                       float d,
+                      std::span<const float> down,
                       std::vector<double>& up,
                       std::vector<double>& dn,
                       int nthreads) const {
@@ -192,7 +194,7 @@ public:
                     const float v = row[s] - g[s];
                     m[s]          = v;
                     if (v <= 0.0F) {
-                        if (v <= -d || block_of[s] == nblocks ||
+                        if (v <= -down[s] || block_of[s] == nblocks ||
                             (first != nstages &&
                              block_of[first] != block_of[s])) {
                             lost = true;
@@ -318,9 +320,11 @@ public:
     }
 
     /// Exact change of the cost when the thresholds of one block move by +d
-    /// (@p up, <= 0) or -d (@p dn, >= 0), every other threshold as prepared.
+    /// (@p up, <= 0) or down by @p down per stage (@p dn, >= 0, each at most
+    /// the d of evaluate()), every other threshold as prepared.
     void block_deltas(std::span<const Block> blocks,
                       float d,
+                      std::span<const float> down,
                       std::vector<double>& up,
                       std::vector<double>& dn,
                       int nthreads) {
@@ -340,7 +344,7 @@ public:
                 const SizeType hi = m_offset[s + 1];
                 const float g0    = m_schedule[s];
                 const float gu    = g0 + d;
-                const float gd    = g0 - d;
+                const float gd    = g0 - down[s];
                 const bool first  = s == blk.a;
                 const uint8_t* prv =
                     m_alive.data() + (first ? 0 : m_offset[s - 1]);
@@ -507,9 +511,11 @@ double choose_moves(std::span<const double> dc_up,
 }
 
 /// The same signal z-score at every stage, with Pd near @p target.
-std::vector<float>
-zscore_start(const SignalSample& signal, SizeType nstages, double target) {
-    const auto [mean, sd]  = signal.moments();
+std::vector<float> zscore_start(const SignalSample& signal,
+                                std::span<const float> mean,
+                                std::span<const float> sd,
+                                double target) {
+    const SizeType nstages = mean.size();
     const SizeType ntrials = std::min<SizeType>(signal.size(), 4096);
     std::vector<float> g(nstages);
     double lo = -2.0; // Pd(lo) < target < Pd(hi)
@@ -566,12 +572,15 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     const double target =
         std::min(1.0, p + (2.0 * std::sqrt(p * (1.0 - p) /
                                            static_cast<double>(budget.nbank))));
-    const bool fixed_last = options.final_threshold > 0.0F;
-    const int nthreads    = std::max(options.nthreads, 1);
-    const SizeType nfree  = fixed_last ? nstages - 1 : nstages;
-    const auto t_start    = std::chrono::steady_clock::now();
-    double t_noise        = 0.0;
-    double t_moves        = 0.0;
+    // The last threshold never goes below the floor; the other stages make
+    // up the Pd when it rests there.
+    const bool has_floor = options.final_threshold > 0.0F;
+    const float floor    = has_floor ? options.final_threshold
+                                     : std::numeric_limits<float>::lowest();
+    const int nthreads   = std::max(options.nthreads, 1);
+    const auto t_start   = std::chrono::steady_clock::now();
+    double t_noise       = 0.0;
+    double t_moves       = 0.0;
 
     // Coarse to fine: small samples and large steps first. The first pass
     // skips the finest blocks, the later ones the coarsest (measured:
@@ -584,40 +593,64 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         {SizeType{1} << 13U, 0.3F, 0.1F, 32, 1},
         {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1},
         {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1}};
+    // From a schedule solved for a similar pattern the first coarse passes
+    // are not needed (measured: docs/performance.md).
+    const std::vector<DescentPass> warm_passes = {
+        {SizeType{1} << 12U, 0.4F, 0.2F, kAll, 1},
+        {SizeType{1} << 13U, 0.3F, 0.1F, 32, 1},
+        {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1}};
     const auto& passes =
-        options.passes.empty() ? default_passes : options.passes;
+        !options.passes.empty()
+            ? options.passes
+            : (options.start.empty() ? default_passes : warm_passes);
     const SignalSample signal(
         engine.simulate_h1_scores(options.nsignal,
                                   derive_seed(seed, kSignalDescent)),
         nstages, options.nsignal);
-    if (fixed_last) {
-        const double ceiling = signal.ceiling(options.final_threshold);
+    if (has_floor) {
+        const double ceiling = signal.ceiling(floor);
         out.diagnostics.emplace_back("pd_ceiling", ceiling);
-        if (ceiling < target || nfree == 0) {
+        if (ceiling < target) {
             // min_pd is above what the fixed last threshold lets through.
             out.pd       = ceiling;
             out.delivery = Delivery::kShort;
             return out;
         }
     }
-    std::vector<float> g = options.start.empty()
-                               ? zscore_start(signal, nstages, target)
-                               : options.start;
+    // The schedule in units of the unpruned signal score carries over to
+    // other patterns and bin counts: z_s = (mean_s - g_s) / sd_s.
+    const auto [mean, sd] = signal.moments();
+    std::vector<float> g  = options.start.empty()
+                                ? zscore_start(signal, mean, sd, target)
+                                : options.start;
     error_check::check_equal(g.size(), nstages,
                              "descent: one starting threshold per stage");
-    if (fixed_last) {
-        g[nstages - 1] = options.final_threshold;
+    if (!options.start.empty() && options.start_zscores) {
+        for (SizeType s = 0; s < nstages; ++s) {
+            g[s] = mean[s] - (options.start[s] * sd[s]);
+        }
     }
+    g[nstages - 1] = std::max(g[nstages - 1], floor);
+    // A common shift of every stage; if it takes the last threshold below
+    // the floor, the last one rests on the floor and the others shift.
     const auto pin = [&](std::vector<float>& schedule) {
-        const float shift = signal.pin_shift(schedule, target, nfree);
-        for (SizeType s = 0; s < nfree; ++s) {
-            schedule[s] += shift;
+        const float shift = signal.pin_shift(schedule, target, nstages);
+        if (schedule[nstages - 1] + shift >= floor) {
+            for (SizeType s = 0; s < nstages; ++s) {
+                schedule[s] += shift;
+            }
+            return;
+        }
+        schedule[nstages - 1] = floor;
+        const float rest      = signal.pin_shift(schedule, target, nstages - 1);
+        for (SizeType s = 0; s + 1 < nstages; ++s) {
+            schedule[s] += rest;
         }
     };
     pin(g);
 
     std::vector<SizeType> scales;
-    for (SizeType size = std::bit_ceil(std::max<SizeType>(nfree, 2)) / 2;
+    for (SizeType size = std::bit_ceil(std::max<SizeType>(nstages, 2)) / 2;
          size >= 1; size /= 2) {
         scales.push_back(size);
     }
@@ -631,6 +664,7 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     for (SizeType ipass = 0; ipass < passes.size(); ++ipass) {
         const auto& pass = passes[ipass];
         const float d    = pass.step;
+        std::vector<float> down(nstages, d);
         for (SizeType s = 0; s < nstages; ++s) {
             g_ref[s] = g[s] - pass.margin;
         }
@@ -648,16 +682,18 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 continue;
             }
             const auto blocks = make_blocks(
-                nfree, size, (ipass % 2 == 1 && size > 1) ? size / 2 : 0);
-            bank.block_deltas(blocks, d, dc_up, dc_dn, nthreads);
-            signal.block_deltas(g, blocks, d, dp_up, dp_dn, nthreads);
+                nstages, size, (ipass % 2 == 1 && size > 1) ? size / 2 : 0);
+            // The last stage moves down as far as the floor lets it.
+            down[nstages - 1] = std::clamp(g[nstages - 1] - floor, 0.0F, d);
+            bank.block_deltas(blocks, d, down, dc_up, dc_dn, nthreads);
+            signal.block_deltas(g, blocks, d, down, dp_up, dp_dn, nthreads);
             std::vector<uint8_t> room(blocks.size());
             double saved = 0.0;
             double lost  = 0.0;
             for (SizeType k = 0; k < blocks.size(); ++k) {
                 bool ok = true;
                 for (SizeType s = blocks[k].a; s < blocks[k].b && ok; ++s) {
-                    ok = g[s] - d > g_ref[s] + kMarginGuard;
+                    ok = g[s] - down[s] > g_ref[s] + kMarginGuard;
                 }
                 room[k] = ok ? 1 : 0;
                 saved -= dc_up[k];
@@ -688,9 +724,11 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
             candidate = g;
             for (SizeType k = 0; k < blocks.size(); ++k) {
                 for (SizeType s = blocks[k].a; s < blocks[k].b; ++s) {
-                    candidate[s] += d * static_cast<float>(step[k]);
+                    candidate[s] +=
+                        step[k] > 0 ? d : (step[k] < 0 ? -down[s] : 0.0F);
                 }
             }
+            candidate[nstages - 1] = std::max(candidate[nstages - 1], floor);
             pin(candidate);
             bool above = true;
             for (SizeType s = 0; s < nstages && above; ++s) {
@@ -720,27 +758,34 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     {
         const auto bank =
             engine.make_signal_bank(n, derive_seed(seed, kBankPin));
-        std::vector<float> probe = g;
-        if (fixed_last) {
-            probe[nstages - 1] = std::numeric_limits<float>::lowest();
-        }
-        auto margins = bank->margins(probe);
-        if (fixed_last) {
+        auto margins = bank->margins(g);
+        pin_shift    = SignalSample::shift_of(margins, target);
+        if (g[nstages - 1] + pin_shift >= floor) {
+            for (SizeType s = 0; s < nstages; ++s) {
+                g[s] += pin_shift;
+            }
+        } else {
+            // The last threshold rests on the floor: shift the others over
+            // the trials that pass it.
+            g[nstages - 1]           = floor;
+            std::vector<float> probe = g;
+            probe[nstages - 1]       = std::numeric_limits<float>::lowest();
+            margins                  = bank->margins(probe);
             std::vector<float> last(nstages,
                                     std::numeric_limits<float>::lowest());
-            last[nstages - 1] = g[nstages - 1];
+            last[nstages - 1] = floor;
             const auto above  = bank->margins(last);
             for (SizeType t = 0; t < n; ++t) {
                 if (above[t] <= 0.0F) {
                     margins[t] = std::numeric_limits<float>::lowest();
                 }
             }
-        }
-        pin_shift = SignalSample::shift_of(margins, target);
-        if (std::isfinite(pin_shift) &&
-            pin_shift > std::numeric_limits<float>::lowest() / 2) {
-            for (SizeType s = 0; s < nfree; ++s) {
-                g[s] += pin_shift;
+            pin_shift = SignalSample::shift_of(margins, target);
+            if (std::isfinite(pin_shift) &&
+                pin_shift > std::numeric_limits<float>::lowest() / 2) {
+                for (SizeType s = 0; s + 1 < nstages; ++s) {
+                    g[s] += pin_shift;
+                }
             }
         }
     }
@@ -758,7 +803,11 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     out.c = total_cost(out.eval_states.back(), w_terminal);
     out.cost =
         out.pd > 0.0 ? out.c / out.pd : std::numeric_limits<double>::max();
-    out.search_c   = out.c;
+    out.search_c = out.c;
+    out.zscores.resize(nstages);
+    for (SizeType s = 0; s < nstages; ++s) {
+        out.zscores[s] = (mean[s] - g[s]) / sd[s];
+    }
     out.thresholds = std::move(g);
     out.diagnostics.emplace_back("descent_passes",
                                  static_cast<double>(passes.size()));

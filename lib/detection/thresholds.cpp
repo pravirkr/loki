@@ -338,6 +338,8 @@ SchemeSolution DynamicThresholdScheme::solve() {
         options.final_threshold = shared.final_threshold;
         options.passes          = shared.descent_passes;
         options.nsignal         = shared.descent_nsignal;
+        options.start           = shared.descent_start;
+        options.start_zscores   = shared.descent_start_zscores;
         options.nthreads        = m_impl->m_nthreads;
         if (shared.fap > 0.0) {
             const auto ntemplates = static_cast<double>(

@@ -36,6 +36,7 @@ py::dict solution_to_dict(detection::SchemeSolution sol) {
     out["cost"]              = sol.cost;
     out["eval_states"]       = as_pyarray(std::move(sol.eval_states));
     out["search_thresholds"] = as_pyarray(std::move(sol.search_thresholds));
+    out["zscores"]           = as_pyarray(std::move(sol.zscores));
     out["search_pd"]         = sol.search_pd;
     out["search_c"]          = sol.search_c;
     py::list shortlist;
@@ -78,7 +79,8 @@ void bind_thresholds(py::module_& m) {
                     const std::vector<
                         std::tuple<SizeType, float, float, SizeType, SizeType>>&
                         descent_passes,
-                    SizeType descent_nsignal) {
+                    SizeType descent_nsignal, std::vector<float> descent_start,
+                    bool descent_start_zscores) {
                      std::vector<detection::DescentPass> passes;
                      passes.reserve(descent_passes.size());
                      for (const auto& [n, margin, step, hi, lo] :
@@ -86,14 +88,16 @@ void bind_thresholds(py::module_& m) {
                          passes.push_back({n, margin, step, hi, lo});
                      }
                      const detection::SharedOptions shared{
-                         .min_pd          = min_pd,
-                         .w_terminal      = w_terminal,
-                         .beam_sigma      = beam_sigma,
-                         .reach_sigma     = reach_sigma,
-                         .fap             = fap,
-                         .final_threshold = final_threshold,
-                         .descent_passes  = std::move(passes),
-                         .descent_nsignal = descent_nsignal};
+                         .min_pd                = min_pd,
+                         .w_terminal            = w_terminal,
+                         .beam_sigma            = beam_sigma,
+                         .reach_sigma           = reach_sigma,
+                         .fap                   = fap,
+                         .final_threshold       = final_threshold,
+                         .descent_passes        = std::move(passes),
+                         .descent_nsignal       = descent_nsignal,
+                         .descent_start         = std::move(descent_start),
+                         .descent_start_zscores = descent_start_zscores};
                      const std::span<const float> pattern(
                          branching_pattern.data(), branching_pattern.size());
                      const auto exec = make_exec(backend, device, nthreads);
@@ -121,7 +125,9 @@ void bind_thresholds(py::module_& m) {
              py::arg("fap") = 0.0, py::arg("final_threshold") = 0.0F,
              py::arg("descent_passes") = std::vector<
                  std::tuple<SizeType, float, float, SizeType, SizeType>>{},
-             py::arg("descent_nsignal") = SizeType{1} << 15U,
+             py::arg("descent_nsignal")       = SizeType{1} << 15U,
+             py::arg("descent_start")         = std::vector<float>{},
+             py::arg("descent_start_zscores") = false,
              "ref_ducy is the reference pulse's full width at a tenth of "
              "maximum (FWTM), in turns: a Gaussian of rms width ref_ducy / "
              "(2 sqrt(2 ln 10)). A pulse of FWHM duty d needs ref_ducy = "

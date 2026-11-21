@@ -54,7 +54,7 @@ cells: it improves one schedule on fixed samples (see
 | `improved` | one simulation per parent cell, analytic beam (or `guess`) | none (`calibrate()` optional) | reference, paper figures |
 | `shared` (default) | shared signal trials, guided beam, one pass | `solve()`: tighten, repair, report | production |
 | `robust` | as `shared`, plus a second pass | `solve()`: shortlist, block refinement, repair, report | when ~2.5x the run time buys a lower L |
-| `descent` | none: constrained descent of one schedule on a signal bank and a noise genealogy | `solve()` is the whole mode: descent, pin, report | lowest C at Pd = `min_pd`; a fixed last threshold (`fap`) |
+| `descent` | none: constrained descent of one schedule on a signal bank and a noise genealogy | `solve()` is the whole mode: descent, pin, report | lowest C at Pd = `min_pd`; a floor on the last threshold (`fap`) |
 
 The EP planner uses `shared` on both backends, once per region; every chunk
 of the region runs that schedule (see
@@ -179,21 +179,52 @@ it, as in `shared`: a common shift of either sign pins Pd to `min_pd` + 2
 binomial standard errors on a fresh bank of 2^17 signal trials, a second
 fresh bank reports Pd, and a fresh noise evaluation reports C.
 
-**The last threshold.** `final_threshold` fixes γ_{M-1}; `fap` derives it as
-the S/N whose one-sided normal tail is `fap` / (nbins × number of boxcar
-widths), the per-fold false-alarm probability with the trials of one fold
-(`fap` 0 leaves it free; when both are set the higher threshold is used). The
-descent and the pins then move the other thresholds only. If the signal
-cannot reach the target through the fixed threshold alone, the status is
-`short` and `pd_ceiling` in the diagnostics is the Pd that threshold allows.
+**The last threshold.** `final_threshold` is a floor on γ_{M-1}; `fap`
+derives one as the S/N whose one-sided normal tail is `fap` / (nbins × number
+of boxcar widths), the false-alarm probability of one fold with the trials of
+its templates (`fap` 0: no floor; when both are set the higher one holds).
+This is a per-fold probability: for a false-alarm budget of the whole search,
+divide it by the number of folds that reach the last stage (`fap` 0.01 is
+only S/N 3.6-4.8 at 16-1024 bins, and a floor of 7 needs about 10^-9). The
+descent is free above the floor. A block that holds the last stage moves
+down with the last threshold stopping at the floor, and when a pin would
+take it below, it rests on the floor and the other stages shift to keep Pd;
+a floor below the free solution changes nothing. If the signal cannot reach
+the target through the floor alone, the status is `short` and `pd_ceiling`
+in the diagnostics is the Pd the floor allows. On 170 patterns of a
+production plan (16-128 bins, target 0.1) the free last thresholds were
+6.0-8.4, below 7 on 35 of them. With a floor of 7 those 35 end at 7.00-7.04
+with Pd 0.099-0.105 and cost 3.4 % more than the free schedule (geometric
+mean, judged on independent samples), the same within the noise as raising
+the last threshold of the free schedule and shifting the others (3.0 %).
+
+**Starting schedule.** `descent_start` replaces the start. The solutions of
+similar branching patterns are close to each other, so the schedule solved
+for a neighbouring pattern needs fewer passes: with a start the default is
+three passes (4096 trials at 0.4/0.2, 8192 at 0.3/0.1 with blocks up to 32,
+8192 at 0.2/0.05 with blocks up to 8). Measured on 43 pairs of neighbouring
+patterns (same parameter count and bin count), relative to the full solve
+from the default start: C 0.980 in 0.14 s with these three passes, 0.986 in
+0.11 s with the last two only (full: 0.24 s). The warm solves are slightly
+cheaper than the full one because the full solve is not converged to better
+than about 2 %.
+
+The solution also reports the schedule as `zscores`, (mean - threshold) /
+standard deviation of the unpruned signal score per stage, and
+`descent_start_zscores` reads the start in that form. Schedules carry over
+to other bin counts, S/N and pulse widths in z-scores: a chain of ten
+patterns through 16, 32, 64 and 128 bins, each started from the previous
+warm solution with two passes, stays at 0.95-1.04 of the full solves (mean
+0.98), and chains of thresholds at one bin count do not drift either (0.988
+over 37 links, worst link 1.085).
 
 What it guarantees and what it does not: at the end no block move of the last
 step size lowers C at equal Pd on its samples, which is a first-order
 (Kuhn-Tucker like) condition, not a proof of a global minimum. The evidence
 that it is close is empirical: in the research prototype, starts as
 different as an equal-quantile schedule and a pinned `robust` solution ended
-at the same cost, and the cost of the library mode scatters by 2-4 % between
-seeds.
+at the same cost, the cost of the library mode scatters by 2-4 % between
+seeds, and a warm start lowers it by about 2 % more.
 
 ## Measured behaviour
 
@@ -238,7 +269,10 @@ proxy bin count. On the CPU it took 2.8 s at 16 bins with 4 threads.
 On 230 branching patterns of a production plan (2-5 parameters, 16-1024
 bins, target 0.1, one seed each) every solve returned `met` or
 `within_tolerance`, and the Pd counted on 2^16 independent trials was
-0.0985-0.106.
+0.0985-0.106 (the count itself has an error of 1.2 %). Over 8 seeds on 22 of
+them, counted on 2^17 trials, Pd was 0.0991-0.1044 in all 176 solves, with a
+standard deviation per pattern of 0.0005-0.0012 (the binomial error of the
+pin), and C scattered by 1.8 % (median; 4.5 % on the worst pattern).
 
 ## Settings
 
@@ -250,8 +284,8 @@ noise population per cell. `prob_min`, `guess`, `beam_width` and
 
 Mode `descent` reads `min_pd`, `w_terminal`, `fap`, `final_threshold`,
 `descent_passes` (builds of the noise genealogy: trials, margin below the
-current schedule, step, largest and smallest block) and `descent_nsignal`
-(2^15; 2^14 costs 2-7 % in C). `run()` does nothing in this mode and the
+current schedule, step, largest and smallest block), `descent_nsignal`
+(2^15; 2^14 costs 2-7 % in C), `descent_start` and `descent_start_zscores`. `run()` does nothing in this mode and the
 constructor's `ntrials`, `nprobs`, `nthresholds` and beam settings are not
 used.
 
@@ -325,8 +359,9 @@ regression golden of both shared modes (valid for one toolchain);
   which need not be the global minimum.
 - `descent` does not look for a Pd above `min_pd` that lowers L (short
   patterns); it has no `save()` states and no shortlist.
-- `descent` has no memory budget for its samples and its time above 128
-  bins is that of three unpruned signal samples at the true bin count.
+- The samples of `descent` do not shrink with the bin count (2^15 signal
+  trials for the moves, 2^17 each for the pin and the report, as `solve()`
+  of the shared modes): above 128 bins they are its run time and its memory.
 - The EP planner still designs with `shared` and refits above 128 bins, so
   a bound on the last threshold is available from the scheme's API only.
 - The Pd guarantee is statistical (target `min_pd` + 2 standard errors of a
@@ -337,7 +372,7 @@ regression golden of both shared modes (valid for one toolchain);
   false-alarm rate. In the four search modes the last threshold is chosen by
   cost alone (`w_terminal` weighs the final survivors) and nothing bounds the
   false-alarm probability per final trial; `descent` with `fap` or
-  `final_threshold` fixes it (issue #42). At low S/N a high Pd can need a final list that keeps about
+  `final_threshold` bounds it from below (issue #42). At low S/N a high Pd can need a final list that keeps about
   10^-5 of the noise, so the next processing step must be cheap enough for it.
 - The reported C is an independent but noisy Monte Carlo estimate; on very
   large irregular trees it can be off by a large factor.

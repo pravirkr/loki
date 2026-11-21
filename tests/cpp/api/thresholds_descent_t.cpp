@@ -83,7 +83,7 @@ TEST_CASE("descent: solve() delivers the target Pd", "[thresholds][descent]") {
     REQUIRE(again.solve().thresholds == sol.thresholds);
 }
 
-TEST_CASE("descent: the last threshold can be held", "[thresholds][descent]") {
+TEST_CASE("descent: the last threshold has a floor", "[thresholds][descent]") {
     const auto backend =
         GENERATE(std::string_view{"cpu"}, std::string_view{"cuda"});
     if (skip_backend(backend)) {
@@ -91,8 +91,13 @@ TEST_CASE("descent: the last threshold can be held", "[thresholds][descent]") {
     }
     auto fixed     = make(backend, 7, options(6.5F));
     const auto sol = fixed.solve();
-    REQUIRE(sol.thresholds.back() == 6.5F);
+    REQUIRE(sol.thresholds.back() >= 6.5F);
     REQUIRE(sol.pd >= 0.95 * kMinPd);
+
+    // A floor below the free last threshold changes nothing.
+    auto free_scheme = make(backend, 7, options());
+    auto low_floor   = make(backend, 7, options(1.0F));
+    REQUIRE(low_floor.solve().thresholds == free_scheme.solve().thresholds);
 
     // A cut above what min_pd allows: no schedule, the ceiling is reported.
     auto unreachable = make(backend, 7, options(9.0F));

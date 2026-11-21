@@ -198,6 +198,15 @@ struct SharedOptions {
     /// trials of the signal sample its moves count Pd on.
     std::vector<DescentPass> descent_passes;
     SizeType descent_nsignal = SizeType{1} << 15U;
+    /// Mode "descent": the schedule the descent starts from, one threshold
+    /// per stage (empty: the same signal z-score at every stage). With the
+    /// schedule solved for a similar pattern, three shorter passes are the
+    /// default instead of six.
+    std::vector<float> descent_start;
+    /// descent_start holds signal z-scores (SchemeSolution::zscores of
+    /// another solve) instead of thresholds: use it when the bin count, the
+    /// S/N or the pulse differ between the two patterns.
+    bool descent_start_zscores = false;
 };
 
 /// How the Pd of a returned schedule compares with the target.
@@ -247,6 +256,10 @@ struct SchemeSolution {
     /// Raw search selection before tightening, repair and refinement, with
     /// its in-run Pd and C. Both are optimistic.
     std::vector<float> search_thresholds;
+    /// Mode "descent": the thresholds in units of the unpruned signal score,
+    /// (mean_s - threshold_s) / sd_s per stage. Similar branching patterns
+    /// have similar z-scores (see SharedOptions::descent_start_zscores).
+    std::vector<float> zscores;
     double search_pd{0.0};
     double search_c{0.0};
     /// Named counters and timings of the pipeline (shift applied, tightened

@@ -39,8 +39,7 @@ def _scheme(backend: str, seed: int = 7, mode: str = "descent", **opts):
         backend=backend,
         nthreads=2,
         min_pd=MIN_PD,
-        **extra,
-        **opts,
+        **{**extra, **opts},
         **KW,
     )
 
@@ -97,17 +96,57 @@ def test_descent_is_not_costlier_than_shared(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_descent_holds_the_last_threshold(backend: str) -> None:
+def test_descent_keeps_the_last_threshold_above_a_floor(backend: str) -> None:
     free = _scheme(backend).solve()
-    fixed = _scheme(backend, final_threshold=6.5).solve()
-    assert fixed["thresholds"][-1] == pytest.approx(6.5)
+    # a floor below the free last threshold changes nothing
+    low = _scheme(backend, final_threshold=1.0).solve()
+    np.testing.assert_array_equal(low["thresholds"], free["thresholds"])
+    floor = float(free["thresholds"][-1]) + 0.5
+    fixed = _scheme(backend, final_threshold=floor).solve()
+    assert fixed["thresholds"][-1] >= np.float32(floor)
     assert 0.0 < fixed["diagnostics"]["pd_ceiling"] < 1.0
     assert fixed["pd"] >= 0.95 * MIN_PD
-    # holding the last threshold cannot make the schedule cheaper
+    # a floor cannot make the schedule cheaper
     assert fixed["c"] >= 0.9 * free["c"]
     # fap: Q^-1(fap / (nbins x widths)), one-sided Gaussian tail
     by_fap = _scheme(backend, fap=1e-10).solve()
-    assert 6.5 < by_fap["thresholds"][-1] < 7.5
+    assert by_fap["thresholds"][-1] > 6.5
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_descent_starts_from_a_given_schedule(backend: str) -> None:
+    cold = _scheme(backend).solve()
+    # another seed's solution, shifted: a start that is near but not on target
+    donor = _scheme(backend, seed=3).solve()["thresholds"] + np.float32(0.2)
+    warm = _scheme(backend, descent_start=donor, descent_passes=PASSES[1:]).solve()
+    assert warm["delivery"] in ("met", "within_tolerance")
+    pd_w, cost_w = _judge(backend, warm["thresholds"])
+    _, cost_c = _judge(backend, cold["thresholds"])
+    assert pd_w >= 0.95 * MIN_PD
+    assert cost_w <= 1.1 * cost_c
+    with pytest.raises(Exception, match="one starting threshold per stage"):
+        _scheme(backend, descent_start=donor[:-1]).solve()
+
+
+def test_descent_starts_from_zscores_of_another_bin_count() -> None:
+    donor = _scheme("cpu", seed=3).solve()
+    assert donor["zscores"].shape == donor["thresholds"].shape
+    kw = {**KW, "nbins": 64}
+    args = {"mode": "descent", "backend": "cpu", "nthreads": 2, "min_pd": MIN_PD}
+    args |= {"descent_nsignal": 8192, "seed": 7}
+    dts = libloki.thresholds.DynamicThresholdScheme
+    cold = dts(BRANCHING, descent_passes=PASSES, **args, **kw).solve()
+    warm = dts(
+        BRANCHING,
+        descent_passes=PASSES[1:],
+        descent_start=donor["zscores"],
+        descent_start_zscores=True,
+        **args,
+        **kw,
+    ).solve()
+    assert warm["delivery"] in ("met", "within_tolerance")
+    assert 0.97 * MIN_PD <= warm["pd"] <= 1.05 * MIN_PD
+    assert warm["c"] <= 1.15 * cold["c"]
 
 
 def test_descent_reports_an_unreachable_target() -> None:
