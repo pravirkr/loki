@@ -114,6 +114,43 @@ def test_descent_keeps_the_last_threshold_above_a_floor(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_descent_default_plan_chooses_its_start(backend: str) -> None:
+    sol = libloki.thresholds.DynamicThresholdScheme(
+        BRANCHING,
+        mode="descent",
+        seed=7,
+        backend=backend,
+        nthreads=2,
+        min_pd=MIN_PD,
+        descent_nsignal=8192,
+        **KW,
+    ).solve()
+    assert sol["delivery"] in ("met", "within_tolerance")
+    assert 0.97 * MIN_PD <= sol["pd"] <= 1.05 * MIN_PD
+    diag = sol["diagnostics"]
+    # three levels, each run once or twice
+    assert 3 <= diag["descent_passes"] <= 6
+    # the cost of the smooth start over the flat one, on one noise sample
+    assert diag["start_cost_ratio"] > 0.0
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_descent_has_no_search_states(backend: str, tmp_path) -> None:
+    scheme = _scheme(backend)
+    scheme.solve()
+    for call in (
+        scheme.get_states,
+        lambda: scheme.get_best_path_thresholds(MIN_PD),
+        lambda: scheme.save(str(tmp_path)),
+    ):
+        with pytest.raises(RuntimeError, match="no search states"):
+            call()
+    # evaluate() works on the solved schedule
+    thresholds = scheme.solve()["thresholds"]
+    assert len(scheme.evaluate(thresholds, 1024, 3)) == len(thresholds)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_descent_starts_from_a_given_schedule(backend: str) -> None:
     cold = _scheme(backend).solve()
     # another seed's solution, shifted: a start that is near but not on target

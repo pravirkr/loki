@@ -105,6 +105,18 @@ void append_solution(const std::string& path, const SchemeSolution& sol) {
 
 } // namespace
 
+namespace {
+/// Mode "descent" searches no cells: it has no states, grid path or file.
+void check_has_search_states(DynamicThresholdMode mode, std::string_view what) {
+    if (mode == DynamicThresholdMode::kDescent) {
+        throw std::runtime_error(
+            "DynamicThresholdScheme::" + std::string(what) +
+            ": mode 'descent' has no search states; solve() returns its "
+            "schedule");
+    }
+}
+} // namespace
+
 class DynamicThresholdScheme::Impl {
 public:
     Impl(std::unique_ptr<detail::ThresholdsEngine> engine,
@@ -248,13 +260,13 @@ DynamicThresholdScheme::DynamicThresholdScheme(
                     wtsp,
                     beam_width,
                     trials_start,
-                    // On a GPU, mode "descent" uses a
-                    // shared-mode engine (its pools are
-                    // only allocated by run()).
-                    mode == "descent" ? "shared" : mode,
+                    // On a GPU, mode "descent" uses an engine without the
+                    // pilot simulation of the data-driven beams (its
+                    // pools are only allocated by run()).
+                    mode == "descent" ? "improved" : mode,
                     seed,
                     batch_size,
-                    guess,
+                    mode == "descent" ? "analytic" : guess,
                     shared,
                     exec),
           dynamic_threshold_mode_from_string(mode),
@@ -296,11 +308,13 @@ std::vector<SizeType> DynamicThresholdScheme::get_box_score_widths() const {
     return m_impl->m_engine->get_box_score_widths();
 }
 std::vector<State> DynamicThresholdScheme::get_states() const {
+    check_has_search_states(m_impl->m_mode, "get_states");
     return m_impl->m_engine->get_states();
 }
 
 std::vector<float>
 DynamicThresholdScheme::get_best_path_thresholds(float min_pd) const {
+    check_has_search_states(m_impl->m_mode, "get_best_path_thresholds");
     return m_impl->m_engine->get_best_path_thresholds(min_pd);
 }
 
@@ -367,6 +381,7 @@ const SchemeSolution* DynamicThresholdScheme::solution() const {
     return m_impl->m_solution ? &*m_impl->m_solution : nullptr;
 }
 std::string DynamicThresholdScheme::save(const std::string& outdir) const {
+    check_has_search_states(m_impl->m_mode, "save");
     const auto path = m_impl->m_engine->save(outdir);
     if (m_impl->m_solution) {
         append_solution(path, *m_impl->m_solution);

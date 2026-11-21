@@ -194,14 +194,14 @@ struct SharedOptions {
     /// Mode "descent": the last threshold is held at least at this S/N (the
     /// larger of it and the fap threshold). <= 0: unused.
     float final_threshold = 0.0F;
-    /// Mode "descent": the passes (empty: the validated default) and the
-    /// trials of the signal sample its moves count Pd on.
+    /// Mode "descent": the passes, each run once (empty: three default
+    /// levels, each repeated while it still gains), and the trials of the
+    /// signal sample its moves count Pd on.
     std::vector<DescentPass> descent_passes;
     SizeType descent_nsignal = SizeType{1} << 15U;
     /// Mode "descent": the schedule the descent starts from, one threshold
-    /// per stage (empty: the same signal z-score at every stage). With the
-    /// schedule solved for a similar pattern, three shorter passes are the
-    /// default instead of six.
+    /// per stage, e.g. the solution of a similar pattern (empty: the cheaper
+    /// of two built-in candidates, measured on one noise sample).
     std::vector<float> descent_start;
     /// descent_start holds signal z-scores (SchemeSolution::zscores of
     /// another solve) instead of thresholds: use it when the bin count, the

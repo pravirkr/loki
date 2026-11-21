@@ -167,12 +167,28 @@ goes through disjoint blocks of 2^k, ..., 2, 1 stages, with the block
 boundaries offset by half a block on alternate sweeps.
 
 A genealogy is valid only above its reference, so the descent rebuilds it a
-few times around the current schedule with a shrinking margin and step
-(`descent_passes`; the default is six builds: 4096 trials at margin 0.4 and
-step 0.2 twice, then 8192 trials at 0.3/0.1 and at 0.2/0.05 twice each, the
-last four with blocks of at most 32 and 8 stages). It starts from the
-schedule that lies the same number of signal standard deviations below the
-mean signal score at every stage, pinned to the target.
+few times around the current schedule with a shrinking margin and step. The
+default plan has three levels: 4096 trials at margin 0.4 and step 0.2 with
+every block size, 8192 trials at 0.3/0.1 with blocks of at most 32 stages,
+and 8192 trials at 0.2/0.05 with blocks of at most 8. A level runs a second
+time, on a new genealogy, when its first pass lowered the cost by more than
+25 %; `descent_passes` replaces the plan by a list of passes that each run
+once.
+
+**The start.** The solutions of long branching patterns share a shape in
+units of the unpruned signal score, z_s = (mean_s - γ_s) / σ_s: loose at the
+very first stages (z about 2), at the mean signal score within the first few
+percent of the stages (z about 0), then rising steadily to z about 1.7 at the
+end. The descent builds two candidates, that shape and the same z at every
+stage, pins both to the target, evaluates both on one noise sample (4096
+trials, the same for both) and starts from the cheaper one. On 127-stage
+patterns the shape is 1.1 to 6.8 times cheaper than the flat start at
+targets up to 0.5 and is chosen there; at a target of 0.9 and on patterns of
+4-32 segments the flat one usually is. From the flat start the same plan
+ends about 2 % above six fixed passes (worst case seen: 16 %), which is
+what a pattern unlike these would get. The
+shape is only a start: the moves are free, and a start that is far off makes
+the levels repeat.
 
 After the descent the schedule is measured on samples that took no part in
 it, as in `shared`: a common shift of either sign pins Pd to `min_pd` + 2
@@ -193,29 +209,25 @@ a floor below the free solution changes nothing. If the signal cannot reach
 the target through the floor alone, the status is `short` and `pd_ceiling`
 in the diagnostics is the Pd the floor allows. On 170 patterns of a
 production plan (16-128 bins, target 0.1) the free last thresholds were
-6.0-8.4, below 7 on 35 of them. With a floor of 7 those 35 end at 7.00-7.04
-with Pd 0.099-0.105 and cost 3.4 % more than the free schedule (geometric
-mean, judged on independent samples), the same within the noise as raising
-the last threshold of the free schedule and shifting the others (3.0 %).
+5.6-8.2, below 7 on 45 of them. With a floor of 7 those 45 end at 7.00-7.13
+with Pd 0.100-0.103 and cost 3.8 % more than the free schedule (geometric
+mean, judged on independent samples); raising the last threshold of the
+free schedule and shifting the others costs 2.9 %, so the descent with a
+floor is within 1 % of that baseline but not better than it.
 
-**Starting schedule.** `descent_start` replaces the start. The solutions of
-similar branching patterns are close to each other, so the schedule solved
-for a neighbouring pattern needs fewer passes: with a start the default is
-three passes (4096 trials at 0.4/0.2, 8192 at 0.3/0.1 with blocks up to 32,
-8192 at 0.2/0.05 with blocks up to 8). Measured on 43 pairs of neighbouring
-patterns (same parameter count and bin count), relative to the full solve
-from the default start: C 0.980 in 0.14 s with these three passes, 0.986 in
-0.11 s with the last two only (full: 0.24 s). The warm solves are slightly
-cheaper than the full one because the full solve is not converged to better
-than about 2 %.
+**A given start.** `descent_start` replaces the two candidates, e.g. by the
+schedule solved for a neighbouring pattern. Measured with fixed passes on 43
+pairs of neighbouring patterns (same parameter count and bin count),
+relative to a six-pass solve from the flat start: C 0.980 with one pass per
+level, 0.986 with the last two levels only (0.11 s against 0.24 s).
 
 The solution also reports the schedule as `zscores`, (mean - threshold) /
 standard deviation of the unpruned signal score per stage, and
 `descent_start_zscores` reads the start in that form. Schedules carry over
 to other bin counts, S/N and pulse widths in z-scores: a chain of ten
 patterns through 16, 32, 64 and 128 bins, each started from the previous
-warm solution with two passes, stays at 0.95-1.04 of the full solves (mean
-0.98), and chains of thresholds at one bin count do not drift either (0.988
+warm solution with two passes, stays at 0.95-1.04 of six-pass solves from
+the flat start (mean 0.98), and chains of thresholds at one bin count do not drift either (0.988
 over 37 links, worst link 1.085).
 
 What it guarantees and what it does not: at the end no block move of the last
@@ -223,8 +235,8 @@ step size lowers C at equal Pd on its samples, which is a first-order
 (Kuhn-Tucker like) condition, not a proof of a global minimum. The evidence
 that it is close is empirical: in the research prototype, starts as
 different as an equal-quantile schedule and a pinned `robust` solution ended
-at the same cost, the cost of the library mode scatters by 2-4 % between
-seeds, and a warm start lowers it by about 2 % more.
+at the same cost, the cost of the library mode scatters by 2-5 % between
+seeds, and chains of warm starts end about 2 % lower still.
 
 ## Measured behaviour
 
@@ -245,34 +257,38 @@ the lowest and highest seed, C the geometric mean):
 |---|---|---|---|---|---|
 | production, `min_pd` 0.1 | `shared` | 0.102-0.114 | 5.75e4 | 0.099 | 0.23 s |
 | | `robust` | 0.102-0.108 | 5.26e4 | 0.024 | 0.56 s |
-| | `descent` | 0.101-0.103 | 4.69e4 | 0.018 | 0.25 s |
+| | `descent` | 0.101-0.104 | 4.68e4 | 0.020 | 0.18 s |
 | production, `min_pd` 0.05 | `shared` | 0.051-0.056 | 1.29e4 | 0.129 | 0.23 s |
 | | `robust` | 0.052-0.052 | 1.14e4 | 0.029 | 0.54 s |
-| | `descent` | 0.051-0.053 | 1.09e4 | 0.036 | 0.26 s |
+| | `descent` | 0.051-0.053 | 1.07e4 | 0.030 | 0.19 s |
 
 On the short patterns of issue #15 the shared modes deliver a Pd well above
 the target because L is lowest there (8 segments, target 0.5: 0.75-0.78;
 16 segments, target 0.1: 0.50-0.55; 32 segments at S/N 6, target 0.1:
-0.11-0.19); `descent` delivers the target (0.501-0.505, 0.100-0.103 and
-0.100-0.102) in 0.02-0.08 s, at a higher L (8 segments: 4.0 against 3.0). That is the difference of the two
+0.11-0.19); `descent` delivers the target (0.502-0.505, 0.100-0.102 and
+0.100-0.102) in 0.02-0.05 s, at a higher L (8 segments: 4.0 against 3.0).
+That is the difference of the two
 objectives, not a defect of either: use a shared mode when the lowest cost
 per detection is wanted, `descent` when the target Pd is the requirement.
 
-On 127-stage patterns the descent takes 0.22-0.28 s on the GPU with 4 host
-threads at 16-128 bins (the host passes over the genealogy dominate, about
-0.15 s whatever the bin count): slower than `shared` at 16 bins (0.11 s),
-equal at 64, faster at 128 (0.43 s). Above 128 bins the unpruned signal
-samples dominate (the descent's 2^15 trials and the two final banks of 2^17):
-0.73 s at 256 bins, 2.1 s at 512 and 7.7 s at 1024, with no refit and no
-proxy bin count. On the CPU it took 2.8 s at 16 bins with 4 threads.
+On 127-stage patterns the descent takes 0.14-0.16 / 0.16 / 0.16-0.18 /
+0.23 s at 16 / 32 / 64 / 128 bins on the GPU with 4 host threads,
+constructor included (`shared` with its constructor, `run()` and `solve()`:
+0.11 / 0.14 / 0.23 / 0.43 s): slower than `shared` at 16 and 32 bins,
+faster from 64. The host passes over the genealogy are about 0.08 s of it
+whatever the bin count. Above 128 bins the unpruned signal samples dominate (the descent's
+2^15 trials and the two final banks of 2^17): 0.68 s at 256 bins, 2.0 s at
+512 and 7.4 s at 1024, with no refit and no proxy bin count. On the CPU it
+took 2.6 s at 16 bins with 4 threads.
 
 On 230 branching patterns of a production plan (2-5 parameters, 16-1024
 bins, target 0.1, one seed each) every solve returned `met` or
 `within_tolerance`, and the Pd counted on 2^16 independent trials was
-0.0985-0.106 (the count itself has an error of 1.2 %). Over 8 seeds on 22 of
-them, counted on 2^17 trials, Pd was 0.0991-0.1044 in all 176 solves, with a
-standard deviation per pattern of 0.0005-0.0012 (the binomial error of the
-pin), and C scattered by 1.8 % (median; 4.5 % on the worst pattern).
+0.0974-0.106 (the count itself has an error of 1.2 %). Over 8 seeds on 22 of
+them, counted on 2^17 trials, Pd was 0.0990-0.1044 in all 176 solves, with a
+standard deviation per pattern of 0.0004-0.0011 (the binomial error of the
+pin is 0.0008), and C scattered by 1.5 % (median; 4.8 % on the worst
+pattern).
 
 ## Settings
 
@@ -358,7 +374,9 @@ regression golden of both shared modes (valid for one toolchain);
   are heuristics. The descent stops at a schedule no block move improves,
   which need not be the global minimum.
 - `descent` does not look for a Pd above `min_pd` that lowers L (short
-  patterns); it has no `save()` states and no shortlist.
+  patterns). It has no search states: `save()`, `get_states()` and
+  `get_best_path_thresholds()` raise in this mode, and there is no
+  shortlist.
 - The samples of `descent` do not shrink with the bin count (2^15 signal
   trials for the moves, 2^17 each for the pin and the report, as `solve()`
   of the shared modes): above 128 bins they are its run time and its memory.

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -34,6 +35,12 @@ constexpr uint64_t kNoiseDescent  = 0xDE5C1000ULL; // + pass index
 constexpr uint64_t kBankPin       = 0xDE5C0002ULL;
 constexpr uint64_t kBankReport    = 0xDE5C0003ULL;
 constexpr uint64_t kNoiseReport   = 0xDE5C0004ULL;
+constexpr uint64_t kNoiseStart    = 0xDE5C0005ULL;
+// Noise trials of the evaluation that chooses between the starting schedules.
+constexpr SizeType kStartTrials = SizeType{1} << 12U;
+// A level of the default plan runs a second time when its first pass lowered
+// the cost on its genealogy by more than this fraction.
+constexpr double kRepeatDrop = 0.25;
 // A move must keep every threshold this far above the genealogy's schedule.
 constexpr float kMarginGuard = 0.02F;
 // A set of moves is kept only if the cost on the genealogy drops by this.
@@ -533,6 +540,32 @@ std::vector<float> zscore_start(const SignalSample& signal,
     return g;
 }
 
+/// The shape the solutions of long branching patterns share, in z-scores
+/// against the fraction of the stages done: loose at the very first stages,
+/// at the mean signal score soon after, then rising steadily to the end
+/// (measured: docs/performance.md). Only a candidate start: it is used when it
+/// costs less than the flat one, and the descent moves it freely.
+std::vector<float> smooth_start(std::span<const float> mean,
+                                std::span<const float> sd) {
+    constexpr std::array<float, 4> kX = {0.0F, 0.04F, 0.16F, 1.0F};
+    constexpr std::array<float, 4> kZ = {2.0F, 0.0F, -0.1F, 1.7F};
+    const SizeType nstages            = mean.size();
+    std::vector<float> g(nstages);
+    for (SizeType s = 0; s < nstages; ++s) {
+        const float x = nstages > 1 ? static_cast<float>(s) /
+                                          static_cast<float>(nstages - 1)
+                                    : 0.0F;
+        SizeType k    = 1;
+        while (k + 1 < kX.size() && x > kX[k]) {
+            ++k;
+        }
+        const float t = (x - kX[k - 1]) / (kX[k] - kX[k - 1]);
+        const float z = kZ[k - 1] + (t * (kZ[k] - kZ[k - 1]));
+        g[s]          = mean[s] - (z * sd[s]);
+    }
+    return g;
+}
+
 double seconds_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
         .count();
@@ -582,27 +615,16 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     double t_noise       = 0.0;
     double t_moves       = 0.0;
 
-    // Coarse to fine: small samples and large steps first. The first pass
-    // skips the finest blocks, the later ones the coarsest (measured:
-    // docs/performance.md).
-    constexpr SizeType kAll                       = SizeType{1} << 20U;
-    const std::vector<DescentPass> default_passes = {
-        {SizeType{1} << 12U, 0.4F, 0.2F, kAll, 4},
-        {SizeType{1} << 12U, 0.4F, 0.2F, kAll, 1},
-        {SizeType{1} << 13U, 0.3F, 0.1F, 32, 1},
-        {SizeType{1} << 13U, 0.3F, 0.1F, 32, 1},
-        {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1},
-        {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1}};
-    // From a schedule solved for a similar pattern the first coarse passes
-    // are not needed (measured: docs/performance.md).
-    const std::vector<DescentPass> warm_passes = {
+    // Coarse to fine: small samples and large steps first, the later levels
+    // without the coarsest blocks (measured: docs/performance.md). Without
+    // given passes a level is repeated while it still gains.
+    constexpr SizeType kAll               = SizeType{1} << 20U;
+    const std::vector<DescentPass> levels = {
         {SizeType{1} << 12U, 0.4F, 0.2F, kAll, 1},
         {SizeType{1} << 13U, 0.3F, 0.1F, 32, 1},
         {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1}};
-    const auto& passes =
-        !options.passes.empty()
-            ? options.passes
-            : (options.start.empty() ? default_passes : warm_passes);
+    const bool adaptive = options.passes.empty();
+    const auto& passes  = adaptive ? levels : options.passes;
     const SignalSample signal(
         engine.simulate_h1_scores(options.nsignal,
                                   derive_seed(seed, kSignalDescent)),
@@ -620,21 +642,11 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     // The schedule in units of the unpruned signal score carries over to
     // other patterns and bin counts: z_s = (mean_s - g_s) / sd_s.
     const auto [mean, sd] = signal.moments();
-    std::vector<float> g  = options.start.empty()
-                                ? zscore_start(signal, mean, sd, target)
-                                : options.start;
-    error_check::check_equal(g.size(), nstages,
-                             "descent: one starting threshold per stage");
-    if (!options.start.empty() && options.start_zscores) {
-        for (SizeType s = 0; s < nstages; ++s) {
-            g[s] = mean[s] - (options.start[s] * sd[s]);
-        }
-    }
-    g[nstages - 1] = std::max(g[nstages - 1], floor);
     // A common shift of every stage; if it takes the last threshold below
     // the floor, the last one rests on the floor and the others shift.
     const auto pin = [&](std::vector<float>& schedule) {
-        const float shift = signal.pin_shift(schedule, target, nstages);
+        schedule[nstages - 1] = std::max(schedule[nstages - 1], floor);
+        const float shift     = signal.pin_shift(schedule, target, nstages);
         if (schedule[nstages - 1] + shift >= floor) {
             for (SizeType s = 0; s < nstages; ++s) {
                 schedule[s] += shift;
@@ -647,7 +659,40 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
             schedule[s] += rest;
         }
     };
-    pin(g);
+    std::vector<float> g;
+    if (options.start.empty()) {
+        // Two candidates, pinned to the target: the same z-score at every
+        // stage, and the shape the solutions of long patterns share. The one
+        // that costs less on one noise sample is the start.
+        g = zscore_start(signal, mean, sd, target);
+        pin(g);
+        std::vector<float> smooth = smooth_start(mean, sd);
+        pin(smooth);
+        const uint64_t noise_seed = derive_seed(seed, kNoiseStart);
+        const auto cost_of        = [&](const std::vector<float>& schedule) {
+            return total_cost(
+                engine.evaluate(schedule, kStartTrials, noise_seed, true)
+                    .back(),
+                w_terminal);
+        };
+        const double cost_flat   = cost_of(g);
+        const double cost_smooth = cost_of(smooth);
+        out.diagnostics.emplace_back("start_cost_ratio",
+                                     cost_smooth / cost_flat);
+        if (cost_smooth < cost_flat) {
+            g = std::move(smooth);
+        }
+    } else {
+        g = options.start;
+        error_check::check_equal(g.size(), nstages,
+                                 "descent: one starting threshold per stage");
+        if (options.start_zscores) {
+            for (SizeType s = 0; s < nstages; ++s) {
+                g[s] = mean[s] - (options.start[s] * sd[s]);
+            }
+        }
+        pin(g);
+    }
 
     std::vector<SizeType> scales;
     for (SizeType size = std::bit_ceil(std::max<SizeType>(nstages, 2)) / 2;
@@ -655,15 +700,22 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         scales.push_back(size);
     }
     SizeType nmoves = 0;
+    bool repeat     = false;
     std::vector<double> dc_up;
     std::vector<double> dc_dn;
     std::vector<double> dp_up;
     std::vector<double> dp_dn;
     std::vector<float> g_ref(nstages);
     std::vector<float> candidate(nstages);
-    for (SizeType ipass = 0; ipass < passes.size(); ++ipass) {
-        const auto& pass = passes[ipass];
-        const float d    = pass.step;
+    SizeType ipass = 0;
+    for (SizeType ilevel = 0; ilevel < 2 * passes.size(); ++ilevel) {
+        // Every level may run twice in the default plan (odd ilevel: the
+        // repeat, entered only if the first pass gained enough).
+        const auto& pass = passes[ilevel / 2];
+        if (ilevel % 2 == 1 && !repeat) {
+            continue;
+        }
+        const float d = pass.step;
         std::vector<float> down(nstages, d);
         for (SizeType s = 0; s < nstages; ++s) {
             g_ref[s] = g[s] - pass.margin;
@@ -677,6 +729,7 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         t0          = std::chrono::steady_clock::now();
         double cost = bank.evaluate(g, d);
         bank.accept(g);
+        const double cost_begin = cost;
         for (const SizeType size : scales) {
             if (size > pass.max_block || size < pass.min_block) {
                 continue;
@@ -748,6 +801,9 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
             }
         }
         t_moves += seconds_since(t0);
+        ++ipass;
+        repeat = adaptive && ilevel % 2 == 0 &&
+                 cost < (1.0 - kRepeatDrop) * cost_begin;
     }
     out.search_thresholds = g;
     out.search_pd         = signal.pd(g, signal.size());
@@ -809,8 +865,7 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         out.zscores[s] = (mean[s] - g[s]) / sd[s];
     }
     out.thresholds = std::move(g);
-    out.diagnostics.emplace_back("descent_passes",
-                                 static_cast<double>(passes.size()));
+    out.diagnostics.emplace_back("descent_passes", static_cast<double>(ipass));
     out.diagnostics.emplace_back("descent_moves", static_cast<double>(nmoves));
     out.diagnostics.emplace_back("pin_shift", static_cast<double>(pin_shift));
     out.diagnostics.emplace_back("seconds_noise", t_noise);

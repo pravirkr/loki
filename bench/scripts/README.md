@@ -69,7 +69,7 @@ expected bit-identical between builds that keep the arithmetic.
 | `golden_schemes.py` | Bit-exact CUDA golden harness (`make`, `check`, `repro`). |
 | `golden_evaluate.py` | Bit-exact CUDA golden of `evaluate()` (normal, H0-floor and H1-extinction schedules, several nbins and trial counts): `make`, `check`. Goldens live in the ignored `bench/scripts/schemes/golden/`. |
 | `golden_solve.py` | Bit-exact CUDA regression golden of `solve()` in modes `shared` and `robust` on the `solve_suite.py` cases: `record`, `check`. Writes `golden/solve_golden.json` (ignored); valid for the recording toolchain only. |
-| `solve_suite.py` | Reduced version of the workspace suite: `solve()` on the production and issue #15 patterns, judged by a direct count of fresh signal trials and an independent noise evaluation (gates: delivered Pd, reported against judged Pd). Any backend; `--mode shared|robust`. |
+| `solve_suite.py` | Reduced version of the workspace suite: `solve()` on the production and issue #15 patterns, judged by a direct count of fresh signal trials and an independent noise evaluation (gates: delivered Pd, reported against judged Pd). Any backend; `--mode shared|robust|descent`. |
 | `nbins_proxy_study.py` | The planner searches thresholds at a small simulation nbins: rescores proxy and native schedules at the true nbins (Pd, cost per detection). |
 | `bias_study.py` | In-run against re-scored cost and Pd of the selected path, over seeds and search trial counts. |
 | `pd_calibration_study.py` | Why the selected path delivers less than `min_pd` (`cells`, `ntrials`, `modes`) and what `calibrate()` delivers (`calib`, with `--guess analytic|pilot`). Results go to `bench/scripts/results/pd_calibration/`. |

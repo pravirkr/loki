@@ -360,7 +360,8 @@ struct DescentOptions {
     float final_threshold{0.0F};
     /// Trials of the signal sample the descent counts Pd on.
     SizeType nsignal{SizeType{1} << 15U};
-    /// Passes (empty: the validated default; a shorter one with a start).
+    /// Passes, each run once (empty: the default levels, each repeated
+    /// while it still gains).
     std::vector<DescentPass> passes;
     /// Starting schedule, e.g. the solution of a similar pattern (empty: the
     /// same signal z-score at every stage).

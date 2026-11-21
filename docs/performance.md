@@ -895,7 +895,16 @@ What the measurements say about the existing modes:
   stage move down once the last threshold sat on the floor ended 1.1 %
   above the baseline (29 of 35 patterns worse).
 
-The bank descent against the search modes, same suite, 8 seeds:
+Two plans of the descent appear below. The first version ran six passes
+from the flat start (the same signal z-score at every stage): 4096 trials at
+margin 0.4 and step 0.2 twice, then 8192 trials at 0.3/0.1 and at 0.2/0.05
+twice each. The current default chooses its start by a measurement and runs
+three levels, repeating a level while it gains ("Start by measurement,
+levels that repeat" below). The numbers are for the six-pass plan unless
+they are marked as the current default.
+
+The bank descent (six-pass plan) against the search modes, same suite, 8
+seeds:
 
 | case | mode | Pd (min-max) | C (geomean) | cv of C | time |
 |---|---|---|---|---|---|
@@ -990,6 +999,72 @@ at 0.3/0.1 and 0.2/0.05) costs 2.0 % more C (worst case 5.7 %) in 160 ms
 instead of 230 ms; with hat moves it was 5.2 % more. It can be passed as
 `descent_passes` where the time matters more.
 
+Start by measurement, levels that repeat (the current default). Because the
+solutions share a shape, a fixed smooth z-profile (2.0 at the first stage,
+0 after 4 % of the stages, -0.1 after 16 %, 1.7 at the last one) is a
+second candidate start next to the flat one; both are pinned and evaluated
+on the same 4096 noise trials and the cheaper one is taken. On the 127-stage
+patterns the shape costs 1.1-6.8 times less than the flat start and is
+chosen in 25 of 26 cases (targets of 0.05, 0.1 and 0.5; at a target of 0.9
+the flat start is 1.4 times cheaper); on 4-32 segments the flat start is
+cheaper in 4 of 5 cases (the shape, forced there with three passes, ends up
+to 49 % above, at 8 segments). The plan is one pass per level (0.4/0.2 all blocks, 0.3/0.1
+blocks up to 32, 0.2/0.05 blocks up to 8), a level running a second time
+when its first pass lowered the genealogy's cost by more than a fraction r.
+C relative to the six-pass plan, 12 cases (3 short, 9 of 127 stages) × 3
+seeds, judged on independent samples:
+
+| plan | C / six-pass (geomean) | worst case | median time | passes on 127 stages |
+|---|---|---|---|---|
+| six passes, flat start | 1 | | 234 ms | 6 |
+| measured start, r = 0.10 | 0.988 | 1.008 | 189 ms | 4-5.3 |
+| measured start, r = 0.15 | 0.993 | 1.008 | 178 ms | 4-4.7 |
+| measured start, r = 0.25 (default) | 0.996 | 1.022 | 156 ms | 3-4.3 |
+| measured start, never repeat | 0.995 | 1.022 | 144 ms | 3 |
+| flat start only, r = 0.15 | 1.010 | 1.043 | 178 ms | 4-5.3 |
+
+What a pattern outside this family gets is the flat start with the same
+levels. Forced on the 26 cases of 127 stages (one seed each): C 1.023 of the
+six-pass plan (worst 1.16, a 5-parameter pattern at 32 bins; 4.3 passes on
+average), against 0.995 (worst 1.05, the target of 0.9) for the default.
+With r = 0.15 the flat start alone was 1.010 (worst 1.04) in the table
+above: lower r if such patterns matter more than 20 ms.
+
+The current default on the checks above:
+
+- Suite, 8 seeds: production pattern at 0.1: Pd 0.101-0.104, C 4.68e4 (cv
+  0.020), 0.18 s; at 0.05: Pd 0.051-0.053, C 1.07e4 (cv 0.030), 0.19 s. The
+  short patterns run three passes and end 0.0-2.5 % above the six-pass plan
+  (32 segments at S/N 6: C 4.25 against 4.15) in 0.02-0.05 s.
+- 230 patterns, one seed: all `met` (212) or `within_tolerance` (18), Pd on
+  2^16 independent trials 0.0974-0.106, reported C 0.991 of the six-pass
+  plan's (0.988 up to 128 bins), free last thresholds 5.6-8.2 (below 7 on 69).
+- 22 patterns × 8 seeds: Pd 0.0990-0.1044 over 176 solves (median 0.1013,
+  standard deviation per pattern 0.0004-0.0011), cv of C 0.015 (median) and
+  0.048 (worst).
+- Time on 127 stages, 3 parameters, constructor + `run()` + `solve()`,
+  medians of repeated runs: `descent` 0.14-0.16 / 0.16 / 0.16-0.18 / 0.23 s
+  at 16 / 32 / 64 / 128 bins against `shared` 0.11 / 0.14 / 0.23 / 0.43 s
+  (constructor 13-18 ms, `run()` 62 / 85 / 148 / 304 ms, `solve()` 33 / 43
+  / 66 / 112 ms). The descent is slower than `shared` at 16 and 32 bins and
+  faster from 64. `solve()` of the descent alone: 0.12
+  / 0.15 / 0.22 / 0.67 / 2.0 / 7.5 s at 16 / 64 / 128 / 256 / 512 / 1024
+  bins (host moves 0.07-0.10 s, genealogy builds 0.02-0.33 s). Its engine
+  is built without the pilot simulation of the data-driven beams, which the
+  mode never reads: constructor 6-10 ms at every bin count instead of 19 ms
+  at 16 bins and 720 ms at 1024. CPU, 16 bins, 4 threads: 2.6 s. Where a
+  `solve()` of 140 ms at 16 bins goes: host moves 85 ms (17 steps of three
+  passes, about 5 ms each), genealogy builds 24, final samples 14, start
+  selection 7, signal sample 4 and its transposition 6. At 128 bins the
+  final samples are 63 ms and the moves 98. The remaining gap to `shared`
+  at 16 bins (about 30 ms) is in the host moves.
+- Floor of 7, 170 patterns up to 128 bins: active on 45, last threshold
+  7.00-7.13, Pd 0.100-0.103; C 3.8 % above the free schedule against 2.9 %
+  for the baseline (free schedule, last threshold raised, others shifted),
+  i.e. 1.009 of the baseline (0.97-1.03): slightly worse than with six
+  passes (1.004). Of the 125 patterns where the floor is inactive, 116 are
+  bit-identical with and without it.
+
 Kept:
 
 - Multi-scale block moves. Single-stage moves stall 5-8 % above `robust` at
@@ -1022,4 +1097,5 @@ Do not retry:
 | `improved` as the initialiser of the descent | Saves about two genealogy builds (6-22 ms) and costs a search of 24-142 ms. The start a fixed number of signal standard deviations below the mean signal score needs no search. |
 | Sorting the genealogy by parent, or a branch-free scatter, for the backward pass | The scatter-add costs about 4 ns per element either way. |
 | A candidate list for the backward pass when the reference is far below the schedule | With the reference a full margin below, nearly every trial is listed; no gain. |
+| Less memory traffic in the genealogy passes: 16-bit parents and survivor lists, no separate "alive before the stage" buffer (14 MB to 9 MB per forward pass) | Bit-identical schedules, `solve()` 124 ms against 125 ms at 16 bins, 145 against 149 at 64, 215 against 227 at 128: the passes are not bound by memory. |
 | More host threads for the descent | Only the block deltas run in parallel; the forward and backward passes are sequential over stages, and idle threads spinning between the parallel loops slow them. |
