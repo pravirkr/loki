@@ -346,6 +346,12 @@ public:
                                           uint64_t seed) const override {
         return m_eval->simulate_h1_scores(ntrials, seed);
     }
+    detail::NoiseGenealogy
+    simulate_h0_genealogy(std::span<const float> thresholds,
+                          SizeType ntrials,
+                          uint64_t seed) const override {
+        return m_eval->simulate_h0_genealogy(thresholds, ntrials, seed);
+    }
 
     // ---- search ----
     void run(SizeType thres_neigh, bool show_progress) override {

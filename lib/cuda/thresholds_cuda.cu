@@ -534,6 +534,36 @@ __global__ void evaluate_finalize_kernel(const float* __restrict__ folds,
     }
 }
 
+// simulate_h0_genealogy(): the slot of the previous stage that every slot of
+// the next stage continues. Mirrors evaluate_stage_kernel's choice of the
+// source row (H0 branch): slot t < nsurv continues survivor t, the others a
+// uniformly drawn survivor. kInvalidIndex when no trial survived (the host
+// substitutes the best trial, as the floor does).
+__global__ void genealogy_parent_kernel(const uint32_t* __restrict__ idx,
+                                        const uint32_t* __restrict__ n_sel,
+                                        uint32_t* __restrict__ parent,
+                                        uint64_t seed,
+                                        uint32_t next_stage,
+                                        uint32_t ntrials) {
+    const uint32_t t = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (t >= ntrials) {
+        return;
+    }
+    const uint32_t nsurv = n_sel[0];
+    if (nsurv == 0) {
+        parent[t] = kInvalidIndex;
+        return;
+    }
+    uint32_t src = t;
+    if (t >= nsurv) {
+        const float u =
+            eval_uniform(seed, eval_subseq(3U, next_stage, 0U, 0U, t));
+        src = min(static_cast<uint32_t>(u * static_cast<float>(nsurv)),
+                  nsurv - 1U);
+    }
+    parent[t] = idx[src];
+}
+
 // ------------------------------ legacy mode --------------------------------
 
 // Compacts the valid items of the stage in item order: item_rng_idx[item] is
@@ -1912,6 +1942,139 @@ public:
         return states;
     }
 
+    /// One noise (H0) evaluation of @p thresholds that keeps, per stage,
+    /// every trial's score and the slot of the previous stage it continues
+    /// (evaluate()'s streams and arithmetic for @p seed, H0 branch only).
+    detail::NoiseGenealogy
+    simulate_h0_genealogy(std::span<const float> thresholds,
+                          SizeType ntrials,
+                          uint64_t seed) const {
+        if (thresholds.size() != m_nstages) {
+            throw std::invalid_argument(
+                "ThresholdsCuda::simulate_h0_genealogy: need one threshold "
+                "per stage");
+        }
+        if (ntrials == 0 || ntrials > (1U << 20U)) {
+            throw std::invalid_argument(
+                "ThresholdsCuda::simulate_h0_genealogy: ntrials must be in "
+                "[1, 2^20]");
+        }
+        const auto ntrials_u = static_cast<uint32_t>(ntrials);
+        const auto padded    = static_cast<uint32_t>(m_nbins_padded);
+        const SizeType rows  = ntrials * m_nbins_padded;
+
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        const CudaStream stream;
+        thrust::device_vector<float> buf_a(rows, 0.0F);
+        thrust::device_vector<float> buf_b(rows, 0.0F);
+        thrust::device_vector<float> scores(m_nstages * ntrials, 0.0F);
+        thrust::device_vector<uint32_t> idx(ntrials);
+        thrust::device_vector<uint32_t> parent(m_nstages * ntrials, 0U);
+        thrust::device_vector<uint32_t> n_sel(2, 0U);
+        thrust::device_vector<uint32_t> counts(2 * (m_nstages + 1), ntrials_u);
+        size_t temp_bytes = 0;
+        cuda_utils::check_cuda_call(
+            cub::DeviceSelect::If(
+                nullptr, temp_bytes, thrust::counting_iterator<uint32_t>(0),
+                thrust::raw_pointer_cast(idx.data()),
+                thrust::raw_pointer_cast(n_sel.data()), ntrials_u,
+                AboveThreshold{thrust::raw_pointer_cast(scores.data()), 0.0F},
+                stream),
+            "cub::DeviceSelect::If size query failed");
+        thrust::device_vector<uint8_t> temp(temp_bytes);
+
+        constexpr uint32_t kBlock = 256;
+        const dim3 grid((ntrials_u + kBlock - 1) / kBlock);
+        cuda_utils::check_kernel_launch_params(grid, dim3(kBlock));
+        simulate_folds_init_eval_kernel<<<grid, kBlock, 0, stream>>>(
+            thrust::raw_pointer_cast(buf_a.data()),
+            thrust::raw_pointer_cast(m_profile_d.data()), padded, m_bias_snr,
+            1.0F, seed, ntrials_u, 0U, 1U);
+        cuda_utils::check_last_cuda_error("simulate_folds_init_eval_kernel");
+
+        float var_in            = 1.0F;
+        constexpr float kVarAdd = 1.0F;
+        float* cur_in           = thrust::raw_pointer_cast(buf_a.data());
+        float* cur_out          = thrust::raw_pointer_cast(buf_b.data());
+        for (SizeType istage = 0; istage < m_nstages; ++istage) {
+            TrialSimParams params = trial_sim_params(var_in, kVarAdd);
+            params.seed           = seed;
+            uint32_t* n_in =
+                thrust::raw_pointer_cast(counts.data()) + (2 * istage);
+            uint32_t* n_out =
+                thrust::raw_pointer_cast(counts.data()) + (2 * (istage + 1));
+            float* stage_scores =
+                thrust::raw_pointer_cast(scores.data()) + (istage * ntrials);
+            with_scorer([&]<typename Scorer>() {
+                ScorerLaunch<Scorer>::evaluate_stage(
+                    grid, kBlock, stream, cur_in, n_in, cur_out, stage_scores,
+                    params, ntrials_u, static_cast<uint32_t>(istage), 0U, 0U,
+                    ntrials_u);
+            });
+            cuda_utils::check_last_cuda_error("evaluate_stage_kernel");
+            cuda_utils::check_cuda_call(
+                cub::DeviceSelect::If(
+                    thrust::raw_pointer_cast(temp.data()), temp_bytes,
+                    thrust::counting_iterator<uint32_t>(0),
+                    thrust::raw_pointer_cast(idx.data()),
+                    thrust::raw_pointer_cast(n_sel.data()), ntrials_u,
+                    AboveThreshold{stage_scores, thresholds[istage]}, stream),
+                "cub::DeviceSelect::If failed");
+            if (istage + 1 < m_nstages) {
+                genealogy_parent_kernel<<<grid, kBlock, 0, stream>>>(
+                    thrust::raw_pointer_cast(idx.data()),
+                    thrust::raw_pointer_cast(n_sel.data()),
+                    thrust::raw_pointer_cast(parent.data()) +
+                        (istage * ntrials),
+                    seed, static_cast<uint32_t>(istage + 1), ntrials_u);
+                cuda_utils::check_last_cuda_error("genealogy_parent_kernel");
+            }
+            evaluate_gather_kernel<<<grid, kBlock, 0, stream>>>(
+                cur_out, thrust::raw_pointer_cast(idx.data()),
+                thrust::raw_pointer_cast(n_sel.data()), cur_in, ntrials_u,
+                padded, 1U);
+            cuda_utils::check_last_cuda_error("evaluate_gather_kernel");
+            evaluate_finalize_kernel<kBlock><<<1, kBlock, 0, stream>>>(
+                cur_out, stage_scores, thrust::raw_pointer_cast(n_sel.data()),
+                cur_in, n_out, ntrials_u, padded);
+            cuda_utils::check_last_cuda_error("evaluate_finalize_kernel");
+            var_in += kVarAdd;
+        }
+        detail::NoiseGenealogy out;
+        out.ntrials = ntrials;
+        out.scores.resize(m_nstages * ntrials);
+        out.parent.resize(m_nstages * ntrials);
+        out.pass_rate.resize(m_nstages);
+        std::vector<uint32_t> counts_h(counts.size());
+        const auto download = [&](void* dst, const void* src, size_t bytes) {
+            cuda_utils::check_cuda_call(cudaMemcpyAsync(dst, src, bytes,
+                                                        cudaMemcpyDeviceToHost,
+                                                        stream),
+                                        "cudaMemcpyAsync failed");
+        };
+        download(out.scores.data(), thrust::raw_pointer_cast(scores.data()),
+                 out.scores.size() * sizeof(float));
+        download(out.parent.data(), thrust::raw_pointer_cast(parent.data()),
+                 out.parent.size() * sizeof(uint32_t));
+        download(counts_h.data(), thrust::raw_pointer_cast(counts.data()),
+                 counts_h.size() * sizeof(uint32_t));
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
+        for (SizeType s = 0; s < m_nstages; ++s) {
+            out.pass_rate[s] = static_cast<double>(counts_h[2 * (s + 1)]) /
+                               static_cast<double>(ntrials);
+            // The floor kept the best trial of a stage without survivors.
+            uint32_t* row = out.parent.data() + (s * ntrials);
+            if (s + 1 < m_nstages && row[0] == kInvalidIndex) {
+                const float* sc = out.scores.data() + (s * ntrials);
+                const auto best = static_cast<uint32_t>(
+                    std::max_element(sc, sc + ntrials) - sc);
+                std::fill_n(row, ntrials, best);
+            }
+        }
+        return out;
+    }
+
     /// evaluate()'s H1 trials for @p seed with nothing pruned: the same
     /// streams and arithmetic, H1 branch only, no compaction and no host
     /// syncs between stages. Stage-major (nstages x ntrials).
@@ -2340,6 +2503,12 @@ public:
     std::vector<float> simulate_h1_scores(SizeType ntrials,
                                           uint64_t seed) const override {
         return m_impl.simulate_h1_scores(ntrials, seed);
+    }
+    detail::NoiseGenealogy
+    simulate_h0_genealogy(std::span<const float> thresholds,
+                          SizeType ntrials,
+                          uint64_t seed) const override {
+        return m_impl.simulate_h0_genealogy(thresholds, ntrials, seed);
     }
     std::unique_ptr<detail::SignalBank>
     make_signal_bank(SizeType n, uint64_t seed) const override {

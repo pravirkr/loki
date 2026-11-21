@@ -1303,6 +1303,19 @@ public:
         return h1_scores;
     }
 
+    detail::NoiseGenealogy
+    simulate_h0_genealogy(std::span<const float> thresholds,
+                          SizeType ntrials,
+                          uint64_t seed) const override {
+        detail::NoiseGenealogy genealogy;
+        genealogy.ntrials = ntrials;
+        genealogy.scores.assign(m_nstages * ntrials, 0.0F);
+        genealogy.parent.assign(m_nstages * ntrials, 0U);
+        genealogy.pass_rate.assign(m_nstages, 0.0);
+        evaluate_impl(thresholds, ntrials, seed, nullptr, true, &genealogy);
+        return genealogy;
+    }
+
     std::vector<SizeType>
     get_current_thresholds_idx(SizeType istage) const override {
         return detail::beam_indices(m_thresholds, m_beam.lo[istage],
@@ -1312,12 +1325,16 @@ public:
 private:
     /// evaluate(); when @p h1_scores is set, also stores every stage's H1
     /// scores (stage-major) before pruning. @p h0_only skips the H1 branch
-    /// (success_h1 = 1 in the states).
-    std::vector<State> evaluate_impl(std::span<const float> thresholds,
-                                     SizeType ntrials,
-                                     uint64_t eval_seed,
-                                     std::vector<float>* h1_scores,
-                                     bool h0_only) const {
+    /// (success_h1 = 1 in the states). With @p genealogy (and h0_only), the
+    /// noise scores of every stage and the slot each trial continues are
+    /// stored.
+    std::vector<State>
+    evaluate_impl(std::span<const float> thresholds,
+                  SizeType ntrials,
+                  uint64_t eval_seed,
+                  std::vector<float>* h1_scores,
+                  bool h0_only,
+                  detail::NoiseGenealogy* genealogy = nullptr) const {
         if (thresholds.size() != m_nstages) {
             throw std::invalid_argument(
                 "DynamicThresholdScheme::evaluate: need one threshold per "
@@ -1336,6 +1353,8 @@ private:
         std::vector<float> noise(branch_hi * ntrials * nbins, 0.0F);
         std::vector<float> scores(branch_hi * ntrials, 0.0F);
         std::array<uint32_t, 2> n_in = {ntrials_u, ntrials_u};
+        // Slot (of its stage) of every compacted H0 survivor.
+        std::vector<uint32_t> order(genealogy != nullptr ? ntrials : 0);
         // Every draw comes from a stream keyed on (purpose, stage, branch,
         // trial), and the survivor compaction below stays serial, so the
         // states are identical for any thread count.
@@ -1389,6 +1408,10 @@ private:
                         static_cast<uint32_t>(draw * static_cast<float>(nsurv)),
                         nsurv - 1U);
                 }
+                if (genealogy != nullptr && istage > 0) {
+                    genealogy->parent[((istage - 1) * ntrials) + trial] =
+                        order[src];
+                }
                 const float* in =
                     folds.data() + (((branch * ntrials) + src) * nbins);
                 const float* nz =
@@ -1414,6 +1437,10 @@ private:
                 std::copy_n(scores.data() + ntrials, ntrials,
                             h1_scores->data() + (istage * ntrials));
             }
+            if (genealogy != nullptr) {
+                std::copy_n(scores.data(), ntrials,
+                            genealogy->scores.data() + (istage * ntrials));
+            }
             std::array<uint32_t, 2> counts = {0, h0_only ? ntrials_u : 0U};
             if (h1_scores != nullptr) {
                 // Nothing is pruned: every trial survives in its own slot, so
@@ -1436,6 +1463,9 @@ private:
                         float* dst =
                             folds.data() + (((branch * ntrials) + n) * nbins);
                         std::copy_n(src, nbins, dst);
+                        if (genealogy != nullptr) {
+                            order[n] = trial;
+                        }
                         ++n;
                     }
                 }
@@ -1447,6 +1477,9 @@ private:
                         branch_scores);
                     std::copy_n(generated.data() + (best * nbins), nbins,
                                 folds.data());
+                    if (genealogy != nullptr) {
+                        order[0] = best;
+                    }
                     n = 1;
                 }
                 counts[branch] = n;
@@ -1457,6 +1490,10 @@ private:
                 thresholds[istage], static_cast<float>(counts[0]) / ntrials_f,
                 static_cast<float>(counts[1]) / ntrials_f,
                 m_branching_pattern[istage]);
+            if (genealogy != nullptr) {
+                genealogy->pass_rate[istage] = static_cast<double>(counts[0]) /
+                                               static_cast<double>(ntrials);
+            }
             states[istage] = next;
             prev           = next;
             var_in += 1.0F;

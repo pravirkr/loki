@@ -3,8 +3,8 @@
 `loki::detection::DynamicThresholdScheme` (Python
 `libloki.thresholds.DynamicThresholdScheme`) designs the pruning thresholds of
 the hierarchical (EP) search: one threshold per stage. This page describes the
-problem, the four modes, the default pipeline (`shared`) and why it is built
-the way it is. Code comments only describe the implementation.
+problem, the five modes, the default pipeline (`shared`), the bank descent
+(`descent`) and why they are built the way they are. Code comments only describe the implementation.
 
 ## Problem
 
@@ -37,9 +37,14 @@ often have their optimum there).
 
 Neither C nor Pd has a closed form (correlated, maximum-over-templates random
 walks over up to ~130 stages), so both are Monte Carlo estimates, and an
-exhaustive search over the schedules is intractable. Every mode is a dynamic
+exhaustive search over the schedules is intractable. Four modes are a dynamic
 programme over cells (stage, threshold, Pd bin) that keeps one candidate per
 cell: an approximate, compressed-state search with no optimality guarantee.
+The cell is not a sufficient state (two paths into one cell leave different
+noise populations behind), its edge weights are Monte Carlo estimates, and
+the grid and the beam limit what it can reach. Mode `descent` does not search
+cells: it improves one schedule on fixed samples (see
+[the bank descent](#the-bank-descent)).
 
 ## Modes
 
@@ -49,6 +54,7 @@ cell: an approximate, compressed-state search with no optimality guarantee.
 | `improved` | one simulation per parent cell, analytic beam (or `guess`) | none (`calibrate()` optional) | reference, paper figures |
 | `shared` (default) | shared signal trials, guided beam, one pass | `solve()`: tighten, repair, report | production |
 | `robust` | as `shared`, plus a second pass | `solve()`: shortlist, block refinement, repair, report | when ~2.5x the run time buys a lower L |
+| `descent` | none: constrained descent of one schedule on a signal bank and a noise genealogy | `solve()` is the whole mode: descent, pin, report | lowest C at Pd = `min_pd`; a fixed last threshold (`fap`) |
 
 The EP planner uses `shared` on both backends, once per region; every chunk
 of the region runs that schedule (see
@@ -125,6 +131,70 @@ moves blocks of stages by ±2 grid steps when that lowers L by 2 % on one fresh
 noise sample and by 0.5 % on a second. These constants are heuristics chosen
 once in the research workspace (`dts_work`), not tuned per pattern.
 
+## The bank descent
+
+Mode `descent` solves a narrower problem than the other modes, the one the
+long patterns of a production search actually pose: **minimise C subject to
+Pd = `min_pd`**. On those patterns L rises steeply with Pd, so the constraint
+binds and every bit of Pd above the target is paid for (a schedule delivered
+at Pd 0.11-0.17 for a target of 0.1 costs 6-41 % more than the same schedule
+shifted to 0.1). It has no cells, no Pd bins, no threshold grid and no beam,
+and it runs at the search's own `nbins` whatever its size.
+
+Two samples make both quantities exact functions of the schedule:
+
+- **Signal bank.** The unpruned scores of `descent_nsignal` (2^15) signal
+  trials at every stage. Pd(γ) is the fraction of trials above every
+  threshold, for any γ.
+- **Noise genealogy.** One noise simulation pruned at a reference schedule
+  γ - margin that keeps, per stage, every trial's score and the slot of the
+  trial it was resampled from. A noise node of the search tree survives a
+  schedule γ' ≥ reference when its whole ancestry is above γ', so C(γ') is a
+  count along the ancestry, on the same noise for every γ'. One backward pass
+  gives every trial the cost of the subtree below it.
+
+From these the change of C and of Pd for moving one threshold, or one block of
+consecutive thresholds, by ±step is counted exactly (no derivative, no
+noise between the candidates). A multiplier λ, the cost paid per unit of Pd,
+selects the moves: raise a block where the cost it saves exceeds λ times the
+Pd it loses, lower it where λ times the Pd gained exceeds the cost added. λ is
+bisected until the selected moves leave Pd unchanged; a common shift of all
+thresholds then pins Pd to the target on the signal bank, and the move is
+kept when the genealogy's cost fell. Blocks matter: consecutive late stages
+score nearly the same fold, so one threshold alone cannot move there (single
+stage moves stall 5-8 % above the block version at a low target). A sweep
+goes through disjoint blocks of 2^k, ..., 2, 1 stages, with the block
+boundaries offset by half a block on alternate sweeps.
+
+A genealogy is valid only above its reference, so the descent rebuilds it a
+few times around the current schedule with a shrinking margin and step
+(`descent_passes`; the default is six builds: 4096 trials at margin 0.4 and
+step 0.2 twice, then 8192 trials at 0.3/0.1 and at 0.2/0.05 twice each, the
+last four with blocks of at most 32 and 8 stages). It starts from the
+schedule that lies the same number of signal standard deviations below the
+mean signal score at every stage, pinned to the target.
+
+After the descent the schedule is measured on samples that took no part in
+it, as in `shared`: a common shift of either sign pins Pd to `min_pd` + 2
+binomial standard errors on a fresh bank of 2^17 signal trials, a second
+fresh bank reports Pd, and a fresh noise evaluation reports C.
+
+**The last threshold.** `final_threshold` fixes γ_{M-1}; `fap` derives it as
+the S/N whose one-sided normal tail is `fap` / (nbins × number of boxcar
+widths), the per-fold false-alarm probability with the trials of one fold
+(`fap` 0 leaves it free; when both are set the higher threshold is used). The
+descent and the pins then move the other thresholds only. If the signal
+cannot reach the target through the fixed threshold alone, the status is
+`short` and `pd_ceiling` in the diagnostics is the Pd that threshold allows.
+
+What it guarantees and what it does not: at the end no block move of the last
+step size lowers C at equal Pd on its samples, which is a first-order
+(Kuhn-Tucker like) condition, not a proof of a global minimum. The evidence
+that it is close is empirical: in the research prototype, starts as
+different as an equal-quantile schedule and a pinned `robust` solution ended
+at the same cost, and the cost of the library mode scatters by 2-4 % between
+seeds.
+
 ## Measured behaviour
 
 Production pattern (127 stages), nbins 64, S/N 10, `min_pd` 0.1, CUDA on an
@@ -137,17 +207,38 @@ mean and coefficient of variation over 8 search seeds:
 | `shared` | 0.104 | 0.043 | 5.6e4 | 0.11 | 5.4e5 | 0.074 | 0.22 s |
 | `robust` | 0.103 | 0.023 | 5.1e4 | 0.041 | 4.9e5 | 0.039 | 0.60 s |
 
-On the reduced acceptance suite (`bench/scripts/schemes/solve_suite.py`:
-production pattern and the 4-32 segment patterns of issue #15, several S/N and
-targets) both shared modes pass every gate: every seed's measured Pd
-≥ 0.9 `min_pd`, the median ≥ 0.98 `min_pd`, and the reported Pd within 10 % of
-an independent count (observed: within 2 %). The CPU agrees with CUDA within
-the seed scatter and takes 15 s (`shared`) and 69 s (`robust`) on the
-production pattern with 16 threads.
+The same suite with `descent` (2026-11, L40, 8 seeds, 4 host threads; Pd is
+the lowest and highest seed, C the geometric mean):
 
-Evaluating with 1024 trials (the default of `evaluate_scheme`) adds Monte
-Carlo noise of the same order as the differences between the modes (about
-30 % on C at this pattern): compare modes with ≥ 2^16 trials.
+| case | mode | Pd | C | cv of C | time |
+|---|---|---|---|---|---|
+| production, `min_pd` 0.1 | `shared` | 0.102-0.114 | 5.75e4 | 0.099 | 0.23 s |
+| | `robust` | 0.102-0.108 | 5.26e4 | 0.024 | 0.56 s |
+| | `descent` | 0.101-0.103 | 4.69e4 | 0.018 | 0.25 s |
+| production, `min_pd` 0.05 | `shared` | 0.051-0.056 | 1.29e4 | 0.129 | 0.23 s |
+| | `robust` | 0.052-0.052 | 1.14e4 | 0.029 | 0.54 s |
+| | `descent` | 0.051-0.053 | 1.09e4 | 0.036 | 0.26 s |
+
+On the short patterns of issue #15 the shared modes deliver a Pd well above
+the target because L is lowest there (8 segments, target 0.5: 0.75-0.78;
+16 segments, target 0.1: 0.50-0.55; 32 segments at S/N 6, target 0.1:
+0.11-0.19); `descent` delivers the target (0.501-0.505, 0.100-0.103 and
+0.100-0.102) in 0.02-0.08 s, at a higher L (8 segments: 4.0 against 3.0). That is the difference of the two
+objectives, not a defect of either: use a shared mode when the lowest cost
+per detection is wanted, `descent` when the target Pd is the requirement.
+
+On 127-stage patterns the descent takes 0.22-0.28 s on the GPU with 4 host
+threads at 16-128 bins (the host passes over the genealogy dominate, about
+0.15 s whatever the bin count): slower than `shared` at 16 bins (0.11 s),
+equal at 64, faster at 128 (0.43 s). Above 128 bins the unpruned signal
+samples dominate (the descent's 2^15 trials and the two final banks of 2^17):
+0.73 s at 256 bins, 2.1 s at 512 and 7.7 s at 1024, with no refit and no
+proxy bin count. On the CPU it took 2.8 s at 16 bins with 4 threads.
+
+On 230 branching patterns of a production plan (2-5 parameters, 16-1024
+bins, target 0.1, one seed each) every solve returned `met` or
+`within_tolerance`, and the Pd counted on 2^16 independent trials was
+0.0985-0.106.
 
 ## Settings
 
@@ -156,6 +247,13 @@ Carlo noise of the same order as the differences between the modes (about
 `nprobs` is the number of Pd bins from `min_pd` to 1; `ntrials` (1024) is the
 noise population per cell. `prob_min`, `guess`, `beam_width` and
 `thres_neigh` apply to `legacy` and `improved` only.
+
+Mode `descent` reads `min_pd`, `w_terminal`, `fap`, `final_threshold`,
+`descent_passes` (builds of the noise genealogy: trials, margin below the
+current schedule, step, largest and smallest block) and `descent_nsignal`
+(2^15; 2^14 costs 2-7 % in C). `run()` does nothing in this mode and the
+constructor's `ntrials`, `nprobs`, `nthresholds` and beam settings are not
+used.
 
 `ref_ducy` is the reference pulse's full width at a tenth of maximum (FWTM),
 in turns: the simulated pulse is a Gaussian of rms width
@@ -223,15 +321,23 @@ regression golden of both shared modes (valid for one toolchain);
 ## Limitations
 
 - No optimality guarantee: the search is approximate and the constants above
-  are heuristics.
+  are heuristics. The descent stops at a schedule no block move improves,
+  which need not be the global minimum.
+- `descent` does not look for a Pd above `min_pd` that lowers L (short
+  patterns); it has no `save()` states and no shortlist.
+- `descent` has no memory budget for its samples and its time above 128
+  bins is that of three unpruned signal samples at the true bin count.
+- The EP planner still designs with `shared` and refits above 128 bins, so
+  a bound on the last threshold is available from the scheme's API only.
 - The Pd guarantee is statistical (target `min_pd` + 2 standard errors of a
   2^17-trial count) and holds for the simulated signal model: a pulse of the
   reference shape at the design S/N, folded without loss. Mismatch loss of the
   EP search and multi-leaf detection are outside it.
 - Pd is survival to the final candidate list, not completeness at a
-  false-alarm rate. The last threshold is chosen by cost alone (`w_terminal`
-  weighs the final survivors); nothing bounds the false-alarm probability per
-  final trial. At low S/N a high Pd can need a final list that keeps about
+  false-alarm rate. In the four search modes the last threshold is chosen by
+  cost alone (`w_terminal` weighs the final survivors) and nothing bounds the
+  false-alarm probability per final trial; `descent` with `fap` or
+  `final_threshold` fixes it (issue #42). At low S/N a high Pd can need a final list that keeps about
   10^-5 of the noise, so the next processing step must be cheap enough for it.
 - The reported C is an independent but noisy Monte Carlo estimate; on very
   large irregular trees it can be off by a large factor.

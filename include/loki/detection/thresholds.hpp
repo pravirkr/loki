@@ -30,13 +30,18 @@ namespace loki::detection {
 //   schedule to use with its Pd and cost measured on fresh samples.
 // kRobust: kShared with a second pass and a refinement in solve(); slower,
 //   lower cost per detection.
+// kDescent: no search over a grid. solve() moves a whole schedule, by single
+//   stages and blocks of stages, on fixed samples until the cost saved per
+//   unit Pd lost is the same everywhere, with Pd held at min_pd; then pins
+//   and reports on fresh samples as kShared does. run() does nothing.
 // The cost C of the shared modes includes w_terminal times the survivors of
 // the last stage; legacy and improved use w = 0.
 enum class DynamicThresholdMode : uint8_t {
     kLegacy,
     kImproved,
     kShared,
-    kRobust
+    kRobust,
+    kDescent
 };
 
 /// Modes with shared signal trials, the guided beam and solve().
@@ -59,6 +64,9 @@ dynamic_threshold_mode_from_string(std::string_view s) {
     if (s == "robust") {
         return DynamicThresholdMode::kRobust;
     }
+    if (s == "descent") {
+        return DynamicThresholdMode::kDescent;
+    }
     throw std::invalid_argument(std::string("unknown mode: ").append(s));
 }
 
@@ -72,6 +80,8 @@ inline std::string mode_to_string(DynamicThresholdMode m) {
         return "shared";
     case DynamicThresholdMode::kRobust:
         return "robust";
+    case DynamicThresholdMode::kDescent:
+        return "descent";
     }
     return "unknown";
 }
@@ -149,7 +159,19 @@ inline double total_cost(const State& s, double w_terminal) noexcept {
            (w_terminal * static_cast<double>(s.complexity));
 }
 
-/// Settings of modes "shared" and "robust"; the other modes ignore them.
+/// One pass of mode "descent": a noise sample of @p ntrials trials simulated
+/// @p margin (S/N) below the current schedule, on which blocks of
+/// min_block..max_block stages move by @p step (S/N).
+struct DescentPass {
+    SizeType ntrials{SizeType{1} << 14U};
+    float margin{0.3F};
+    float step{0.1F};
+    SizeType max_block{SizeType{1} << 20U};
+    SizeType min_block{1};
+};
+
+/// Settings of modes "shared", "robust" and "descent"; the other modes ignore
+/// them. Mode "descent" uses min_pd, w_terminal, fap and final_threshold.
 struct SharedOptions {
     /// Target Pd. Anchors the probability grid: @p nprobs bins from min_pd to
     /// 1, plus at most 16 below it down to min_pd / 2 (the constructor's
@@ -165,6 +187,17 @@ struct SharedOptions {
     /// consecutive stages, in the same unit. The searched paths need up to
     /// 0.9; 0.5 loses cost on short patterns.
     float reach_sigma = 1.0F;
+    /// Mode "descent": false-alarm probability per final trial. When > 0 the
+    /// last threshold is held at Q^-1(fap / K), K = nbins x boxcar widths,
+    /// so Pd includes that cut. 0: the last threshold is free.
+    double fap = 0.0;
+    /// Mode "descent": the last threshold is held at least at this S/N (the
+    /// larger of it and the fap threshold). <= 0: unused.
+    float final_threshold = 0.0F;
+    /// Mode "descent": the passes (empty: the validated default) and the
+    /// trials of the signal sample its moves count Pd on.
+    std::vector<DescentPass> descent_passes;
+    SizeType descent_nsignal = SizeType{1} << 15U;
 };
 
 /// How the Pd of a returned schedule compares with the target.
@@ -386,13 +419,16 @@ public:
     /// change the search states or get_best_path_thresholds().
     CalibratedPath calibrate(float min_pd                   = 0.1F,
                              const CalibrationOptions& opts = {}) const;
-    /// Modes "shared" and "robust" only, after run(): the schedule to use,
-    /// with the Pd and cost of exactly those thresholds measured on fresh
+    /// Modes "shared", "robust" and "descent", after run(): the schedule to
+    /// use, with the Pd and cost of exactly those thresholds measured on fresh
     /// samples. Tightens (robust: also selects among candidates and refines)
     /// and repairs on independent samples, then reports; nothing reported
     /// was used to choose. Frees the
     /// search's device memory. Deterministic per (seed, toolchain), and on the
-    /// GPU per `batch_size`. Also kept for save().
+    /// GPU per `batch_size`. Also kept for save(). Mode "descent" designs
+    /// the schedule here; with a fixed last threshold above what min_pd
+    /// allows it returns no thresholds, delivery `short` and the Pd ceiling
+    /// in `pd` (diagnostic "pd_ceiling").
     SchemeSolution solve();
     /// The last solve(), or nullptr.
     const SchemeSolution* solution() const;

@@ -856,3 +856,92 @@ of up to 48 slices. A reserve of 1/16 of the whole chunk's forecast made every
 slice of the 720 Hz search mostly reserve (64 slices at batch 32). Wide
 sliced chunks without the FFA share cap pushed the shared FFA buffers to
 about 23 GB and the 720 Hz search no longer fitted.
+
+### Threshold scheme: Pd pinning and the bank descent (`mode = "descent"`)
+
+Measured 2026-11 on an L40 with 4 host threads, on the acceptance suite of
+`bench/scripts/schemes/solve_suite.py` and on 230 branching patterns of a
+production search plan (2, 3 and 5 parameters, 16-1024 bins, mostly 127
+stages, `min_pd` 0.1). Schedules were judged on samples that chose nothing
+(2^17 signal trials, 3 × 2^16 noise trials). See `docs/dts.md` for the
+method.
+
+What the measurements say about the existing modes:
+
+- On the long patterns L = C / Pd rises steeply with Pd, so `min_pd` binds
+  and any Pd above it is paid for. `shared` delivered Pd 0.102-0.114 for a
+  target of 0.1 (its repair only lowers thresholds); the planner's refit
+  above 128 bins (a 0.1 S/N upward shift grid ranked by L) delivered
+  0.11-0.17. Shifting those schedules to the target saves 6-41 % of C.
+- A common shift of either sign to `min_pd` + 2 standard errors on a fresh
+  bank (a two-sided pin) brings `shared` to Pd 0.099-0.104. It does not
+  remove the cost scatter between seeds (cv 0.10-0.13).
+- `improved`: the in-run Pd is 4-19 % optimistic on every pattern, and the
+  cost at equal Pd is up to 2× that of `shared`; it is 3-4× faster
+  (24 / 67 / 142 ms at 16 / 64 / 128 bins against 109 / 234 / 434 ms for
+  `shared` and 281 / 573 / 1021 ms for `robust`).
+- Last threshold (issue #42): at `min_pd` 0.1 the free last thresholds were
+  5.7-6.9, below a candidate cut of 7. Raising the last threshold to the cut
+  and shifting the others to restore Pd costs 0-7 % of C (0-18 % for a
+  per-fold false-alarm threshold); fixing it inside the descent costs about
+  5 %.
+
+The bank descent against the search modes, same suite, 8 seeds:
+
+| case | mode | Pd (min-max) | C (geomean) | cv of C | time |
+|---|---|---|---|---|---|
+| production, 0.1 | `shared` | 0.102-0.114 | 5.75e4 | 0.099 | 0.23 s |
+| | `robust` | 0.102-0.108 | 5.26e4 | 0.024 | 0.56 s |
+| | `descent` | 0.101-0.103 | 4.69e4 | 0.018 | 0.25 s |
+| production, 0.05 | `shared` | 0.051-0.056 | 1.29e4 | 0.129 | 0.23 s |
+| | `robust` | 0.052-0.052 | 1.14e4 | 0.029 | 0.54 s |
+| | `descent` | 0.051-0.053 | 1.09e4 | 0.036 | 0.26 s |
+
+On the plan's patterns the descent's cost was 0.78-1.01 of `robust` pinned
+to the same Pd (research prototype, 13 patterns). The library mode on all
+230 patterns, one seed each: every solve `met` (215) or `within_tolerance`
+(15), Pd on 2^16 independent trials 0.0985-0.106 for the target 0.1, free
+last thresholds 6.0-8.4.
+
+Time of one solve on 127 stages (3 parameters), by bin count:
+
+| nbins | 16 | 64 | 128 | 256 | 512 | 1024 |
+|---|---|---|---|---|---|---|
+| solve (s) | 0.22 | 0.24 | 0.28 | 0.73 | 2.1 | 7.7 |
+| genealogy builds (s) | 0.04 | 0.04 | 0.05 | 0.15 | 0.30 | 0.66 |
+| host moves (s) | 0.15 | 0.16 | 0.16 | 0.15 | 0.15 | 0.16 |
+| engine construction (s) | 0.02 | 0.02 | 0.02 | 0.05 | 0.18 | 0.72 |
+
+Up to 128 bins the host passes dominate: the forward pass that re-marks the
+genealogy after an accepted move (70-90 ms in total) and the block deltas on
+the genealogy and on the signal bank. Above 128 bins the rest is the three
+unpruned signal samples (2^15 trials for the descent, 2 × 2^17 for the pin
+and the report). It is slower than `shared` at 16 bins, equal at 64, faster
+at 128, and 0.02-0.08 s on 4-32 segments. Open: a memory budget for the
+samples and fewer final trials at large bin counts, before the planner can
+use it above 128 bins in place of the search at 64 bins and the refit.
+
+Kept:
+
+- Multi-scale block moves. Single-stage moves stall 5-8 % above `robust` at
+  `min_pd` 0.02: consecutive late stages score nearly the same fold and one
+  threshold cannot move alone.
+- 2^15 signal trials for the descent (2^14 costs 2-7 % of C); 4096-8192
+  noise trials per genealogy with the block sizes limited in the late
+  builds: 0.5 % above builds of 2^14-2^15 trials with every block size
+  (geometric mean over 9 cases, within the seed scatter) at 270 ms instead
+  of 720 ms.
+- Restricting the backward subtree pass to the trials above their own
+  threshold whose ancestry passes the lowest threshold a move can reach.
+  Restricting it to the currently alive trials is wrong: a trial a downward
+  move revives loses its subtree.
+
+Do not retry:
+
+| Idea | Why not |
+|---|---|
+| Importance-sampled noise bank (a mixture of boxcar-template tilts, weights instead of resampling) | Agrees with the resampling simulation within 1 % on C, but the effective sample size is about 10^-3 of the trials and falls as nbins^-1.5; a tilt along the pulse profile was worse (10^-4, biased late populations). The genealogy gives the same reuse of one noise sample without weights. |
+| `improved` as the initialiser of the descent | Saves about two genealogy builds (6-22 ms) and costs a search of 24-142 ms. The start a fixed number of signal standard deviations below the mean signal score needs no search. |
+| Sorting the genealogy by parent, or a branch-free scatter, for the backward pass | The scatter-add costs about 4 ns per element either way. |
+| A candidate list for the backward pass when the reference is far below the schedule | With the reference a full margin below, nearly every trial is listed; no gain. |
+| More host threads for the descent | Only the block deltas run in parallel; the forward and backward passes are sequential over stages, and idle threads spinning between the parallel loops slow them. |

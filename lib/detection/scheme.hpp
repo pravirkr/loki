@@ -354,6 +354,35 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
                             uint64_t seed,
                             const SolveBudget& budget);
 
+/// Settings of mode "descent" (the defaults are the validated ones).
+struct DescentOptions {
+    /// Last threshold held at this S/N (<= 0: free).
+    float final_threshold{0.0F};
+    /// Trials of the signal sample the descent counts Pd on.
+    SizeType nsignal{SizeType{1} << 15U};
+    /// Passes (empty: the validated default).
+    std::vector<DescentPass> passes;
+    /// Starting schedule (empty: the same signal z-score at every stage).
+    std::vector<float> start;
+    int nthreads{1};
+};
+
+/// The S/N a noise score exceeds with probability @p fap / @p ntemplates
+/// (one-sided Gaussian tail).
+float fap_threshold(double fap, double ntemplates);
+
+/** Mode "descent": minimises the cost C at Pd = min_pd by moving thresholds
+ * (single stages and blocks of stages) on fixed samples: a noise genealogy
+ * counts the exact change of C of a move, an unpruned signal sample the exact
+ * change of Pd, and a multiplier (cost per unit Pd) selects the moves that
+ * keep Pd at the target. Pins, reports and evaluates on fresh samples as
+ * solve() does. See docs/dts.md.
+ */
+SchemeSolution descend_scheme(const ThresholdsEngine& engine,
+                              float min_pd,
+                              double w_terminal,
+                              const DescentOptions& options);
+
 /** DynamicThresholdScheme::calibrate on any engine (after run()). */
 CalibratedPath calibrate_path(const ThresholdsEngine& engine,
                               float min_pd,

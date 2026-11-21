@@ -38,6 +38,22 @@ struct SearchPath {
     double c{0.0};  ///< in-run total cost (with the terminal weight)
 };
 
+/** One noise evaluation of a schedule with its ancestry: per stage, every
+ * trial's score and the slot of the previous stage it continues. Mode
+ * "descent" counts the noise survival of any schedule above the simulated one
+ * along the stored ancestry.
+ */
+struct NoiseGenealogy {
+    SizeType ntrials{0};
+    /// Stage-major (nstages x ntrials): the score of slot t at stage s.
+    std::vector<float> scores;
+    /// Stage-major: parent[s][t] is the slot of stage s that slot t of stage
+    /// s + 1 continues (the last row is unused).
+    std::vector<uint32_t> parent;
+    /// Fraction of the trials above the simulated schedule, per stage.
+    std::vector<double> pass_rate;
+};
+
 /** A fresh unpruned signal sample of solve() (simulate_h1_scores), kept
  * where the engine simulated it: the steps of solve() need only per-trial
  * margins and per-stage minima, not the stage x trial matrix.
@@ -131,6 +147,15 @@ public:
     /// resampled. Returns the H1 scores, stage-major (nstages x ntrials).
     virtual std::vector<float> simulate_h1_scores(SizeType ntrials,
                                                   uint64_t seed) const = 0;
+    /// evaluate()'s noise branch for @p thresholds, keeping the scores and
+    /// the ancestry of every trial (mode "descent").
+    virtual NoiseGenealogy
+    simulate_h0_genealogy(std::span<const float> /*thresholds*/,
+                          SizeType /*ntrials*/,
+                          uint64_t /*seed*/) const {
+        throw std::logic_error(
+            "simulate_h0_genealogy: not implemented on this backend");
+    }
     /// A signal bank of simulate_h1_scores(n, seed); the default keeps the
     /// matrix on the host.
     virtual std::unique_ptr<SignalBank> make_signal_bank(SizeType n,

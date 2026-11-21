@@ -3,7 +3,9 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #include <pybind11/functional.h>
 #include <pybind11/iostream.h>
@@ -63,33 +65,47 @@ void bind_thresholds(py::module_& m) {
                          threshold, cost, threshold_prev, success_h1_cumul_prev,
                          is_empty);
     py::class_<DynamicThresholdScheme>(m_thresholds, "DynamicThresholdScheme")
-        .def(py::init([](const py::array_t<float>& branching_pattern,
-                         float ref_ducy, SizeType nbins, SizeType ntrials,
-                         SizeType nprobs, float prob_min, float snr_final,
-                         SizeType nthresholds, float ducy_max, float wtsp,
-                         float beam_width, SizeType trials_start,
-                         std::string_view mode, int nthreads,
-                         std::optional<uint64_t> seed, std::string_view backend,
-                         int device, SizeType batch_size,
-                         std::string_view guess, float min_pd, float w_terminal,
-                         float beam_sigma, float reach_sigma) {
-                 const detection::SharedOptions shared{.min_pd     = min_pd,
-                                                       .w_terminal = w_terminal,
-                                                       .beam_sigma = beam_sigma,
-                                                       .reach_sigma =
-                                                           reach_sigma};
-                 const std::span<const float> pattern(branching_pattern.data(),
-                                                      branching_pattern.size());
-                 const auto exec = make_exec(backend, device, nthreads);
-                 // The pilot guess simulates an unpruned search.
-                 return long_call([&] {
-                     return std::make_unique<DynamicThresholdScheme>(
-                         pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
-                         snr_final, nthresholds, ducy_max, wtsp, beam_width,
-                         trials_start, mode, seed, batch_size, guess, shared,
-                         exec);
-                 });
-             }),
+        .def(py::init(
+                 [](const py::array_t<float>& branching_pattern, float ref_ducy,
+                    SizeType nbins, SizeType ntrials, SizeType nprobs,
+                    float prob_min, float snr_final, SizeType nthresholds,
+                    float ducy_max, float wtsp, float beam_width,
+                    SizeType trials_start, std::string_view mode, int nthreads,
+                    std::optional<uint64_t> seed, std::string_view backend,
+                    int device, SizeType batch_size, std::string_view guess,
+                    float min_pd, float w_terminal, float beam_sigma,
+                    float reach_sigma, double fap, float final_threshold,
+                    const std::vector<
+                        std::tuple<SizeType, float, float, SizeType, SizeType>>&
+                        descent_passes,
+                    SizeType descent_nsignal) {
+                     std::vector<detection::DescentPass> passes;
+                     passes.reserve(descent_passes.size());
+                     for (const auto& [n, margin, step, hi, lo] :
+                          descent_passes) {
+                         passes.push_back({n, margin, step, hi, lo});
+                     }
+                     const detection::SharedOptions shared{
+                         .min_pd          = min_pd,
+                         .w_terminal      = w_terminal,
+                         .beam_sigma      = beam_sigma,
+                         .reach_sigma     = reach_sigma,
+                         .fap             = fap,
+                         .final_threshold = final_threshold,
+                         .descent_passes  = std::move(passes),
+                         .descent_nsignal = descent_nsignal};
+                     const std::span<const float> pattern(
+                         branching_pattern.data(), branching_pattern.size());
+                     const auto exec = make_exec(backend, device, nthreads);
+                     // The pilot guess simulates an unpruned search.
+                     return long_call([&] {
+                         return std::make_unique<DynamicThresholdScheme>(
+                             pattern, ref_ducy, nbins, ntrials, nprobs,
+                             prob_min, snr_final, nthresholds, ducy_max, wtsp,
+                             beam_width, trials_start, mode, seed, batch_size,
+                             guess, shared, exec);
+                     });
+                 }),
              py::arg("branching_pattern"), py::arg("ref_ducy"),
              py::arg("nbins") = 64, py::arg("ntrials") = 1024,
              py::arg("nprobs") = 40, py::arg("prob_min") = 0.05F,
@@ -102,6 +118,10 @@ void bind_thresholds(py::module_& m) {
              py::arg("batch_size") = 256, py::arg("guess") = "analytic",
              py::arg("min_pd") = 0.1F, py::arg("w_terminal") = 1.0F,
              py::arg("beam_sigma") = 3.0F, py::arg("reach_sigma") = 1.0F,
+             py::arg("fap") = 0.0, py::arg("final_threshold") = 0.0F,
+             py::arg("descent_passes") = std::vector<
+                 std::tuple<SizeType, float, float, SizeType, SizeType>>{},
+             py::arg("descent_nsignal") = SizeType{1} << 15U,
              "ref_ducy is the reference pulse's full width at a tenth of "
              "maximum (FWTM), in turns: a Gaussian of rms width ref_ducy / "
              "(2 sqrt(2 ln 10)). A pulse of FWHM duty d needs ref_ducy = "
@@ -128,13 +148,15 @@ void bind_thresholds(py::module_& m) {
             "memory.")
         .def(
             "solution",
-            [](const DynamicThresholdScheme& self) -> py::object {
-                const auto* sol = self.solution();
-                if (sol == nullptr) {
-                    return py::none();
-                }
-                return solution_to_dict(*sol);
-            },
+            [](const DynamicThresholdScheme& self)
+                -> py::
+                    object {
+                        const auto* sol = self.solution();
+                        if (sol == nullptr) {
+                            return py::none();
+                        }
+                        return solution_to_dict(*sol);
+                    },
             "The result of the last solve() (same keys), or None.")
         .def_property_readonly("nstages", &DynamicThresholdScheme::get_nstages)
         .def_property_readonly("nthresholds",
