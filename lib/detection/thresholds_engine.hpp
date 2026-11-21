@@ -162,6 +162,31 @@ public:
                                                          uint64_t seed) const {
         return std::make_unique<HostSignalBank>(simulate_h1_scores(n, seed), n);
     }
+    /// Margins of simulate_h1_scores(n, seed) against @p thresholds for every
+    /// trial whose running margin stays above @p min_margin; trials that drop
+    /// to or below @p min_margin at an earlier stage stop there and hold a
+    /// value <= @p min_margin. Exact for every trial with margin > @p
+    /// min_margin.
+    virtual std::vector<float>
+    h1_margins_above(std::span<const float> thresholds,
+                     float min_margin,
+                     SizeType n,
+                     uint64_t seed) const {
+        (void)min_margin;
+        return make_signal_bank(n, seed)->margins(thresholds);
+    }
+    /// Trials of simulate_h1_scores(n, seed) that survive every stage of
+    /// @p thresholds (margin > 0).
+    virtual SizeType count_h1_survivors(std::span<const float> thresholds,
+                                        SizeType n,
+                                        uint64_t seed) const {
+        const auto margins = h1_margins_above(thresholds, 0.0F, n, seed);
+        SizeType count     = 0;
+        for (const float m : margins) {
+            count += m > 0.0F ? 1 : 0;
+        }
+        return count;
+    }
 
     ThresholdsEngine(const ThresholdsEngine&)            = delete;
     ThresholdsEngine& operator=(const ThresholdsEngine&) = delete;

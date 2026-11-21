@@ -350,7 +350,6 @@ public:
         file.createAttribute("dts_w_terminal", kDtsWTerminal);
         file.createAttribute("dts_mode", std::string(kDtsMode));
         file.createAttribute("ring_margin_z", detail::kEPRingMarginZ);
-        file.createAttribute("dts_final_threshold", final_threshold());
         const plans::FFAPlan<FoldType> run_plan(m_base_cfg);
         file.createDataSet(
             "ref_segs",
@@ -624,8 +623,6 @@ public:
                     kDtsAlgorithm, file_algorithm));
             }
             check_attr_double("dts_w_terminal", kDtsWTerminal);
-            // The floor of the last threshold (snr_min) shapes the scheme.
-            check_attr_double("dts_final_threshold", final_threshold());
             check_attr_double("ring_margin_z", detail::kEPRingMarginZ);
             std::string file_mode;
             file.getAttribute("dts_mode").read(file_mode);
@@ -951,18 +948,20 @@ private:
                 max_memory_gb, reserve_gb));
         }
 
-        // A design's simulation pools live only while it runs, so none is
-        // left when the EP search allocates.
+        // Design every region upfront in strict region order, chaining signal
+        // z-scores from one region to the next without mutable callback state.
+        // Simulation pools live only inside each design call, so none remains
+        // when the EP search allocates.
         std::vector<detail::RegionDesign> designs;
         designs.reserve(ffa_regions.size());
-        const auto chain = std::make_shared<DesignChain>();
+        std::vector<float> chain_zscores;
         for (const auto& region : ffa_regions) {
             if (region.f_end <= region.f_start) {
                 continue;
             }
             designs.push_back(make_region_designer(
                 region.f_start, region.f_end, region.nbins, region.eta,
-                max_drift, effective_limit, chain));
+                max_drift, effective_limit, chain_zscores));
         }
 
         auto plan =
@@ -1026,12 +1025,6 @@ private:
         return m_min_pd >= 1.0F ? kDtsMaxTarget : m_min_pd;
     }
 
-    /// Floor of the last threshold: a leaf below snr_min is never written,
-    /// so no schedule lets it through the last stage.
-    float final_threshold() const {
-        return static_cast<float>(std::max(m_base_cfg.get_snr_min(), 0.0));
-    }
-
     /// The engine of a design: it only simulates samples (the descent
     /// searches no grid), so it allocates no search pools on either backend.
     std::unique_ptr<detection::detail::ThresholdsEngine>
@@ -1078,37 +1071,32 @@ private:
                                      SizeType{1} << 15U)};
     }
 
-    /// The z-scores of the last design, handed from region to region.
-    struct DesignChain {
-        std::vector<float> zscores;
-    };
-
-    /// The thresholds of a chunk's branching pattern @p bp: the descent at
-    /// the true nbins, at Pd = min_pd, with the last threshold at or above
-    /// snr_min. It starts from @p chain (the previous design's z-scores) when
-    /// there is one and leaves its own there. The samples follow the memory
-    /// limit (sample_budget). The design carries the Pd measured on a fresh
-    /// sample and the noise population of the final evaluation (and its
-    /// trial count), which sizes the chunk. [f_start, f_end] is the chunk's
-    /// band, for the logs.
-    detail::ChunkDesign design_thresholds(std::span<const float> bp,
-                                          double f_start,
-                                          double f_end,
-                                          SizeType nbins,
-                                          double memory_limit_gb,
-                                          DesignChain& chain) const {
+    /// The thresholds of a branching pattern @p bp at the true @p nbins.
+    /// Starts from @p prior_zscores when non-empty and writes its own solved
+    /// z-scores to @p out_zscores when provided. The last threshold is chosen
+    /// freely by cost (w_terminal = 1): snr_min is applied strictly to the
+    /// post-ascend scores when writing candidates, so marginal leaves whose
+    /// reintegrated score clears snr_min are kept and cached plans do not
+    /// depend on snr_min.
+    detail::ChunkDesign
+    design_thresholds(std::span<const float> bp,
+                      double f_start,
+                      double f_end,
+                      SizeType nbins,
+                      double memory_limit_gb,
+                      std::span<const float> prior_zscores,
+                      std::vector<float>* out_zscores = nullptr) const {
         const auto t_design = std::chrono::steady_clock::now();
         const auto engine   = make_threshold_engine(bp, nbins, kDtsSeed);
         const auto budget   = sample_budget(nbins, memory_limit_gb);
         detection::detail::DescentOptions options;
-        options.final_threshold = final_threshold();
-        options.nsignal         = std::min(options.nsignal, budget.nbank);
-        options.nbank           = budget.nbank;
-        options.nnoise          = budget.nnoise;
+        options.nsignal = std::min(options.nsignal, budget.nbank);
+        options.nbank   = budget.nbank;
+        options.nnoise  = budget.nnoise;
         options.nthreads =
             std::clamp(m_base_cfg.get_nthreads(), 1, kDtsMaxThreads);
         options.start =
-            detection::detail::resample_zscores(chain.zscores, bp.size());
+            detection::detail::resample_zscores(prior_zscores, bp.size());
         const bool warm = !options.start.empty();
         if (warm) {
             options.start_zscores = true;
@@ -1116,28 +1104,15 @@ private:
         }
         auto sol = detection::detail::descend_scheme(*engine, scheme_target(),
                                                      kDtsWTerminal, options);
-        if (sol.thresholds.empty() && options.final_threshold > 0.0F) {
-            // Fewer than min_pd of the signals end above snr_min: the floor
-            // cannot hold. Designed without it; the candidates below snr_min
-            // are still dropped at the output.
-            spdlog::warn(
-                "EPRegionPlanner: f=[{:.6g}, {:.6g}] Hz (nbins={}): only "
-                "{:.4f} of the signals at target_snr={:.6g} end above "
-                "snr_min={:.6g}, below min_pd={:.6g}; the thresholds are "
-                "designed without the snr_min floor",
-                f_start, f_end, nbins, sol.pd, m_base_cfg.get_target_snr(),
-                m_base_cfg.get_snr_min(), m_min_pd);
-            options.final_threshold = 0.0F;
-            sol = detection::detail::descend_scheme(*engine, scheme_target(),
-                                                    kDtsWTerminal, options);
-        }
         if (sol.thresholds.empty()) {
             throw std::runtime_error(fmt::format(
                 "EPRegionPlanner: the threshold design has no schedule in "
                 "f=[{:.6g}, {:.6g}] Hz (nbins={}, target_snr={:.6g})",
                 f_start, f_end, nbins, m_base_cfg.get_target_snr()));
         }
-        chain.zscores = sol.zscores;
+        if (out_zscores != nullptr) {
+            *out_zscores = sol.zscores;
+        }
         spdlog::debug(
             "EPRegionPlanner: f=[{:.6g}, {:.6g}] Hz (nbins={}), thresholds "
             "({} start, {} signal / {} noise trials): Pd {:.4f} +/- {:.4f} "
@@ -1172,10 +1147,11 @@ private:
         return forecast;
     }
 
-    /// The designer of one coarse region: the full threshold design of a
-    /// branching pattern, memoised. It is deterministic: the seeds are fixed
-    /// and the chunking asks for the designs in region order, one after the
-    /// other, so @p chain always holds the same previous design.
+    /// Builds and pre-solves one coarse region's threshold design in region
+    /// order, updating @p chain_zscores for the next region. Any subsequent
+    /// lookup for the region's branching pattern hits the pre-populated cache
+    /// directly; any other pattern warm-starts immutably from this region's
+    /// solved z-scores.
     detail::RegionDesign
     make_region_designer(double f_start,
                          double f_end,
@@ -1183,22 +1159,34 @@ private:
                          double eta,
                          double max_drift,
                          double memory_limit_gb,
-                         const std::shared_ptr<DesignChain>& chain) const {
+                         std::vector<float>& chain_zscores) const {
         // Every chunk of a region has the FFA segmentation of the region.
         const auto rep_cfg = m_base_cfg.get_updated_ep_config(
             nbins, eta, f_start * (1.0 - max_drift), f_end * (1.0 + max_drift));
         const plans::FFAPlan<FoldType> rep_plan(rep_cfg);
+        const auto forecast = rep_plan.forecast_branching(m_poly_basis);
+        std::vector<float> region_bp(forecast.mean.begin(),
+                                     forecast.mean.end());
+
+        std::vector<float> region_zscores;
+        auto region_design_val =
+            design_thresholds(region_bp, f_start, f_end, nbins, memory_limit_gb,
+                              chain_zscores, &region_zscores);
+        chain_zscores = region_zscores;
 
         using DesignCache = std::map<std::vector<float>, detail::ChunkDesign>;
-        auto design = [this, nbins, memory_limit_gb, chain,
-                       cache = std::make_shared<DesignCache>()](
+        auto cache        = std::make_shared<DesignCache>();
+        cache->emplace(std::move(region_bp), std::move(region_design_val));
+
+        auto design = [this, nbins, memory_limit_gb, cache,
+                       region_zscores = std::move(region_zscores)](
                           std::span<const float> bp, double start, double end) {
             std::vector<float> key(bp.begin(), bp.end());
             if (const auto it = cache->find(key); it != cache->end()) {
                 return it->second;
             }
             auto d = design_thresholds(bp, start, end, nbins, memory_limit_gb,
-                                       *chain);
+                                       region_zscores);
             cache->emplace(std::move(key), d);
             return d;
         };

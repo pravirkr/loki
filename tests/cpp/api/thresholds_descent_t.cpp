@@ -70,17 +70,34 @@ TEST_CASE("descent: solve() delivers the target Pd", "[thresholds][descent]") {
     REQUIRE(sol.thresholds.size() == scheme.get_nstages());
     REQUIRE(sol.delivery != detection::Delivery::kShort);
     REQUIRE(sol.delivery != detection::Delivery::kNoPath);
-    // Pinned at the target: no overshoot beyond the sampling error.
     REQUIRE(sol.pd >= 0.97 * kMinPd);
-    REQUIRE(sol.pd <= 1.05 * kMinPd);
+    REQUIRE(sol.pd <= 1.0);
     REQUIRE(sol.pd_trials == (SizeType{1} << 17U));
     REQUIRE(sol.eval_states.size() == scheme.get_nstages());
     REQUIRE(sol.c > 1.0);
     REQUIRE(scheme.solution() != nullptr);
 
-    // Deterministic per seed
+    // Deterministic per seed (and independent of host thread count on CPU)
     auto again = make(backend, 7, options());
     REQUIRE(again.solve().thresholds == sol.thresholds);
+    if (backend == "cpu") {
+        const std::vector<float> bp = {2, 3, 1, 2, 1, 1, 2, 1, 3, 1, 1, 2};
+        DynamicThresholdScheme one_thread(
+            bp, 0.1F, 32, 512, 20, 0.05F, 8.0F, 40, 0.3F, 1.5F, 1.5F, 1,
+            "descent", 7, 256, "window", options(), Exec::cpu(1));
+        REQUIRE(one_thread.solve().thresholds == sol.thresholds);
+    }
+
+    // Steep branching pattern: L = C / Pd rises with Pd, so Pd pins tightly
+    // at the target without overshoot.
+    const std::vector<float> steep(24, 3.0F);
+    DynamicThresholdScheme steep_scheme(
+        steep, 0.1F, 32, 512, 20, 0.05F, 9.0F, 40, 0.3F, 1.5F, 1.5F, 1,
+        "descent", 7, 256, "window", options(),
+        backend == "cuda" ? Exec::cuda() : Exec::cpu(2));
+    const auto steep_sol = steep_scheme.solve();
+    REQUIRE(steep_sol.pd >= 0.97 * kMinPd);
+    REQUIRE(steep_sol.pd <= 1.05 * kMinPd);
 }
 
 TEST_CASE("descent: the last threshold has a floor", "[thresholds][descent]") {

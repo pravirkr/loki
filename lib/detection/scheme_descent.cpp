@@ -12,10 +12,13 @@
 #include <utility>
 #include <vector>
 
+#include <omp.h>
+
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/detection/scheme.hpp"
 #include "lib/detection/thresholds_engine.hpp"
 
@@ -70,18 +73,50 @@ class SignalSample {
 public:
     SignalSample(const std::vector<float>& stage_major,
                  SizeType nstages,
-                 SizeType n)
+                 SizeType n,
+                 int nthreads)
         : m_nstages(nstages),
           m_n(n),
           m_scores(nstages * n) {
-        for (SizeType s = 0; s < nstages; ++s) {
-            for (SizeType t = 0; t < n; ++t) {
-                m_scores[(t * nstages) + s] = stage_major[(s * n) + t];
+        const auto n_signed = static_cast<std::int64_t>(n);
+        // NOLINTNEXTLINE(openmp-use-default-none): members and refs captured
+#pragma omp parallel for num_threads(nthreads) schedule(static)
+        for (std::int64_t t = 0; t < n_signed; ++t) {
+            const auto ti = static_cast<SizeType>(t);
+            float* dst    = m_scores.data() + (ti * nstages);
+            for (SizeType s = 0; s < nstages; ++s) {
+                dst[s] = stage_major[(s * n) + ti];
             }
         }
     }
 
     SizeType size() const { return m_n; }
+
+    /// Indexes the trials above @p g_ref at every stage, once per pass. Every
+    /// candidate tested during the pass stays above @p g_ref, so trials at or
+    /// below @p g_ref can never be revived by a single block move.
+    void prepare_pass(std::span<const float> g_ref, int nthreads) {
+        std::vector<uint8_t> keep(m_n, 0);
+        const SizeType nstages = m_nstages;
+        const float* scores    = m_scores.data();
+        const auto n_signed    = static_cast<std::int64_t>(m_n);
+        // NOLINTNEXTLINE(openmp-use-default-none): spans are not listable
+#pragma omp parallel for num_threads(nthreads) schedule(static)
+        for (std::int64_t t = 0; t < n_signed; ++t) {
+            const float* row = scores + (static_cast<SizeType>(t) * nstages);
+            bool ok          = true;
+            for (SizeType s = 0; s < nstages && ok; ++s) {
+                ok = row[s] > g_ref[s];
+            }
+            keep[static_cast<SizeType>(t)] = ok ? uint8_t{1} : uint8_t{0};
+        }
+        m_active.clear();
+        for (SizeType t = 0; t < m_n; ++t) {
+            if (keep[t] != 0) {
+                m_active.push_back(t);
+            }
+        }
+    }
 
     /// Mean and standard deviation of every stage's scores.
     std::pair<std::vector<float>, std::vector<float>> moments() const {
@@ -132,21 +167,62 @@ public:
 
     /// The common shift (either sign) of stages [0, nfree) after which
     /// ceil(target n) trials survive; the stages beyond stay as they are.
-    float
-    pin_shift(std::span<const float> g, double target, SizeType nfree) const {
+    float pin_shift(std::span<const float> g,
+                    double target,
+                    SizeType nfree,
+                    int nthreads) const {
+        constexpr float kFastCut = -1.0F;
         std::vector<float> margin(m_n);
-        for (SizeType t = 0; t < m_n; ++t) {
-            const float* row = m_scores.data() + (t * m_nstages);
+        const SizeType nstages = m_nstages;
+        const float* scores    = m_scores.data();
+        const auto n_signed    = static_cast<std::int64_t>(m_n);
+        // NOLINTNEXTLINE(openmp-use-default-none): spans are not listable
+#pragma omp parallel for num_threads(nthreads) schedule(static)
+        for (std::int64_t t = 0; t < n_signed; ++t) {
+            const float* row = scores + (static_cast<SizeType>(t) * nstages);
+            float m          = std::numeric_limits<float>::max();
+            for (SizeType s = nfree; s < nstages; ++s) {
+                if (row[s] <= g[s]) {
+                    m = std::numeric_limits<float>::lowest();
+                    break;
+                }
+            }
+            if (m > kFastCut) {
+                for (SizeType s = 0; s < nfree; ++s) {
+                    m = std::min(m, row[s] - g[s]);
+                    if (m <= kFastCut) {
+                        break;
+                    }
+                }
+            }
+            margin[static_cast<SizeType>(t)] = m;
+        }
+        const SizeType n        = margin.size();
+        const SizeType required = std::clamp<SizeType>(
+            static_cast<SizeType>(std::ceil(target * static_cast<double>(n))),
+            1, n);
+        const auto rank =
+            margin.begin() + static_cast<std::ptrdiff_t>(n - required);
+        std::ranges::nth_element(margin, rank);
+        if (*rank > kFastCut) {
+            return std::nextafter(*rank, std::numeric_limits<float>::lowest());
+        }
+        // Fallback when the shift drops at or below kFastCut: compute exact
+        // margins without the early cutoff.
+        // NOLINTNEXTLINE(openmp-use-default-none): spans are not listable
+#pragma omp parallel for num_threads(nthreads) schedule(static)
+        for (std::int64_t t = 0; t < n_signed; ++t) {
+            const float* row = scores + (static_cast<SizeType>(t) * nstages);
             float m          = std::numeric_limits<float>::max();
             for (SizeType s = 0; s < nfree; ++s) {
                 m = std::min(m, row[s] - g[s]);
             }
-            for (SizeType s = nfree; s < m_nstages; ++s) {
+            for (SizeType s = nfree; s < nstages; ++s) {
                 if (row[s] <= g[s]) {
                     m = std::numeric_limits<float>::lowest();
                 }
             }
-            margin[t] = m;
+            margin[static_cast<SizeType>(t)] = m;
         }
         return shift_of(margin, target);
     }
@@ -164,7 +240,7 @@ public:
 
     /// Exact change of Pd when the thresholds of one block move by +d
     /// (@p up, <= 0) or down by @p down per stage (@p dn, >= 0), every
-    /// other threshold fixed.
+    /// other threshold fixed. Scans m_active (from prepare_pass) when set.
     void block_deltas(std::span<const float> g,
                       std::span<const Block> blocks,
                       float d,
@@ -181,10 +257,13 @@ public:
                 block_of[s] = k;
             }
         }
-        const SizeType nblocks = blocks.size();
-        const SizeType nstages = m_nstages;
-        const float* scores    = m_scores.data();
-        const auto ntrials     = static_cast<std::int64_t>(m_n);
+        const SizeType nblocks   = blocks.size();
+        const SizeType nstages   = m_nstages;
+        const float* scores      = m_scores.data();
+        const bool use_active    = !m_active.empty();
+        const SizeType* active_p = m_active.data();
+        const auto nwork =
+            static_cast<std::int64_t>(use_active ? m_active.size() : m_n);
         // NOLINTNEXTLINE(openmp-use-default-none): spans are not listable
 #pragma omp parallel num_threads(nthreads)
         {
@@ -192,11 +271,12 @@ public:
             std::vector<SizeType> t_dn(nblocks, 0);
             std::vector<float> m(nstages);
 #pragma omp for schedule(static) nowait
-            for (std::int64_t trial = 0; trial < ntrials; ++trial) {
-                const float* row =
-                    scores + (static_cast<SizeType>(trial) * nstages);
-                SizeType first = nstages;
-                bool lost      = false; // cannot be revived by one block
+            for (std::int64_t idx = 0; idx < nwork; ++idx) {
+                const SizeType trial =
+                    use_active ? active_p[idx] : static_cast<SizeType>(idx);
+                const float* row = scores + (trial * nstages);
+                SizeType first   = nstages;
+                bool lost        = false; // cannot be revived by one block
                 for (SizeType s = 0; s < nstages; ++s) {
                     const float v = row[s] - g[s];
                     m[s]          = v;
@@ -244,6 +324,7 @@ private:
     SizeType m_nstages;
     SizeType m_n;
     std::vector<float> m_scores;
+    std::vector<SizeType> m_active;
 };
 
 /// A noise genealogy with the cost accounting of a schedule above the one it
@@ -504,7 +585,7 @@ double choose_moves(std::span<const double> dc_up,
         const double gain_up = -dc_up[k] + (lam * dp_up[k]);
         const double gain_dn = room_dn[k] != 0
                                    ? (lam * dp_dn[k]) - dc_dn[k]
-                                   : -std::numeric_limits<double>::infinity();
+                                   : std::numeric_limits<double>::lowest();
         step[k]              = 0;
         if (gain_up > 0.0 && gain_up >= gain_dn) {
             step[k] = 1;
@@ -651,12 +732,12 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1}};
     const bool adaptive = options.passes.empty();
     const auto& passes  = adaptive ? levels : options.passes;
-    const SignalSample signal(
-        engine.simulate_h1_scores(options.nsignal,
-                                  derive_seed(seed, kSignalDescent)),
-        nstages, options.nsignal);
+    SignalSample signal(engine.simulate_h1_scores(
+                            options.nsignal, derive_seed(seed, kSignalDescent)),
+                        nstages, options.nsignal, nthreads);
+    double ceiling = 1.0;
     if (has_floor) {
-        const double ceiling = signal.ceiling(floor);
+        ceiling = signal.ceiling(floor);
         out.diagnostics.emplace_back("pd_ceiling", ceiling);
         if (ceiling < target) {
             // min_pd is above what the fixed last threshold lets through.
@@ -668,11 +749,23 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     // The schedule in units of the unpruned signal score carries over to
     // other patterns and bin counts: z_s = (mean_s - g_s) / sd_s.
     const auto [mean, sd] = signal.moments();
-    // A common shift of every stage; if it takes the last threshold below
-    // the floor, the last one rests on the floor and the others shift.
-    const auto pin = [&](std::vector<float>& schedule) {
+    // Common shift of stages to @p target_pd; when the last threshold sits on
+    // the active floor (or a downward shift would take it below), keep the
+    // last stage at the floor and shift [0, nstages - 1) (KKT complementary
+    // slackness).
+    const auto pin_to = [&](std::vector<float>& schedule, double target_pd) {
         schedule[nstages - 1] = std::max(schedule[nstages - 1], floor);
-        const float shift     = signal.pin_shift(schedule, target, nstages);
+        if (has_floor && schedule[nstages - 1] <= floor) {
+            schedule[nstages - 1] = floor;
+            const float rest =
+                signal.pin_shift(schedule, target_pd, nstages - 1, nthreads);
+            for (SizeType s = 0; s + 1 < nstages; ++s) {
+                schedule[s] += rest;
+            }
+            return;
+        }
+        const float shift =
+            signal.pin_shift(schedule, target_pd, nstages, nthreads);
         if (schedule[nstages - 1] + shift >= floor) {
             for (SizeType s = 0; s < nstages; ++s) {
                 schedule[s] += shift;
@@ -680,16 +773,21 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
             return;
         }
         schedule[nstages - 1] = floor;
-        const float rest      = signal.pin_shift(schedule, target, nstages - 1);
+        const float rest =
+            signal.pin_shift(schedule, target_pd, nstages - 1, nthreads);
         for (SizeType s = 0; s + 1 < nstages; ++s) {
             schedule[s] += rest;
         }
     };
+    const auto pin = [&](std::vector<float>& schedule) {
+        pin_to(schedule, target);
+    };
     std::vector<float> g;
     if (options.start.empty()) {
-        // Two candidates, pinned to the target: the same z-score at every
-        // stage, and the shape the solutions of long patterns share. The one
-        // that costs less on one noise sample is the start.
+        // Candidate starts ranked by L = C / Pd on one noise sample: flat
+        // z-score and the long-pattern smooth shape at target, plus higher-Pd
+        // flat starts when L falls with Pd (short patterns). Stops probing
+        // upward as soon as L rises (long patterns stop on the first probe).
         g = zscore_start(signal, mean, sd, target);
         pin(g);
         std::vector<float> smooth = smooth_start(mean, sd);
@@ -705,8 +803,35 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         const double cost_smooth = cost_of(smooth);
         out.diagnostics.emplace_back("start_cost_ratio",
                                      cost_smooth / cost_flat);
-        if (cost_smooth < cost_flat) {
-            g = std::move(smooth);
+        double pd_g              = signal.pd(g, signal.size());
+        double best_rank         = cost_flat / std::max(pd_g, 1e-9);
+        const double pd_smooth   = signal.pd(smooth, signal.size());
+        const double rank_smooth = cost_smooth / std::max(pd_smooth, 1e-9);
+        if (rank_smooth < best_rank) {
+            g         = std::move(smooth);
+            best_rank = rank_smooth;
+        }
+        // Higher-Pd flat starts only help when fixed early-stage work (1 + B_0)
+        // is a non-negligible share of C; on deep high-cost trees L rises
+        // steeply with Pd everywhere above target.
+        if (std::min(cost_flat, cost_smooth) <=
+            500.0 * (1.0 + static_cast<double>(branching[0]))) {
+            for (const double p_try : {0.25, 0.5, 0.75, 0.9}) {
+                if (p_try <= target + 0.05 || (has_floor && p_try > ceiling)) {
+                    continue;
+                }
+                std::vector<float> high = zscore_start(signal, mean, sd, p_try);
+                pin_to(high, p_try);
+                const double pd_high = signal.pd(high, signal.size());
+                const double rank_high =
+                    cost_of(high) / std::max(pd_high, 1e-9);
+                if (rank_high < best_rank) {
+                    g         = std::move(high);
+                    best_rank = rank_high;
+                } else if (rank_high > 1.05 * best_rank) {
+                    break;
+                }
+            }
         }
     } else {
         g = options.start;
@@ -752,10 +877,12 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 g_ref, pass.ntrials, derive_seed(seed, kNoiseDescent + ipass)),
             branching, w_terminal);
         t_noise += seconds_since(t0);
-        t0          = std::chrono::steady_clock::now();
-        double cost = bank.evaluate(g, d);
+        t0 = std::chrono::steady_clock::now();
+        signal.prepare_pass(g_ref, nthreads);
+        double cost   = bank.evaluate(g, d);
+        double pd_cur = signal.pd(g, signal.size());
         bank.accept(g);
-        const double cost_begin = cost;
+        const double rank_begin = cost / std::max(pd_cur, 1e-9);
         for (const SizeType size : scales) {
             if (size > pass.max_block || size < pass.min_block) {
                 continue;
@@ -778,25 +905,34 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 saved -= dc_up[k];
                 lost -= dp_up[k];
             }
-            // Bisection of the multiplier: the net change of Pd of the chosen
-            // moves rises with it; take the smallest one that keeps Pd.
+            // Dinkelbach fractional multiplier: lam >= C / Pd lowers L = C / Pd
+            // whenever Pd stays >= target; otherwise bisect lam above C / Pd to
+            // enforce Pd >= target.
+            const double lam_lo = cost / std::max(pd_cur, 1e-9);
             std::vector<int> step(blocks.size(), 0);
-            double lo  = 0.0;
-            double hi  = -1.0;
-            double lam = std::max(saved / std::max(lost, 1e-12), 1e-9);
-            for (int i = 0; i < 60; ++i) {
-                const double dp =
-                    choose_moves(dc_up, dp_up, dc_dn, dp_dn, room, lam, step);
-                if (dp < 0.0) {
-                    lo  = lam;
-                    lam = hi < 0.0 ? lam * 2.0 : 0.5 * (lo + hi);
-                } else {
-                    hi  = lam;
-                    lam = 0.5 * (lo + hi);
+            const double dp_free =
+                choose_moves(dc_up, dp_up, dc_dn, dp_dn, room, lam_lo, step);
+            const bool binds = (pd_cur + dp_free) < target;
+            if (binds) {
+                const double need = target - pd_cur;
+                double lo         = lam_lo;
+                double hi         = -1.0;
+                double lam        = std::max(
+                    {lam_lo * 2.0, saved / std::max(lost, 1e-12), lo + 1e-9});
+                for (int i = 0; i < 60; ++i) {
+                    const double dp = choose_moves(dc_up, dp_up, dc_dn, dp_dn,
+                                                   room, lam, step);
+                    if (dp < need) {
+                        lo  = lam;
+                        lam = hi < 0.0 ? lam * 2.0 : 0.5 * (lo + hi);
+                    } else {
+                        hi  = lam;
+                        lam = 0.5 * (lo + hi);
+                    }
                 }
+                choose_moves(dc_up, dp_up, dc_dn, dp_dn, room,
+                             hi < 0.0 ? lam : hi, step);
             }
-            choose_moves(dc_up, dp_up, dc_dn, dp_dn, room, hi < 0.0 ? lam : hi,
-                         step);
             if (std::ranges::all_of(step, [](int s) { return s == 0; })) {
                 continue;
             }
@@ -808,7 +944,17 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 }
             }
             candidate[nstages - 1] = std::max(candidate[nstages - 1], floor);
-            pin(candidate);
+            double pd_cand         = 0.0;
+            if (binds) {
+                pin(candidate);
+                pd_cand = signal.pd(candidate, signal.size());
+            } else {
+                pd_cand = signal.pd(candidate, signal.size());
+                if (pd_cand < target) {
+                    pin(candidate);
+                    pd_cand = signal.pd(candidate, signal.size());
+                }
+            }
             bool above = true;
             for (SizeType s = 0; s < nstages && above; ++s) {
                 above = candidate[s] > g_ref[s];
@@ -817,10 +963,14 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 continue;
             }
             const double cost_candidate = bank.evaluate(candidate, d);
-            if (cost_candidate < kAccept * cost) {
+            const double rank_candidate =
+                cost_candidate / std::max(pd_cand, 1e-9);
+            const double rank_cur = cost / std::max(pd_cur, 1e-9);
+            if (rank_candidate < kAccept * rank_cur) {
                 bank.accept(candidate);
-                g    = candidate;
-                cost = cost_candidate;
+                g      = candidate;
+                cost   = cost_candidate;
+                pd_cur = pd_cand;
                 ++nmoves;
             } else {
                 bank.reject();
@@ -828,53 +978,91 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         }
         t_moves += seconds_since(t0);
         ++ipass;
-        repeat = adaptive && ilevel % 2 == 0 &&
-                 cost < (1.0 - kRepeatDrop) * cost_begin;
+        const double rank_end = cost / std::max(pd_cur, 1e-9);
+        repeat                = adaptive && ilevel % 2 == 0 &&
+                                rank_end < (1.0 - kRepeatDrop) * rank_begin;
     }
     out.search_thresholds = g;
     out.search_pd         = signal.pd(g, signal.size());
 
-    // Pin on a fresh bank (either direction), report on another, as solve().
-    const SizeType n = budget.nbank;
-    float pin_shift  = 0.0F;
+    // Pin on a fresh bank (two-sided when the Pd constraint bound, one-sided
+    // repair when Dinkelbach chose an interior Pd > target), then report on an
+    // independent bank, as solve().
+    const SizeType n    = budget.nbank;
+    const bool interior = out.search_pd > (target + 0.015);
+    float pin_shift     = 0.0F;
     {
-        const auto bank =
-            engine.make_signal_bank(n, derive_seed(seed, kBankPin));
-        auto margins = bank->margins(g);
-        pin_shift    = SignalSample::shift_of(margins, target);
-        if (g[nstages - 1] + pin_shift >= floor) {
+        constexpr float kPinCut = -0.5F;
+        const uint64_t pin_seed = derive_seed(seed, kBankPin);
+        if (!has_floor) {
+            auto margins = engine.h1_margins_above(g, kPinCut, n, pin_seed);
+            const SizeType required =
+                std::clamp<SizeType>(static_cast<SizeType>(std::ceil(
+                                         target * static_cast<double>(n))),
+                                     1, n);
+            const auto rank =
+                margins.begin() + static_cast<std::ptrdiff_t>(n - required);
+            std::ranges::nth_element(margins, rank);
+            if (*rank > kPinCut) {
+                pin_shift =
+                    std::nextafter(*rank, std::numeric_limits<float>::lowest());
+            } else {
+                const auto bank = engine.make_signal_bank(n, pin_seed);
+                auto full       = bank->margins(g);
+                pin_shift       = SignalSample::shift_of(full, target);
+            }
+            if (interior) {
+                pin_shift = std::min(0.0F, pin_shift);
+            }
             for (SizeType s = 0; s < nstages; ++s) {
                 g[s] += pin_shift;
             }
         } else {
-            // The last threshold rests on the floor: shift the others over
-            // the trials that pass it.
-            g[nstages - 1]           = floor;
-            std::vector<float> probe = g;
-            probe[nstages - 1]       = std::numeric_limits<float>::lowest();
-            margins                  = bank->margins(probe);
-            std::vector<float> last(nstages,
-                                    std::numeric_limits<float>::lowest());
-            last[nstages - 1] = floor;
-            const auto above  = bank->margins(last);
-            for (SizeType t = 0; t < n; ++t) {
-                if (above[t] <= 0.0F) {
-                    margins[t] = std::numeric_limits<float>::lowest();
+            const auto bank      = engine.make_signal_bank(n, pin_seed);
+            const bool lock_last = g[nstages - 1] <= floor;
+            if (!lock_last) {
+                auto margins = bank->margins(g);
+                pin_shift    = SignalSample::shift_of(margins, target);
+                if (interior) {
+                    pin_shift = std::min(0.0F, pin_shift);
                 }
             }
-            pin_shift = SignalSample::shift_of(margins, target);
-            if (std::isfinite(pin_shift) &&
-                pin_shift > std::numeric_limits<float>::lowest() / 2) {
-                for (SizeType s = 0; s + 1 < nstages; ++s) {
+            if (!lock_last && g[nstages - 1] + pin_shift >= floor) {
+                for (SizeType s = 0; s < nstages; ++s) {
                     g[s] += pin_shift;
+                }
+            } else {
+                // The last threshold rests on the floor: shift the others over
+                // the trials that pass it.
+                g[nstages - 1]           = floor;
+                std::vector<float> probe = g;
+                probe[nstages - 1]       = std::numeric_limits<float>::lowest();
+                auto margins             = bank->margins(probe);
+                std::vector<float> last(nstages,
+                                        std::numeric_limits<float>::lowest());
+                last[nstages - 1] = floor;
+                const auto above  = bank->margins(last);
+                for (SizeType t = 0; t < n; ++t) {
+                    if (above[t] <= 0.0F) {
+                        margins[t] = std::numeric_limits<float>::lowest();
+                    }
+                }
+                pin_shift = SignalSample::shift_of(margins, target);
+                if (interior) {
+                    pin_shift = std::min(0.0F, pin_shift);
+                }
+                if (utils::is_finite(pin_shift) &&
+                    pin_shift > std::numeric_limits<float>::lowest() / 2) {
+                    for (SizeType s = 0; s + 1 < nstages; ++s) {
+                        g[s] += pin_shift;
+                    }
                 }
             }
         }
     }
     {
-        const auto report =
-            engine.make_signal_bank(n, derive_seed(seed, kBankReport));
-        const SizeType count = count_survivors(*report, g);
+        const SizeType count =
+            engine.count_h1_survivors(g, n, derive_seed(seed, kBankReport));
         out.pd    = static_cast<double>(count) / static_cast<double>(n);
         out.pd_se = std::sqrt(out.pd * (1.0 - out.pd) / static_cast<double>(n));
         out.pd_trials = n;

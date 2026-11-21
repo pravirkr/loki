@@ -387,11 +387,12 @@ float fap_threshold(double fap, double ntemplates);
 std::vector<float> resample_zscores(std::span<const float> zscores,
                                     SizeType nstages);
 
-/** Mode "descent": minimises the cost C at Pd = min_pd by moving thresholds
- * (single stages and blocks of stages) on fixed samples: a noise genealogy
- * counts the exact change of C of a move, an unpruned signal sample the exact
- * change of Pd, and a multiplier (cost per unit Pd) selects the moves that
- * keep Pd at the target. Pins, reports and evaluates on fresh samples as
+/** Mode "descent": minimises L = C / Pd subject to Pd >= min_pd by moving
+ * thresholds (single stages and blocks of stages) on fixed samples: a noise
+ * genealogy counts the exact change of C of a move, an unpruned signal sample
+ * the exact change of Pd, and a Dinkelbach multiplier (>= C / Pd) selects
+ * moves that lower C / Pd while keeping Pd >= target. Pins (or repairs when an
+ * interior Pd > target is optimal), reports and evaluates on fresh samples as
  * solve() does. See docs/dts.md.
  */
 SchemeSolution descend_scheme(const ThresholdsEngine& engine,

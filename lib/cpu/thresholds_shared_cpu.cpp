@@ -352,6 +352,17 @@ public:
                           uint64_t seed) const override {
         return m_eval->simulate_h0_genealogy(thresholds, ntrials, seed);
     }
+    std::vector<float> h1_margins_above(std::span<const float> thresholds,
+                                        float min_margin,
+                                        SizeType n,
+                                        uint64_t seed) const override {
+        return m_eval->h1_margins_above(thresholds, min_margin, n, seed);
+    }
+    SizeType count_h1_survivors(std::span<const float> thresholds,
+                                SizeType n,
+                                uint64_t seed) const override {
+        return m_eval->count_h1_survivors(thresholds, n, seed);
+    }
 
     // ---- search ----
     void run(SizeType thres_neigh, bool show_progress) override {

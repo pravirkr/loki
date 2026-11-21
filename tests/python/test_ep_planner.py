@@ -158,10 +158,13 @@ def test_ep_target_snr_is_independent_and_invalidates_cache(tmp_path: Path) -> N
     changed = _search_config(nthreads=1, target_snr=12.0)
     with pytest.raises(ValueError, match="target_snr"):
         libloki.prune.EPRegionPlannerTime(changed, ref_segs=[0], plan_cache_file=cache)
-    # snr_min is the floor of the last threshold, so it is part of the plan.
+    # snr_min filters post-ascend candidates at output, not the pruning plan, so
+    # changing snr_min reuses the cached plan without invalidation.
     lowered = _search_config(nthreads=1, snr_min=6.0)
-    with pytest.raises(ValueError, match="dts_final_threshold"):
-        libloki.prune.EPRegionPlannerTime(lowered, ref_segs=[0], plan_cache_file=cache)
+    reloaded = libloki.prune.EPRegionPlannerTime(
+        lowered, ref_segs=[0], plan_cache_file=cache
+    )
+    assert reloaded.nchunks > 0
 
 
 @pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
@@ -250,10 +253,10 @@ def test_ep_planner_accepts_best_available_path(tmp_path: Path, backend: str) ->
 
     with h5py.File(cache) as saved:
         assert saved.attrs["min_pd"] == 1.0
-        # The threshold pipeline is part of the plan.
+        # The threshold pipeline is part of the plan; snr_min is not.
         assert saved.attrs["dts_algorithm"] == "descent-chained"
         assert saved.attrs["dts_mode"] == "descent"
-        assert saved.attrs["dts_final_threshold"] == cfg.snr_min
+        assert "dts_final_threshold" not in saved.attrs
         assert saved.attrs["dts_w_terminal"] == 1.0
     # Reloading preserves the user's requested constraint and chosen scheme.
     reloaded = libloki.prune.EPRegionPlannerTime(
@@ -354,10 +357,9 @@ def test_ep_planner_runs_region_designs(backend: str) -> None:
         assert 0.0 < chunk.pd <= 1.0
         assert chunk.pd_se >= 0.0
         assert chunk.max_sugg >= chunk.predicted_live
-        # The design holds Pd at min_pd (pinned two standard errors above it)
-        # and never lets a leaf below snr_min through the last stage.
-        assert abs(chunk.pd - 0.5) <= 6.0 * chunk.pd_se
-        assert chunk.threshold_scheme[-1] >= cfg.snr_min
+        # The design guarantees at least min_pd (Dinkelbach may choose a higher
+        # Pd on short 8-segment patterns when that lowers L = C / Pd).
+        assert chunk.pd >= 0.5 - 6.0 * chunk.pd_se
     # One design per region (the regions here differ only in nbins).
     designs = {
         (chunk.cfg.nbins, tuple(chunk.threshold_scheme)) for chunk in planner.chunk_cfgs
@@ -394,17 +396,25 @@ def test_ep_planner_is_reproducible_and_chains_its_regions() -> None:
     for first, second in zip(schemes[0], schemes[1], strict=True):
         np.testing.assert_array_equal(first, second)
     for chunk in plans[0].chunk_cfgs:
-        assert abs(chunk.pd - 0.3) <= 6.0 * chunk.pd_se
+        assert chunk.pd >= 0.3 - 6.0 * chunk.pd_se
 
 
-def test_ep_planner_drops_an_unreachable_snr_min_floor() -> None:
-    """A floor that leaves less than min_pd of the signals is not applied."""
-    cfg = _search_config(nthreads=1, target_snr=6.0, snr_min=7.0)
-    planner = libloki.prune.EPRegionPlannerTime(cfg, min_pd=0.9, ref_segs=[0])
-    assert planner.nchunks > 0
-    for chunk in planner.chunk_cfgs:
-        assert chunk.threshold_scheme[-1] < cfg.snr_min
-        assert chunk.pd >= 0.9 * 0.9
+def test_ep_planner_designs_thresholds_independently_of_snr_min() -> None:
+    """snr_min acts only on post-ascend candidates, never on pruning schedules."""
+    low = libloki.prune.EPRegionPlannerTime(
+        _search_config(nthreads=1, target_snr=6.0, snr_min=5.0),
+        min_pd=0.9,
+        ref_segs=[0],
+    )
+    high = libloki.prune.EPRegionPlannerTime(
+        _search_config(nthreads=1, target_snr=6.0, snr_min=9.0),
+        min_pd=0.9,
+        ref_segs=[0],
+    )
+    assert low.nchunks == high.nchunks > 0
+    for a, b in zip(low.chunk_cfgs, high.chunk_cfgs, strict=True):
+        np.testing.assert_array_equal(a.threshold_scheme, b.threshold_scheme)
+        assert a.pd >= 0.9 * 0.9
 
 
 def test_ep_plan_cache_made_on_cuda_serves_cpu(tmp_path: Path) -> None:

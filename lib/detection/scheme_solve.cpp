@@ -96,11 +96,12 @@ SizeType count_survivors(const SignalBank& bank,
         std::ranges::count_if(margins, [](float m) { return m > 0.0F; }));
 }
 
-float relax_schedule(std::vector<float>& thresholds,
-                     const SignalBank& bank,
-                     double target) {
-    const SizeType n        = bank.size();
-    auto margins            = bank.margins(thresholds);
+namespace {
+
+float relax_from_margins(std::vector<float>& thresholds,
+                         std::vector<float>& margins,
+                         double target) {
+    const SizeType n        = margins.size();
     const SizeType required = std::min(
         n, static_cast<SizeType>(std::ceil(target * static_cast<double>(n))));
     const auto rank =
@@ -118,6 +119,15 @@ float relax_schedule(std::vector<float>& thresholds,
         }
     }
     return shift;
+}
+
+} // namespace
+
+float relax_schedule(std::vector<float>& thresholds,
+                     const SignalBank& bank,
+                     double target) {
+    auto margins = bank.margins(thresholds);
+    return relax_from_margins(thresholds, margins, target);
 }
 
 std::pair<SizeType, SizeType> tighten_schedule(std::vector<float>& thresholds,
@@ -497,15 +507,35 @@ solve_scheme(ThresholdsEngine& engine, float min_pd, double w, bool robust) {
     // chosen schedule fell short of the target there.
     float repair_shift = 0.0F;
     {
-        const auto repair =
-            engine.make_signal_bank(n, derive_seed(seed, kBankRepair));
-        repair_shift = relax_schedule(best.thresholds, *repair, target);
+        constexpr float kRepairCut = -0.5F;
+        const uint64_t repair_seed = derive_seed(seed, kBankRepair);
+        auto margins = engine.h1_margins_above(best.thresholds, kRepairCut, n,
+                                               repair_seed);
+        const SizeType required = std::min(
+            n,
+            static_cast<SizeType>(std::ceil(target * static_cast<double>(n))));
+        const auto rank =
+            margins.begin() + static_cast<std::ptrdiff_t>(n - required);
+        std::ranges::nth_element(margins, rank);
+        if (*rank > kRepairCut) {
+            const float shift = std::min(
+                0.0F,
+                std::nextafter(*rank, std::numeric_limits<float>::lowest()));
+            if (shift < 0.0F) {
+                for (auto& threshold : best.thresholds) {
+                    threshold += shift;
+                }
+            }
+            repair_shift = shift;
+        } else {
+            const auto repair = engine.make_signal_bank(n, repair_seed);
+            repair_shift = relax_schedule(best.thresholds, *repair, target);
+        }
     }
     // Report on a third bank that no choice above has seen.
     {
-        const auto report =
-            engine.make_signal_bank(n, derive_seed(seed, kBankReport));
-        const SizeType count = count_survivors(*report, best.thresholds);
+        const SizeType count = engine.count_h1_survivors(
+            best.thresholds, n, derive_seed(seed, kBankReport));
         out.pd    = static_cast<double>(count) / static_cast<double>(n);
         out.pd_se = std::sqrt(out.pd * (1.0 - out.pd) / static_cast<double>(n));
         out.pd_trials = n;
@@ -610,14 +640,34 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
     // Repair on another bank, report on a third.
     float repair_shift = 0.0F;
     {
-        const auto repair =
-            engine.make_signal_bank(n, derive_seed(seed, kRefitRepair));
-        repair_shift = relax_schedule(thresholds, *repair, target);
+        constexpr float kRepairCut = -0.5F;
+        const uint64_t repair_seed = derive_seed(seed, kRefitRepair);
+        auto margins =
+            engine.h1_margins_above(thresholds, kRepairCut, n, repair_seed);
+        const SizeType required = std::min(
+            n,
+            static_cast<SizeType>(std::ceil(target * static_cast<double>(n))));
+        const auto rank =
+            margins.begin() + static_cast<std::ptrdiff_t>(n - required);
+        std::ranges::nth_element(margins, rank);
+        if (*rank > kRepairCut) {
+            const float shift = std::min(
+                0.0F,
+                std::nextafter(*rank, std::numeric_limits<float>::lowest()));
+            if (shift < 0.0F) {
+                for (auto& threshold : thresholds) {
+                    threshold += shift;
+                }
+            }
+            repair_shift = shift;
+        } else {
+            const auto repair = engine.make_signal_bank(n, repair_seed);
+            repair_shift      = relax_schedule(thresholds, *repair, target);
+        }
     }
     {
-        const auto report =
-            engine.make_signal_bank(n, derive_seed(seed, kRefitReport));
-        const SizeType count = count_survivors(*report, thresholds);
+        const SizeType count = engine.count_h1_survivors(
+            thresholds, n, derive_seed(seed, kRefitReport));
         out.pd    = static_cast<double>(count) / static_cast<double>(n);
         out.pd_se = std::sqrt(out.pd * (1.0 - out.pd) / static_cast<double>(n));
         out.pd_trials = n;

@@ -60,45 +60,37 @@ neither a schedule's Pd nor its pass rates depend on it. A design below 0.9
 schedule designed for the region's larger branching, which is valid (same Pd)
 but not the cheapest for them.
 
-Two things tie the designs to the rest of the configuration:
-
-- The last threshold is never below `snr_min`: the candidates of a Taylor
-  search keep no final leaf below it, so a schedule that lets one through
-  the last stage only spends work on it (diagnostic-only output, which
-  keeps every final leaf, loses those below `snr_min` too). `snr_min` is
-  therefore part of the plan (and of the plan
-  cache): candidates published again from a spool with a lower `snr_min`
-  than the plan's do not gain the leaves the last stage removed, and a leaf
-  that scores below `snr_min` at the last stage is gone even if its
-  reintegrated score would have passed. If fewer
-  than `min_pd` of the signals at `target_snr` end above `snr_min`, the floor
-  cannot hold: the planner warns and designs that region without it.
-- The regions are designed in order, and every design after the first starts
-  from the previous region's schedule, expressed in signal z-scores (the
-  form in which a schedule carries over to another branching pattern and
-  bin count), and runs two descent passes from there. A region's thresholds
-  thus depend on the regions before it; the seeds and the order are fixed,
-  so two plans of one configuration hold the same thresholds.
+The regions are designed upfront in strict region order, and every design after
+the first starts from the previous region's schedule, expressed in signal
+z-scores (the form in which a schedule carries over to another branching
+pattern and bin count), and runs two descent passes from there. The seeds and
+order are fixed, so two plans of one configuration hold bit-identical
+thresholds. The last pruning threshold is chosen freely by cost (`w_terminal =
+1`, weighing the leaves that go on to `ascend`): `snr_min` is applied strictly
+to the reintegrated post-`ascend` scores when writing candidates, so marginal
+leaves whose reintegrated score clears `snr_min` are not lost before `ascend`,
+diagnostic `--no-candidates` spools keep all surviving leaves, and changing
+`snr_min` (`loki publish` or re-running) reuses the cached plan without
+invalidation.
 
 On three production configurations (2, 3 and 5 parameters, 127 stages, 16 to
 1024 bins, target 0.1) every region's thresholds, counted on 2^17 independent
-signal trials, held Pd 0.0993-0.1041 (the previous design, `shared` with a
-re-fit above 128 bins: 0.0997-0.167), and cost 18-25 % fewer evaluated leaves
-per plan (geometric mean; per region from 45 % fewer to 1 % more). The
-largest population a chunk holds is not what the design minimises: the
-plans' `max_sugg` rose by 5 %, 50 % and 1 %, with the same number of chunks.
-Most of that is the descent's schedule (4 %, 34 % and 1 % without the
-floor); the floor adds the rest where it is active, and costs 4.8 %, 0.2 %
-and nothing in evaluated leaves on the three configurations.
+signal trials, held Pd 0.0992-0.1036 (the previous design, `shared` with a
+re-fit above 128 bins: 0.0997-0.167), and cost 18-28 % fewer evaluated leaves
+per plan (geometric mean: 0.723, 0.818 and 0.789; every single region from 46 %
+fewer to 2 % fewer). On the 5-parameter circular plan `max_sugg` fell by 23 %
+(28.8 to 23.7 GB peak chunk); on the 2- and 3-parameter plans `max_sugg` rose
+by 5 % and 36 %, with the same number of chunks.
 
 Memory and runtime of a design are bounded. It allocates no search pools,
 only samples, and their sizes follow the memory limit (a quarter of it, at
 most 4 GB: 24 B per trial and bin for a signal sample, 12 B for a noise
 evaluation; at most 2^17 signal and 2^15 noise trials, at least 2^13 and
-2^11). On CUDA a design takes 0.12-0.22 s up to 128 bins and 0.55 / 1.8 /
-7.1 s at 256 / 512 / 1024 bins (the unpruned signal samples); the previous
-design took 0.11-0.47 s and 1.0 / 3.2 / 12.3 s. The designs run once per plan
-and are kept in the plan cache.
+2^11). On CUDA a chained design takes 0.16-0.22 s up to 128 bins and 0.24 /
+0.33 / 0.52-0.60 s at 256 / 512 / 1024 bins (whole `--plan-only` plans of the
+three production searches: 3.2 / 3.0 / 13.8 s, against 30.6 / 18.1 / 29.0 s
+with the previous design). The designs run once per plan and are kept in the
+plan cache.
 
 A chunk is sized from its own design's final noise evaluation: see [Planning](#planning). A
 chunk that does not fit first prunes its seeds in slices, then narrows; on
@@ -216,7 +208,7 @@ Differences from the CPU policy:
 - A workspace group is allocated once and its shape must equal every chunk's
   (`validate` uses `check_equal`), so the engine builds the workspace from the
   group maxima and checks each chunk fits within it.
-- The threshold scheme is `DynamicThresholdScheme` in mode `shared` on both
+- The threshold scheme is `DynamicThresholdScheme` in mode `descent` on both
   backends. The CUDA and CPU engines differ statistically. A cache can be
   reused on the other backend, like FFT wisdom: its batch is adapted and its
   capacity and peak are rechecked under that run's own memory limit, worker

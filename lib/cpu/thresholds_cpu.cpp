@@ -1296,11 +1296,49 @@ public:
 
     std::vector<float> simulate_h1_scores(SizeType ntrials,
                                           uint64_t seed) const override {
-        const std::vector<float> open(m_nstages,
-                                      std::numeric_limits<float>::lowest());
+        if (ntrials == 0 || ntrials > (SizeType{1} << 20U)) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::simulate_h1_scores: ntrials must be "
+                "in [1, 2^20]");
+        }
         std::vector<float> h1_scores(m_nstages * ntrials, 0.0F);
-        evaluate_impl(open, ntrials, seed, &h1_scores, false);
+        run_h1_trials(ntrials, seed, &h1_scores, {}, 0.0F, nullptr);
         return h1_scores;
+    }
+
+    std::vector<float> h1_margins_above(std::span<const float> thresholds,
+                                        float min_margin,
+                                        SizeType n,
+                                        uint64_t seed) const override {
+        if (thresholds.size() != m_nstages) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::h1_margins_above: need one threshold "
+                "per stage");
+        }
+        if (n == 0 || n > (SizeType{1} << 20U)) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::h1_margins_above: ntrials must be in "
+                "[1, 2^20]");
+        }
+        std::vector<float> margins(n, std::numeric_limits<float>::max());
+        run_h1_trials(n, seed, nullptr, thresholds, min_margin, &margins);
+        return margins;
+    }
+
+    SizeType count_h1_survivors(std::span<const float> thresholds,
+                                SizeType n,
+                                uint64_t seed) const override {
+        if (thresholds.size() != m_nstages) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::count_h1_survivors: need one "
+                "threshold per stage");
+        }
+        if (n == 0 || n > (SizeType{1} << 20U)) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::count_h1_survivors: ntrials must be "
+                "in [1, 2^20]");
+        }
+        return run_h1_trials(n, seed, nullptr, thresholds, 0.0F, nullptr);
     }
 
     detail::NoiseGenealogy
@@ -1323,6 +1361,123 @@ public:
     }
 
 private:
+    /// L2-tiled H1 trajectory evaluator: processes small tiles of trials per
+    /// OpenMP thread instead of stage-wide ntrials x nbins matrices, calling
+    /// snr_boxcar_2d_max_cpu so every float is bit-identical to evaluate_impl()
+    /// under -ffast-math. Compacts dead trials within each tile when
+    /// @p thresholds is non-empty.
+    SizeType run_h1_trials(SizeType ntrials,
+                           uint64_t eval_seed,
+                           std::vector<float>* h1_scores,
+                           std::span<const float> thresholds,
+                           float min_margin,
+                           std::vector<float>* margins) const {
+        constexpr SizeType kTile = 64;
+        const SizeType nbins     = m_nbins;
+        const SizeType nstages   = m_nstages;
+        const bool prune         = !thresholds.empty();
+        SizeType survivors       = 0;
+        const SizeType ntiles    = (ntrials + kTile - 1) / kTile;
+        const auto ntiles_s      = static_cast<std::int64_t>(ntiles);
+
+        // NOLINTNEXTLINE(openmp-use-default-none): spans and members captured
+#pragma omp parallel num_threads(m_nthreads) reduction(+ : survivors)
+        {
+            std::vector<float> folds(kTile * nbins);
+            std::vector<float> generated(kTile * nbins);
+            std::vector<float> noise(kTile * nbins);
+            std::vector<float> scores(kTile);
+            std::array<uint32_t, kTile> active_trial{};
+            std::array<float, kTile> run_margin{};
+
+#pragma omp for schedule(dynamic)
+            for (std::int64_t tile_idx = 0; tile_idx < ntiles_s; ++tile_idx) {
+                const SizeType base = static_cast<SizeType>(tile_idx) * kTile;
+                SizeType n_act      = std::min(kTile, ntrials - base);
+                for (SizeType k = 0; k < n_act; ++k) {
+                    const auto trial_u = static_cast<uint32_t>(base + k);
+                    active_trial[k]    = trial_u;
+                    run_margin[k]      = std::numeric_limits<float>::max();
+                    auto rng0  = math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U,
+                                                        1U, trial_u);
+                    float* dst = folds.data() + (k * nbins);
+                    fill_standard_normals(rng0, dst, nbins, 1.0F);
+                    for (SizeType j = 0; j < nbins; ++j) {
+                        dst[j] += m_profile[j] * m_bias_snr;
+                    }
+                }
+
+                float var_in      = 1.0F;
+                const float scale = m_bias_snr;
+                for (SizeType istage = 0; istage < nstages && n_act > 0;
+                     ++istage) {
+                    const auto stage = static_cast<uint32_t>(istage);
+                    for (SizeType k = 0; k < n_act; ++k) {
+                        auto rng = math::make_keyed_pcg32(
+                            eval_seed, 2U, stage, 0U, 1U, active_trial[k]);
+                        float* nz = noise.data() + (k * nbins);
+                        fill_standard_normals(rng, nz, nbins, 1.0F);
+                        const float* in = folds.data() + (k * nbins);
+                        float* out      = generated.data() + (k * nbins);
+                        for (SizeType j = 0; j < nbins; ++j) {
+                            out[j] = in[j] + nz[j] + (scale * m_profile[j]);
+                        }
+                    }
+                    const float stdnoise = std::sqrt(var_in + 1.0F);
+                    detection::detail::snr_boxcar_2d_max_cpu(
+                        std::span<const float>(generated.data(), n_act * nbins),
+                        m_box_score_widths,
+                        std::span<float>(scores.data(), n_act), n_act, nbins,
+                        stdnoise, /*nthreads=*/1);
+
+                    if (h1_scores != nullptr) {
+                        for (SizeType k = 0; k < n_act; ++k) {
+                            (*h1_scores)[(istage * ntrials) + active_trial[k]] =
+                                scores[k];
+                        }
+                    }
+                    if (!prune) {
+                        folds.swap(generated);
+                    } else {
+                        const float thr   = thresholds[istage];
+                        SizeType next_act = 0;
+                        for (SizeType k = 0; k < n_act; ++k) {
+                            const float m =
+                                std::min(run_margin[k], scores[k] - thr);
+                            if (m <= min_margin) {
+                                if (margins != nullptr) {
+                                    (*margins)[active_trial[k]] = m;
+                                }
+                            } else {
+                                active_trial[next_act] = active_trial[k];
+                                run_margin[next_act]   = m;
+                                std::copy_n(generated.data() + (k * nbins),
+                                            nbins,
+                                            folds.data() + (next_act * nbins));
+                                ++next_act;
+                            }
+                        }
+                        n_act = next_act;
+                    }
+                    var_in += 1.0F;
+                }
+                if (prune) {
+                    if (margins != nullptr) {
+                        for (SizeType k = 0; k < n_act; ++k) {
+                            (*margins)[active_trial[k]] = run_margin[k];
+                        }
+                    }
+                    for (SizeType k = 0; k < n_act; ++k) {
+                        if (run_margin[k] > 0.0F) {
+                            ++survivors;
+                        }
+                    }
+                }
+            }
+        }
+        return survivors;
+    }
+
     /// evaluate(); when @p h1_scores is set, also stores every stage's H1
     /// scores (stage-major) before pruning. @p h0_only skips the H1 branch
     /// (success_h1 = 1 in the states). With @p genealogy (and h0_only), the
