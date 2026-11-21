@@ -944,9 +944,7 @@ unpruned signal samples (2^15 trials for the descent, 2 × 2^17 for the pin
 and the report). It is slower than `shared` at 16 bins, equal at 64, faster
 at 128, and 0.02-0.08 s on 4-32 segments. The sample sizes are the engine's
 solve budget (2^17 per signal bank), the same at every bin count. Open:
-fewer final trials at large bin counts, and the time of the planner's
-present path there (search at 64 bins, then the refit), which was not
-measured, before the planner can use the descent above 128 bins.
+fewer final trials at large bin counts.
 
 Where the host time goes (16-128 bins, 127 stages, ms per solve): forward
 re-mark 65 (32 candidate evaluations of about 10^6 genealogy entries each,
@@ -1064,6 +1062,62 @@ The current default on the checks above:
   i.e. 1.009 of the baseline (0.97-1.03): slightly worse than with six
   passes (1.004). Of the 125 patterns where the floor is inactive, 116 are
   bit-identical with and without it.
+
+The planner on the descent (three production configurations of 2, 3 and 5
+parameters, 127 stages, regions of 16 to 1024 bins, target 0.1, floor
+`snr_min` = 7; every region's thresholds judged on 2^17 fresh signal trials
+and 2 × 2^16 noise trials at the true bin count):
+
+| | previous design (`shared`, re-fit above 128 bins) | descent, chained |
+|---|---|---|
+| Pd of a region | 0.0997-0.167 | 0.0993-0.1041 |
+| C per plan (geometric mean over the regions) | 1 | 0.755 / 0.816 / 0.790 |
+| C per region | 1 | 0.55-1.01 |
+| Last threshold | 5.5-7.8 | 7.00-7.83 |
+| Design, 16 / 32 / 64 / 128 bins (GPU) | 0.11-0.14 / 0.15-0.22 / 0.24-0.27 / 0.44-0.47 s | first region 0.16-0.22 s; chained 0.12-0.16 / 0.13 / 0.16-0.17 s |
+| Design, 256 / 512 / 1024 bins (GPU) | 1.0 / 3.2 / 12.3 s | 0.55 / 1.8 / 7.1 s |
+| Whole plan (GPU, `--plan-only`) | 30.6 / 18.1 / 29.0 s | 17.8 / 10.8 / 21.0 s |
+| Whole plan, 2 parameters, CPU, 4 threads | 444 s | 163 s |
+
+- The previous design lost most above 128 bins, where its re-fit left Pd at
+  0.11-0.17 (C of the descent 0.55-0.82 of it there); up to 128 bins the
+  descent's C was 0.67-1.01 of it, although the floor holds its last
+  threshold at 7 or above where the previous one sat as low as 5.5.
+- Chained start (the previous region's z-scores, two passes) against the
+  default solve of every region from its own start, same regions: C 0.982 /
+  0.994 / 0.989 per plan (0.944-1.012 per region), 0.10-0.17 s instead of
+  0.15-0.24 s up to 128 bins. Three passes or the default levels from the
+  chained start were not better (0.981-1.005, up to 1.045 on one region).
+  Above 128 bins the chain saves little time (7.1 s instead of 7.4 s at
+  1024 bins): the unpruned signal samples are the cost there.
+- Two plans of one configuration held bit-identical thresholds.
+- The descent minimises evaluated leaves, not the largest population: the
+  plans' largest chunk population rose by 5 %, 50 % and 1 % (predicted live
+  leaves summed over the chunks: +42 %, +49 %, -7 %), with the same number
+  of chunks; the plan that prunes seeds in slices needed at most 3 slices
+  per chunk instead of 5. The same plans without the floor (`snr_min` = 0):
+  +4 %, +34 %, +1 % (live leaves +29 %, +32 %, -7 %), so most of the rise is
+  the descent's schedule and the floor adds the rest.
+- Searches of an injected pulse with each planner's own thresholds (the
+  jerk search of `bench/scripts/ep/ep_production_cuda.py`: 2^25 samples, 64
+  bins, 128 segments, 16 runs, `target_snr` 9.2, `snr_min` 5 so the floor is
+  inactive; the same 100 noise seeds per S/N for both planners):
+
+  | Injected S/N | Searches that recover it, previous / descent | Runs holding it, previous / descent | Final leaves, previous / descent |
+  |---|---|---|---|
+  | 9.2 | 76 / 77 of 100 | 0.125 / 0.119 | 453 / 316 |
+  | 10 | 97 / 96 | 0.204 / 0.193 | 1011 / 751 |
+  | 11 | 100 / 100 | 0.344 / 0.326 | 2938 / 2441 |
+
+  The fraction of runs that keep the pulse at the design S/N is above
+  `min_pd` = 0.1 with both, and 5 % lower with the descent (its design Pd
+  is 0.099 against 0.101 here). This plan has one region of 64 bins: the
+  regions above 128 bins, where the previous design held Pd 0.11-0.17, were
+  not searched.
+- Price of the floor of 7 on these plans (floored against free, judged at
+  equal Pd): C 1.048 (1.02-1.08 per region; free last thresholds 5.8-6.4),
+  1.002 (0.97-1.03; free 6.6-7.1) and 1 (free 7.1-7.8, the floor inactive,
+  bit-identical plans).
 
 Kept:
 

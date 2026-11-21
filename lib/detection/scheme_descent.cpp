@@ -587,6 +587,26 @@ float fap_threshold(double fap, double ntemplates) {
     return static_cast<float>(hi);
 }
 
+std::vector<float> resample_zscores(std::span<const float> zscores,
+                                    SizeType nstages) {
+    if (zscores.size() == nstages) {
+        return {zscores.begin(), zscores.end()};
+    }
+    if (zscores.size() < 2 || nstages < 2) {
+        return {};
+    }
+    std::vector<float> out(nstages);
+    const double scale = static_cast<double>(zscores.size() - 1) /
+                         static_cast<double>(nstages - 1);
+    for (SizeType s = 0; s < nstages; ++s) {
+        const double x = static_cast<double>(s) * scale;
+        const auto k   = std::min(static_cast<SizeType>(x), zscores.size() - 2);
+        const auto t   = static_cast<float>(x - static_cast<double>(k));
+        out[s]         = zscores[k] + (t * (zscores[k + 1] - zscores[k]));
+    }
+    return out;
+}
+
 SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                               float min_pd,
                               double w_terminal,
@@ -599,8 +619,14 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     const SizeType nstages = engine.get_nstages();
     const uint64_t seed    = engine.get_seed();
     const auto branching   = engine.get_branching_pattern();
-    const auto budget      = engine.solve_budget();
-    const double p         = static_cast<double>(min_pd);
+    auto budget            = engine.solve_budget();
+    if (options.nbank > 0) {
+        budget.nbank = options.nbank;
+    }
+    if (options.nnoise > 0) {
+        budget.nnoise = options.nnoise;
+    }
+    const double p = static_cast<double>(min_pd);
     // As solve(): the pin aims 2 binomial standard errors above the target.
     const double target =
         std::min(1.0, p + (2.0 * std::sqrt(p * (1.0 - p) /

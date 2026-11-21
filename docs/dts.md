@@ -56,8 +56,9 @@ cells: it improves one schedule on fixed samples (see
 | `robust` | as `shared`, plus a second pass | `solve()`: shortlist, block refinement, repair, report | when ~2.5x the run time buys a lower L |
 | `descent` | none: constrained descent of one schedule on a signal bank and a noise genealogy | `solve()` is the whole mode: descent, pin, report | lowest C at Pd = `min_pd`; a floor on the last threshold (`fap`) |
 
-The EP planner uses `shared` on both backends, once per region; every chunk
-of the region runs that schedule (see
+The EP planner uses `descent` on both backends, once per region, with
+`snr_min` as the floor of the last threshold and each region started from the
+previous one's z-scores; every chunk of the region runs that schedule (see
 [memory.md](memory.md#planning)).
 
 ## The winner's curse, and what the default mode does about it
@@ -380,8 +381,8 @@ regression golden of both shared modes (valid for one toolchain);
 - The samples of `descent` do not shrink with the bin count (2^15 signal
   trials for the moves, 2^17 each for the pin and the report, as `solve()`
   of the shared modes): above 128 bins they are its run time and its memory.
-- The EP planner still designs with `shared` and refits above 128 bins, so
-  a bound on the last threshold is available from the scheme's API only.
+- The EP planner floors the last threshold at `snr_min`; `fap` is available
+  from the scheme's API only.
 - The Pd guarantee is statistical (target `min_pd` + 2 standard errors of a
   2^17-trial count) and holds for the simulated signal model: a pulse of the
   reference shape at the design S/N, folded without loss. Mismatch loss of the

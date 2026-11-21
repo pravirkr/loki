@@ -49,41 +49,58 @@ Chunking is automatic. The sweep first forms regions for the required bin
 counts (never merged), then subdivides each region in frequency until every
 chunk and its shared workspace group fit the effective memory budget. Each
 region's thresholds are designed once, over its whole band, by
-`DynamicThresholdScheme` in mode `shared` on both backends (signal trials
-common to every path, probability bins anchored at `min_pd`, the survivors of
-the last stage weighted into the cost): the search, then `solve()`, which
-selects, tightens and repairs the schedule on fresh samples so that its
-measured Pd is `min_pd` (see `include/loki/detection/thresholds.hpp`). Every
-chunk of the region runs that schedule. The chunk's `pd` and `pd_se` are the
-design's measurement at the true `nbins`: the branching only multiplies the
-leaves of each stage (`State::gen_next`), so neither a schedule's Pd nor its
-pass rates depend on it. A design below 0.9 `min_pd` is kept with a warning.
-One design per region bounds planning time: a design at 1024 bins costs
-about 20 s on CUDA, mostly the refit's evaluations. Chunks below the top of a
-region run a schedule designed for the region's larger branching, which is
-valid (same Pd) but not the cheapest for them.
+`DynamicThresholdScheme` in mode `descent` on both backends, at the region's
+true `nbins`: the cost (leaves evaluated, the survivors of the last stage
+weighted in) is minimised at Pd = `min_pd`, and the schedule is pinned and
+reported on fresh samples (see [dts.md](dts.md)). Every chunk of the region
+runs that schedule. The chunk's `pd` and `pd_se` are the design's measurement:
+the branching only multiplies the leaves of each stage (`State::gen_next`), so
+neither a schedule's Pd nor its pass rates depend on it. A design below 0.9
+`min_pd` is kept with a warning. Chunks below the top of a region run a
+schedule designed for the region's larger branching, which is valid (same Pd)
+but not the cheapest for them.
 
-Memory and runtime of a design are bounded. Up to 128 bins the search runs at
-the true `nbins` when its pools fit. Above that, or when they do not fit, it
-runs at 64 bins (`kDtsNbinsSim`, raised so that the reference pulse spans at
-least four bins) and `refit_scheme` re-fits the schedule at the true `nbins`:
-a common upward threshold shift, scanned on fresh samples, then tightening,
-repair and an independent report. The reason is that a maximum over more
-boxcar templates has a heavier noise tail (about `nbins` times more
-independent phase positions), so a schedule found at 64 bins is too
-permissive at 256 to 1024 bins (cost per detection 1.1 to 3.3 times a native
-search's; `bench/scripts/schemes/nbins_proxy_study.py`); the shift brings that
-to about 1.0 to 1.05 in the same tests and the refit always reports the Pd at
-the true `nbins`. The refit's sample sizes follow the memory limit (a quarter
-of it, at most 4 GB: 24 B per trial and bin for a signal bank, 12 B for a noise
-evaluation), and the search budget steps down (1024 trials / 40 probability
-bins, 512/40, 512/20, 256/20, 128/16) until its pools fit; only a limit below
-the last step fails, with a message. The search pools are checked against the
-limit on their own, because they are freed before the EP search. The designs
-run once per plan and are kept in the plan cache.
+Two things tie the designs to the rest of the configuration:
 
-A chunk is sized from its own design's final noise evaluation (2^15 trials
-natively, the refit's noise sample otherwise): see [Planning](#planning). A
+- The last threshold is never below `snr_min`: the candidates of a Taylor
+  search keep no final leaf below it, so a schedule that lets one through
+  the last stage only spends work on it (diagnostic-only output, which
+  keeps every final leaf, loses those below `snr_min` too). `snr_min` is
+  therefore part of the plan (and of the plan
+  cache): candidates published again from a spool with a lower `snr_min`
+  than the plan's do not gain the leaves the last stage removed, and a leaf
+  that scores below `snr_min` at the last stage is gone even if its
+  reintegrated score would have passed. If fewer
+  than `min_pd` of the signals at `target_snr` end above `snr_min`, the floor
+  cannot hold: the planner warns and designs that region without it.
+- The regions are designed in order, and every design after the first starts
+  from the previous region's schedule, expressed in signal z-scores (the
+  form in which a schedule carries over to another branching pattern and
+  bin count), and runs two descent passes from there. A region's thresholds
+  thus depend on the regions before it; the seeds and the order are fixed,
+  so two plans of one configuration hold the same thresholds.
+
+On three production configurations (2, 3 and 5 parameters, 127 stages, 16 to
+1024 bins, target 0.1) every region's thresholds, counted on 2^17 independent
+signal trials, held Pd 0.0993-0.1041 (the previous design, `shared` with a
+re-fit above 128 bins: 0.0997-0.167), and cost 18-25 % fewer evaluated leaves
+per plan (geometric mean; per region from 45 % fewer to 1 % more). The
+largest population a chunk holds is not what the design minimises: the
+plans' `max_sugg` rose by 5 %, 50 % and 1 %, with the same number of chunks.
+Most of that is the descent's schedule (4 %, 34 % and 1 % without the
+floor); the floor adds the rest where it is active, and costs 4.8 %, 0.2 %
+and nothing in evaluated leaves on the three configurations.
+
+Memory and runtime of a design are bounded. It allocates no search pools,
+only samples, and their sizes follow the memory limit (a quarter of it, at
+most 4 GB: 24 B per trial and bin for a signal sample, 12 B for a noise
+evaluation; at most 2^17 signal and 2^15 noise trials, at least 2^13 and
+2^11). On CUDA a design takes 0.12-0.22 s up to 128 bins and 0.55 / 1.8 /
+7.1 s at 256 / 512 / 1024 bins (the unpruned signal samples); the previous
+design took 0.11-0.47 s and 1.0 / 3.2 / 12.3 s. The designs run once per plan
+and are kept in the plan cache.
+
+A chunk is sized from its own design's final noise evaluation: see [Planning](#planning). A
 chunk that does not fit first prunes its seeds in slices, then narrows; on
 CUDA the planner also lowers the parent batch where that forecasts a faster
 search, or when the minimum chunk cannot fit at all (see

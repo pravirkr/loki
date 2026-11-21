@@ -369,12 +369,23 @@ struct DescentOptions {
     /// The start holds z-scores, (mean - threshold) / sd of the unpruned
     /// signal score per stage, as SchemeSolution::zscores reports them.
     bool start_zscores{false};
+    /// Trials of the pin's and the report's signal samples, and of the final
+    /// noise evaluation (0: the engine's solve_budget()).
+    SizeType nbank{0};
+    SizeType nnoise{0};
     int nthreads{1};
 };
 
 /// The S/N a noise score exceeds with probability @p fap / @p ntemplates
 /// (one-sided Gaussian tail).
 float fap_threshold(double fap, double ntemplates);
+
+/// The z-scores of a schedule (SchemeSolution::zscores) at @p nstages stages,
+/// as the start of a descent on another pattern: linear in the fractional
+/// stage position when the stage counts differ. Empty (no start) when
+/// @p zscores is empty or either count is below 2 and they differ.
+std::vector<float> resample_zscores(std::span<const float> zscores,
+                                    SizeType nstages);
 
 /** Mode "descent": minimises the cost C at Pd = min_pd by moving thresholds
  * (single stages and blocks of stages) on fixed samples: a noise genealogy

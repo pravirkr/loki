@@ -197,12 +197,12 @@ struct SharedOptions {
     /// Mode "descent": the passes, each run once (empty: three default
     /// levels, each repeated while it still gains), and the trials of the
     /// signal sample its moves count Pd on.
-    std::vector<DescentPass> descent_passes;
+    std::vector<DescentPass> descent_passes{};
     SizeType descent_nsignal = SizeType{1} << 15U;
     /// Mode "descent": the schedule the descent starts from, one threshold
     /// per stage, e.g. the solution of a similar pattern (empty: the cheaper
     /// of two built-in candidates, measured on one noise sample).
-    std::vector<float> descent_start;
+    std::vector<float> descent_start{};
     /// descent_start holds signal z-scores (SchemeSolution::zscores of
     /// another solve) instead of thresholds: use it when the bin count, the
     /// S/N or the pulse differ between the two patterns.

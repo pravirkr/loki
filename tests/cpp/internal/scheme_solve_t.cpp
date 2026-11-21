@@ -244,6 +244,34 @@ double cost_per_detection(const loki::detection::detail::ThresholdsEngine& eng,
 
 } // namespace
 
+TEST_CASE("resample_zscores carries z-scores to another stage count",
+          "[thresholds][descent]") {
+    const std::vector<float> z = {2.0F, 0.0F, 1.0F, 3.0F};
+    // The same count: unchanged
+    REQUIRE(detail::resample_zscores(z, 4) == z);
+    // Linear in the fractional stage position, the ends kept
+    const auto longer = detail::resample_zscores(z, 7);
+    REQUIRE(longer.size() == 7);
+    const std::vector<float> expected = {2.0F, 1.0F, 0.0F, 0.5F,
+                                         1.0F, 2.0F, 3.0F};
+    for (SizeType s = 0; s < expected.size(); ++s) {
+        CAPTURE(s);
+        REQUIRE_THAT(longer[s], WithinAbs(expected[s], 1e-6));
+    }
+    const auto shorter = detail::resample_zscores(longer, 4);
+    REQUIRE(shorter.size() == 4);
+    for (SizeType s = 0; s < z.size(); ++s) {
+        CAPTURE(s);
+        REQUIRE_THAT(shorter[s], WithinAbs(z[s], 1e-6));
+    }
+    const auto two = detail::resample_zscores(z, 2);
+    REQUIRE(two == std::vector<float>{2.0F, 3.0F});
+    // Nothing to carry over: no start
+    REQUIRE(detail::resample_zscores({}, 5).empty());
+    REQUIRE(detail::resample_zscores(std::vector<float>{1.0F}, 5).empty());
+    REQUIRE(detail::resample_zscores(z, 1).empty());
+}
+
 TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
           "[thresholds][solve][slow][bigmem]") {
     // The 8-segment pattern of issue #15. A schedule searched at 64 bins is too
