@@ -21,6 +21,9 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(libloki, m) {
     m.doc() = "Python bindings for the loki library";
+    // The project version, which pip's metadata also reads: loki.__version__
+    // comes from here, so a build on PYTHONPATH needs no install.
+    m.attr("__version__") = LOKI_VERSION;
 
     py::add_ostream_redirect(m, "ostream_redirect");
     // A long call stopped by Ctrl-C (see LongCall in pybind_utils.hpp).
