@@ -10,6 +10,7 @@ import numpy as np
 
 from loki import libloki
 from loki_survey.cli import main
+from loki_survey.plan import loki_candidate_defaults, options_record
 
 from .conftest import write_site
 
@@ -109,6 +110,19 @@ def test_simulated_pulsar_is_found(tmp_path: Path, unit_python: str) -> None:
         with h5py.File(run / "out" / f"{uid}.h5", "r") as handle:
             assert "science_sha256" in handle["survey"].attrs
         assert (run / "out" / "raw").is_dir()
+
+    # Each unit ran loki's candidate options for its kind, as resolved.json
+    # records them: the EP unit reduces its leaves per run, the FFA unit keeps
+    # every trial.
+    recorded = json.loads((run / "resolved.json").read_text())["candidate_options"]
+    assert recorded["ep"] == options_record(loki_candidate_defaults("ep"))
+    assert recorded["ffa"] == options_record(loki_candidate_defaults("ffa"))
+    for box, kind in (("ffa_accel", "ffa"), ("ep_accel", "ep")):
+        uid = f"sim_DM10.00__mid__b0__{box}"
+        with h5py.File(run / "out" / f"{uid}.h5", "r") as handle:
+            ran = handle["processing"].attrs
+            for name in ("max_per_cell", "cell_bins", "dominance_kappa"):
+                assert ran[name] == recorded[kind][name], (box, name)
 
     # The EP unit keeps loki's per-level table of each run, overloads included;
     # the FFA unit has no pruning runs.

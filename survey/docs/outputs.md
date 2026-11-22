@@ -28,6 +28,11 @@ run/
   quarantine/              work directories of failed attempts, kept for a look
 ```
 
+`resolved.json` holds the survey and site with every default written out,
+the science and analysis hashes, the code versions, and `candidate_options`:
+per kind of unit (`ffa`, `ep`), the loki candidate options its units run,
+loki's defaults for that kind with `[candidates]` applied.
+
 ## Unit outputs: `out/<unit>.h5` and `out/<unit>.json`
 
 A unit is one series × frequency band × search box. Its id says which, for
@@ -45,12 +50,14 @@ common candidate tables, described in loki's `docs/candidates.md`:
   series' metadata (DM, `tobs`, `reference_time_seconds`) and the candidate
   options;
 - root attributes: `n_detections`, `n_clusters`, `n_candidates`, and
-  `n_cell_dropped` when `[candidates] max_per_cell` is set. With the cap,
-  loki keeps up to `max_per_cell` trials in each cell of width
-  `cell_log_width` in ln f, and `n_detections` counts the trials kept. A
-  source spreads over about 1/(f T) in ln f, so with a narrower cell it keeps
-  trials in several neighbouring cells, which loki's clustering joins into
-  one cluster: `n_detections` is then a few times `n_clusters`;
+  `n_cell_dropped` when `max_per_cell` is set (EP units, by loki's EP
+  defaults, or `[candidates]`). With the cap, loki keeps up to `max_per_cell`
+  trials in each frequency cell, `cell_bins` resolutions 1/T or
+  `cell_log_width` in ln f wide, and `n_detections` counts the trials kept. A
+  source spreads over about one resolution, 1/(f T) in ln f, so with a
+  narrower cell it keeps trials in several neighbouring cells, which loki's
+  clustering joins into one cluster: `n_detections` is then a few times
+  `n_clusters`;
 - `/survey`, added by loki-survey:
   - attributes: the unit, `science_sha256`, `inputs_sha256`, `arrays_sha256`,
     the code versions, host, attempt, backend, threads and loki's memory

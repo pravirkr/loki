@@ -56,10 +56,11 @@ MODELS = ("circular_snap", "circular_crackle")
 
 
 def survey_toml() -> str:
-    """One five-parameter EP box, with loki's own reduction of EP leaves."""
-    # Without the reduction, the candidate step clusters every leaf above
-    # snr_min (about 10^5 here) and takes minutes.
-    ep = libloki.configs.CandidateOptions.ep_defaults()
+    """One five-parameter EP box, with loki's own reduction of EP leaves.
+
+    EP units start from it: without it the candidate step clusters every leaf
+    above snr_min (about 10^5 here) and takes minutes.
+    """
     return f"""
 [survey]
 name = "circular"
@@ -80,10 +81,6 @@ orbit = {{ p_orb_min_s = {P_ORB_MIN_S}, m_c_max = {M_C_MAX} }}
 segments = 8
 bseg_brute = 1024
 ref_segs = [4]
-[candidates]
-max_per_cell = {ep.max_per_cell}
-cell_bins = {ep.cell_bins}
-dominance_kappa = {ep.dominance_kappa}
 [output]
 raw_fraction = 1.0
 """

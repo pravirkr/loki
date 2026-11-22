@@ -28,7 +28,8 @@ from loki_survey.rundir import RunDir, canonical_json, read_json, sha256_text
 if TYPE_CHECKING:
     from pathlib import Path
 
-SCHEMA_VERSION = 1
+# 2: EP units start from loki's EP candidate options, not its FFA ones.
+SCHEMA_VERSION = 2
 # Taylor derivatives in loki's parameter-row order, highest first. A search of
 # order "jerk" has rows (jerk, accel, freq).
 DERIVATIVES = ("crackle", "snap", "jerk", "accel")
@@ -995,6 +996,13 @@ def load_resolved(run: RunDir) -> Resolved:
         msg = f"{run.resolved_json} not found; run 'loki-survey check' first"
         raise ConfigError(msg)
     doc = read_json(run.resolved_json)
+    if doc.get("schema_version") != SCHEMA_VERSION:
+        msg = (
+            f"{run.resolved_json}: made by another version of loki-survey "
+            f"(schema {doc.get('schema_version')}, this one reads "
+            f"{SCHEMA_VERSION}); start a new run directory"
+        )
+        raise ConfigError(msg)
     science = dict(doc["survey"])
     science.pop("schema_version", None)
     survey = _from_dict_survey(science)
@@ -1033,7 +1041,16 @@ def load_resolved_analysis(run: RunDir) -> Resolved:
     return resolved
 
 
-def resolved_dict(resolved: Resolved, versions: dict[str, str]) -> dict[str, Any]:
+def resolved_dict(
+    resolved: Resolved,
+    versions: dict[str, str],
+    candidate_options: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return ``resolved.json``.
+
+    ``candidate_options`` records, per kind of unit, the loki candidate options
+    its units run: loki's defaults for that kind with [candidates] applied.
+    """
     return {
         "schema_version": SCHEMA_VERSION,
         "survey": science_dict(resolved.survey),
@@ -1041,5 +1058,6 @@ def resolved_dict(resolved: Resolved, versions: dict[str, str]) -> dict[str, Any
         "science_sha256": resolved.science_sha256,
         "analysis": asdict(resolved.analysis),
         "analysis_sha256": resolved.analysis_sha256,
+        "candidate_options": candidate_options or {},
         "versions": versions,
     }

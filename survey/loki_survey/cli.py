@@ -12,6 +12,7 @@ from pathlib import Path
 
 from loki_survey.collect import IncompleteRunError
 from loki_survey.config import (
+    SCHEMA_VERSION,
     ConfigError,
     Resolved,
     load_resolved,
@@ -55,13 +56,15 @@ def cmd_tutorial(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    from loki_survey.plan import candidate_options  # noqa: PLC0415
+    from loki_survey.plan import candidate_options, options_record  # noqa: PLC0415
     from loki_survey.unit import versions  # noqa: PLC0415
 
     require_loki()
     run = RunDir.at(args.rundir)
     resolved = resolve(run)
-    buffer_gb = candidate_options(resolved).memory_gb
+    kinds = sorted({box.kind for box in resolved.survey.boxes})
+    options = {kind: candidate_options(resolved, kind) for kind in kinds}
+    buffer_gb = max(o.memory_gb for o in options.values())
     if resolved.site.loki_memory_gb <= buffer_gb:
         msg = (
             f"{run.site_toml} [unit]: memory_gb - overhead_gb leaves loki "
@@ -75,14 +78,20 @@ def cmd_check(args: argparse.Namespace) -> int:
         if old["science_sha256"] != resolved.science_sha256 and any(
             run.out_dir.glob("*.json"),
         ):
+            changed = (
+                "survey.toml"
+                if old.get("schema_version") == SCHEMA_VERSION
+                else "loki-survey's meaning of survey.toml"
+            )
             print(
-                "survey.toml changed after units finished; "
+                f"{changed} changed after units finished; "
                 "start a new run directory instead",
                 file=sys.stderr,
             )
             return 1
     run.ensure()
-    atomic_write_json(run.resolved_json, resolved_dict(resolved, versions()))
+    records = {kind: options_record(o) for kind, o in options.items()}
+    atomic_write_json(run.resolved_json, resolved_dict(resolved, versions(), records))
     survey = resolved.survey
     print(
         f"survey '{survey.name}': science {resolved.science_sha256[:12]}, "

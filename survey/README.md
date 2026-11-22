@@ -61,12 +61,15 @@ the unit, the science hash, the input and array hashes and the code versions.
 loki's full result file is kept in `out/raw/` for a fixed sample of units
 (`[output] raw_fraction`).
 
-Within a unit, loki groups the trials above `snr_min` into candidates, as
-`[candidates]` in `survey.toml` says. On real data a search can leave
-millions of trials, more than loki can group in its candidate memory
-(`[unit] candidate_memory_gb`, reserved within the unit's loki budget). Set
-`max_per_cell` and `cell_log_width` to keep only the strongest trials of
-each frequency cell. When the candidate step fails after the search, loki
+Within a unit, loki groups the trials above `snr_min` into candidates. Each
+unit starts from loki's own candidate options for its kind, as loki's command
+line does: FFA units keep every trial, and EP units reduce their final leaves
+per run (`CandidateOptions.ep_defaults()`). `[candidates]` in `survey.toml`
+sets keys for both kinds, and `resolved.json` records the options each kind
+runs. On real data a search can leave millions of trials, more than loki can
+group in its candidate memory (`[unit] candidate_memory_gb`, reserved within
+the unit's loki budget). Set `max_per_cell`, with cells of `cell_bins` or
+`cell_log_width`, to keep only the strongest trials of each frequency cell. When the candidate step fails after the search, loki
 keeps the search as a spool, and the unit publishes it again with its whole
 loki budget, since no search runs any more. If that fails too, the spool
 stays in `quarantine/` and the next attempt of the unit (`submit`) publishes

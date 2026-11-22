@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from loki_survey.config import ConfigError
+from loki_survey.config import SITE_CANDIDATE_OPTIONS, ConfigError
 from loki_survey.rundir import (
     RunDir,
     atomic_write_json,
@@ -194,15 +194,40 @@ def search_config(resolved: Resolved, unit: Unit) -> Any:  # noqa: ANN401
     return libloki.configs.FFASearchConfig(**kwargs)
 
 
-def candidate_options(resolved: Resolved) -> Any:  # noqa: ANN401
-    """Loki's candidate options for every unit: survey.toml's [candidates].
+def loki_candidate_defaults(kind: str) -> Any:  # noqa: ANN401
+    """Loki's own candidate options for a search of this kind.
 
-    An EP plan is sized within the search's memory budget less the candidate
-    memory, so the plan must be built with the same options the unit runs.
+    EP searches reduce their final leaves per run
+    (``CandidateOptions.ep_defaults()``); FFA searches keep every trial.
     """
     from loki import libloki  # noqa: PLC0415
 
-    options = libloki.configs.CandidateOptions()
+    options = libloki.configs.CandidateOptions
+    return options.ep_defaults() if kind == "ep" else options()
+
+
+def options_record(options: Any) -> dict[str, Any]:  # noqa: ANN401
+    """Return the candidate options that change what a unit finds, by name.
+
+    The options loki-survey sets from site.toml are left out.
+    """
+    names = [
+        name
+        for name, value in vars(type(options)).items()
+        if isinstance(value, property) and name not in SITE_CANDIDATE_OPTIONS
+    ]
+    return {name: getattr(options, name) for name in sorted(names)}
+
+
+def candidate_options(resolved: Resolved, kind: str) -> Any:  # noqa: ANN401
+    """Loki's candidate options for a unit of this kind.
+
+    Each kind starts from loki's own defaults (``loki_candidate_defaults``),
+    and survey.toml's [candidates] sets keys for both. An EP plan is sized
+    within the search's memory budget less the candidate memory, so the plan
+    must be built with the same options the unit runs.
+    """
+    options = loki_candidate_defaults(kind)
     for key, value in resolved.survey.candidates.items():
         if not hasattr(options, key) or key.startswith("_"):
             msg = f"[candidates]: loki has no candidate option '{key}'"
@@ -218,6 +243,11 @@ def candidate_options(resolved: Resolved) -> Any:  # noqa: ANN401
         options.validate()
     except ValueError as exc:
         msg = f"[candidates]: {exc}"
+        if kind == "ep":
+            base = options_record(loki_candidate_defaults("ffa"))
+            ep = options_record(loki_candidate_defaults("ep"))
+            changed = ", ".join(f"{k} = {v}" for k, v in ep.items() if v != base[k])
+            msg += f" (EP units start from loki's EP defaults: {changed})"
         raise ConfigError(msg) from exc
     return options
 
@@ -243,7 +273,7 @@ def build_ep_plan(run: RunDir, resolved: Resolved, unit: Unit) -> dict[str, Any]
         record = read_json(record_path)
         if record["sha256"] == sha256_file(cache):
             return record
-    candidates = candidate_options(resolved)
+    candidates = candidate_options(resolved, unit.kind)
     tmp = cache.with_name(f".{cache.name}.{os.getpid()}.building")
     tmp.unlink(missing_ok=True)
     try:

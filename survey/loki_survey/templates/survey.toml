@@ -69,11 +69,16 @@ limits = { accel = [-50.0, 50.0] }   # m/s^2
 # loki's candidate step in each unit (docs/candidates.md in loki): any field
 # of libloki.configs.CandidateOptions, except memory_gb ([unit] in site.toml).
 # A search can leave millions of trials above snr_min, too many for loki to
-# group: max_per_cell keeps only the strongest trials of each frequency cell,
-# cell_log_width wide in ln(frequency), which has no default.
+# group: max_per_cell keeps only the strongest trials of each frequency cell.
+# Units start from loki's own options for their kind: FFA units keep every
+# trial, EP units reduce their final leaves per run
+# (CandidateOptions.ep_defaults()). Keys set here apply to both kinds;
+# resolved.json records the options each kind runs.
 [candidates]
-# max_per_cell = 0         # loki's default: keep every trial
-# cell_log_width = <width in ln(frequency)>; required with max_per_cell
+# max_per_cell = 0         # strongest trials kept per cell; 0: every trial
+# cell_bins = <width in Fourier bins 1/T_obs>    # one of the two widths is
+# cell_log_width = <width in ln(frequency)>      # required with max_per_cell;
+#                          # with cell_log_width, set cell_bins = 0 for EP
 # grouping = "transitive"  # loki's default; or "anchored"
 
 [output]

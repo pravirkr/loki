@@ -19,7 +19,11 @@ from loki_survey.config import (
     resolved_dict,
     science_sha256,
 )
-from loki_survey.plan import candidate_options
+from loki_survey.plan import (
+    candidate_options,
+    loki_candidate_defaults,
+    options_record,
+)
 from loki_survey.rundir import RunDir, atomic_write_json
 
 if TYPE_CHECKING:
@@ -139,31 +143,49 @@ def test_candidate_memory_is_reserved_within_the_loki_budget() -> None:
         parse_site(tomllib.loads(SITE + "candidate_memory_gb = 3.0\n"))
 
 
+def resolved_with(table: str, site: str = SITE) -> Resolved:
+    s = survey(SURVEY + f"[candidates]\n{table}\n")
+    return Resolved(s, parse_site(tomllib.loads(site)), science_sha256(s))
+
+
 @pytest.mark.parametrize(
-    ("table", "message"),
+    ("table", "kind", "message"),
     [
-        ("max_per_cel = 1", "no candidate option 'max_per_cel'"),
-        ("max_per_cell = 1", "cell_log_width"),
-        ('max_per_cell = "one"', r"\[candidates\]\.max_per_cell"),
+        ("max_per_cel = 1", "ffa", "no candidate option 'max_per_cel'"),
+        ("max_per_cell = 1", "ffa", "cell_bins or cell_log_width"),
+        ('max_per_cell = "one"', "ep", r"\[candidates\]\.max_per_cell"),
+        # EP units already have a cell width: a second one needs cell_bins = 0.
+        ("max_per_cell = 1\ncell_log_width = 2e-4", "ep", "EP defaults: .*cell_bins"),
     ],
 )
-def test_candidate_options_are_loki_options(table: str, message: str) -> None:
-    s = survey(SURVEY + f"[candidates]\n{table}\n")
-    resolved = Resolved(
-        survey=s,
-        site=parse_site(tomllib.loads(SITE)),
-        science_sha256=science_sha256(s),
-    )
+def test_candidate_options_are_loki_options(
+    table: str,
+    kind: str,
+    message: str,
+) -> None:
     with pytest.raises(ConfigError, match=message):
-        candidate_options(resolved)
+        candidate_options(resolved_with(table), kind)
+
+
+def test_each_kind_starts_from_loki_defaults() -> None:
+    resolved = resolved_with('grouping = "anchored"')
+    for kind in ("ffa", "ep"):
+        options = candidate_options(resolved, kind)
+        loki = options_record(loki_candidate_defaults(kind))
+        assert options_record(options) == {**loki, "grouping": "anchored"}
+    ep, ffa = (options_record(loki_candidate_defaults(k)) for k in ("ep", "ffa"))
+    assert ep["max_per_cell"] > 0
+    assert ffa["max_per_cell"] == 0
 
 
 def test_candidate_options_take_both_files() -> None:
-    s = survey(SURVEY + "[candidates]\nmax_per_cell = 1\ncell_log_width = 2e-4\n")
-    site = parse_site(tomllib.loads(SITE + "candidate_memory_gb = 2.0\n"))
-    options = candidate_options(Resolved(s, site, science_sha256(s)))
-    assert (options.max_per_cell, options.cell_log_width) == (1, 2e-4)
-    assert options.memory_gb == 2.0
+    table = "max_per_cell = 1\ncell_bins = 0\ncell_log_width = 2e-4"
+    s = survey(SURVEY + f"[candidates]\n{table}\n")
+    resolved = resolved_with(table, SITE + "candidate_memory_gb = 2.0\n")
+    for kind in ("ffa", "ep"):
+        options = candidate_options(resolved, kind)
+        assert (options.max_per_cell, options.cell_log_width) == (1, 2e-4)
+        assert options.memory_gb == 2.0
     # The candidate step is science: it changes what a unit writes.
     assert science_sha256(s) != science_sha256(survey())
 
@@ -209,6 +231,12 @@ def test_resolved_keeps_the_analysis(tmp_path: Path) -> None:
     assert again.analysis == resolved.analysis
     assert again.analysis.evaluate.catalogue == "cat.csv"
     assert again.analysis_sha256 == resolved.analysis_sha256
+
+    # A run directory resolved by a loki-survey that read survey.toml otherwise.
+    old = {**resolved_dict(resolved, {}), "schema_version": 1}
+    atomic_write_json(run.resolved_json, old)
+    with pytest.raises(ConfigError, match="start a new run directory"):
+        load_resolved(run)
 
 
 def test_analysis_stages_refuse_an_edit_made_after_check(tmp_path: Path) -> None:

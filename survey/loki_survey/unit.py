@@ -158,7 +158,7 @@ def publish_spool(
     """Publish a search loki kept, with the unit's whole loki budget."""
     from loki import libloki  # noqa: PLC0415
 
-    options = candidate_options(resolved)
+    options = candidate_options(resolved, unit.kind)
     options.memory_gb = resolved.site.loki_memory_gb
     sweep = (
         libloki.ffa.FFAFreqSweep if unit.kind == "ffa" else libloki.prune.EPFreqSweep
@@ -174,8 +174,8 @@ def publish_spool(
         msg = (
             f"{unit.id}: loki's candidate step failed with the unit's whole "
             f"{options.memory_gb:g} GB: {exc}. The search is kept in {spool}. "
-            "Keep fewer trials with [candidates] max_per_cell and "
-            "cell_log_width in survey.toml."
+            "Keep fewer trials with [candidates] max_per_cell, in cells of "
+            "cell_bins or cell_log_width, in survey.toml."
         )
         raise RuntimeError(msg) from exc
 
@@ -221,7 +221,7 @@ def search(
     ts_e = np.ascontiguousarray(ts_e[: unit.nsamps])
     ts_v = np.ascontiguousarray(ts_v[: unit.nsamps])
     cfg = search_config(resolved, unit)
-    candidates = candidate_options(resolved)
+    candidates = candidate_options(resolved, unit.kind)
     obs = observation(manifest)
     extra: dict[str, Any] = {}
     if unit.kind == "ffa":

@@ -108,7 +108,7 @@ start tutorial_DM00.00__mid__b0__ffa_accel (attempt 1, 4.0 GB)
 start tutorial_DM00.00__mid__b0__ep_accel (attempt 1, 4.0 GB)
 ...
 done 8  running 0  queued 0  pending 0  failed 0  of 8
-collect: 17 unit candidates from 8 of 8 units in 3 groups; 3 selected, 0 removed (ledger demo/collect/ledger.jsonl)
+collect: 19 unit candidates from 8 of 8 units in 3 groups; 3 selected, 0 removed (ledger demo/collect/ledger.jsonl)
 evaluate: 1 of 1 catalogued pulsars in band found
 evaluate: 1 lines in tutorial_DM00.00
 evaluate: 1 groups lie on a line
@@ -129,7 +129,7 @@ On another machine the last digits may differ. What each line means:
   its four units.
 - **submit** runs each unit in its own process. A unit writes `out/<unit>.h5`
   (loki's candidates with the run's provenance) and `out/<unit>.json`.
-- **collect** groups the 17 unit candidates across units: candidates from any
+- **collect** groups the 19 unit candidates across units: candidates from any
   box or DM within two frequency resolutions 1/T are one source. Three groups
   remain, one per source. Each group is labelled by where it is strongest:
   PSR_A and PSR_B are `dispersed` (strongest at DM 40 and 20), and the

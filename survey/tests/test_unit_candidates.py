@@ -54,8 +54,10 @@ def test_cell_cap_keeps_the_strongest_trial_of_each_cell(
     tmp_path: Path,
     unit_python: str,
 ) -> None:
-    survey = SURVEY + "[candidates]\nmax_per_cell = 1\ncell_log_width = 2e-4\n"
-    run = make_run(tmp_path, unit_python, survey=survey)
+    # EP units start from loki's EP cells, cell_bins wide: a log-width cell
+    # replaces them only with cell_bins = 0.
+    table = "max_per_cell = 1\ncell_bins = 0\ncell_log_width = 2e-4\n"
+    run = make_run(tmp_path, unit_python, survey=SURVEY + "[candidates]\n" + table)
 
     assert main(["run", str(run)]) == 0
 
