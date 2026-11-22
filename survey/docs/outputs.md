@@ -108,9 +108,18 @@ gives:
 - `line`: the spectral line the group lies on, if any.
 
 `summary.json` lists:
-- every catalogued pulsar: in band or not, found or not, its best group, and
-  whether a rule removed that group;
+- every catalogued pulsar: in band or not, `found` (a group at its own
+  frequency, 1/1), `fundamental_selected` (such a group was kept), and its
+  `best` group with whether a rule removed it. `best` is the group that tells
+  most: the strongest kept fundamental group, else the strongest removed one,
+  else the strongest kept harmonic group, else the strongest removed one. The
+  page and the command line state it as selected, found as p/q, removed by a
+  rule, or not found;
 - the lines found.
+
+A match is a coincidence in frequency within the window, not a check that the
+group is that pulsar: a sub- or high-order harmonic match can be chance,
+especially with many groups and `harmonic_max` 16.
 
 `lines_<series>.json` caches the line search of the lowest-DM series: the
 frequency resolution `df`, the power threshold, and each line's frequency

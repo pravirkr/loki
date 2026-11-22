@@ -20,7 +20,7 @@ import numpy as np
 
 from loki_survey.collect import CANDIDATES_H5, LEDGER
 from loki_survey.collect import SUMMARY as COLLECT_SUMMARY
-from loki_survey.evaluate import EVAL_SUMMARY, MATCHES
+from loki_survey.evaluate import EVAL_SUMMARY, MATCHES, recall_state
 from loki_survey.rundir import RunDir, atomic_write_json, atomic_write_text, read_json
 
 if TYPE_CHECKING:
@@ -563,12 +563,13 @@ def render_html(doc: dict[str, Any]) -> str:
         rows = []
         for p in catalogue["pulsars"]:
             best = p["best"]
-            if best is None:
-                state = '<span class="warn">not found</span>' if p["in_band"] else ""
-            elif not best["selected"]:
-                state = f'<span class="warn">removed by {_e(best["removed_by"])}</span>'
-            else:
-                state = '<span class="ok">selected</span>'
+            phrase = recall_state(p)
+            ok = phrase == "selected" or phrase.startswith("found")
+            state = (
+                f'<span class="{"ok" if ok else "warn"}">{_e(phrase)}</span>'
+                if phrase
+                else ""
+            )
             rows.append(
                 [
                     _e(p["name"]),

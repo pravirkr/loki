@@ -314,6 +314,49 @@ def _lines(
     return hits
 
 
+def _best_match(
+    hits: list[tuple[int, dict[str, Any]]],
+    fundamental: list[tuple[int, dict[str, Any]]],
+    groups: dict[str, np.ndarray],
+) -> tuple[int, dict[str, Any]] | None:
+    """Return the match that tells most about a catalogued pulsar.
+
+    In order: its strongest kept fundamental group, its strongest removed
+    fundamental group, its strongest kept harmonic group, its strongest
+    removed one. A stronger harmonic must not hide a kept fundamental, nor a
+    removed fundamental hide that the pulsar was removed.
+    """
+
+    def strongest(
+        cands: list[tuple[int, dict[str, Any]]],
+    ) -> tuple[int, dict[str, Any]] | None:
+        return max(cands, key=lambda h: groups["snr"][h[0]], default=None)
+
+    harmonic = [h for h in hits if h not in fundamental]
+    for cands in (fundamental, harmonic):
+        kept = [h for h in cands if groups["selected"][h[0]]]
+        best = strongest(kept) or strongest(cands)
+        if best is not None:
+            return best
+    return None
+
+
+def recall_state(pulsar: dict[str, Any]) -> str:
+    """Describe in one phrase what a catalogued pulsar's best match says.
+
+    "selected", "found as p/q" (only a harmonic group is kept), "removed by
+    RULE" (with " as p/q" for a harmonic), "not found" (in band, no match),
+    or "" (out of band and unmatched).
+    """
+    best = pulsar["best"]
+    if best is None:
+        return "not found" if pulsar["in_band"] else ""
+    ratio = "" if (best["p"], best["q"]) == (1, 1) else f" as {best['p']}/{best['q']}"
+    if not best["selected"]:
+        return f"removed by {best['removed_by']}{ratio}"
+    return f"found{ratio}" if ratio else "selected"
+
+
 def _recall(
     pulsars: list[dict[str, Any]],
     matches: list[list[dict[str, Any]]],
@@ -332,13 +375,14 @@ def _recall(
             if m["name"] == pulsar["name"]
         ]
         fundamental = [(g, m) for g, m in hits if m["p"] == 1 and m["q"] == 1]
-        best = max(hits, key=lambda h: groups["snr"][h[0]], default=None)
+        best = _best_match(hits, fundamental, groups)
         row = {
             "name": pulsar["name"],
             "f0": pulsar["f0"],
             "dm": pulsar["dm"],
             "in_band": bool(np.any((f_lo <= pulsar["f0"]) & (pulsar["f0"] <= f_hi))),
             "found": bool(fundamental),
+            "fundamental_selected": any(groups["selected"][g] for g, _ in fundamental),
             "harmonics_found": len(hits) - len(fundamental),
             "best": None,
         }

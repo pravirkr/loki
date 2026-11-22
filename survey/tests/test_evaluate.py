@@ -10,7 +10,14 @@ import pytest
 
 from loki_survey.collect import collect
 from loki_survey.config import Analysis, Evaluate
-from loki_survey.evaluate import evaluate, find_lines, match_lines, read_catalogue
+from loki_survey.evaluate import (
+    _recall,
+    evaluate,
+    find_lines,
+    match_lines,
+    read_catalogue,
+    recall_state,
+)
 
 from .synthetic import HARMONIC, LONE, PULSAR, make_run, resolved
 
@@ -62,6 +69,54 @@ def test_catalogue_recall_harmonics_and_doppler(tmp_path: Path) -> None:
     assert (first["name"], first["p"], first["q"]) == ("PSR_A", 2, 1)
     # No prepared series in this run: lines are skipped, not guessed.
     assert summary["lines"] is None
+
+
+def recall_of(groups: list[tuple[float, bool, str, list[tuple[int, int]]]]) -> dict:
+    """_recall of one pulsar at 100 Hz (in band) over hand-made groups.
+
+    Each group: (S/N, kept, removed_by, [(p, q) it matches the pulsar at]).
+    """
+    snr, kept, removed, ratios = zip(*groups, strict=True)
+    table = {
+        "snr": np.array(snr),
+        "selected": np.array(kept),
+        "removed_by": np.array(removed),
+    }
+    matches = [[{"name": "P", "p": p, "q": q} for p, q in rs] for rs in ratios]
+    units = {"f_min": np.array([50.0]), "f_max": np.array([200.0])}
+    pulsar = {"name": "P", "f0": 100.0, "dm": None}
+    (row,) = _recall([pulsar], matches, table, units)
+    return row
+
+
+def test_recall_reports_a_kept_fundamental_over_a_stronger_removed_harmonic() -> None:
+    row = recall_of(
+        [(20.0, True, "", [(1, 1)]), (30.0, False, "remove_harmonics", [(7, 11)])],
+    )
+    assert row["found"]
+    assert row["fundamental_selected"]
+    assert (row["best"]["p"], row["best"]["q"]) == (1, 1)
+    assert recall_state(row) == "selected"
+
+
+def test_recall_says_found_as_a_harmonic_when_only_that_group_is_kept() -> None:
+    row = recall_of([(9.0, True, "", [(2, 1)])])
+    assert not row["found"]
+    assert recall_state(row) == "found as 2/1"
+
+
+def test_recall_says_removed_when_the_fundamental_was_removed() -> None:
+    row = recall_of(
+        [(10.0, False, "remove_harmonics", [(1, 1)]), (15.0, True, "", [(1, 2)])],
+    )
+    assert row["found"]
+    assert not row["fundamental_selected"]
+    assert recall_state(row) == "removed by remove_harmonics"
+
+
+def test_recall_state_without_a_match() -> None:
+    assert recall_state({"best": None, "in_band": True}) == "not found"
+    assert recall_state({"best": None, "in_band": False}) == ""
 
 
 def test_dm_tolerance_rejects_a_match_at_another_dm(tmp_path: Path) -> None:

@@ -274,7 +274,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
-    from loki_survey.evaluate import evaluate  # noqa: PLC0415
+    from loki_survey.evaluate import evaluate, recall_state  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
     summary = evaluate(run, load_resolved_analysis(run))
@@ -285,11 +285,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         in_band = sum(p["in_band"] for p in pulsars)
         print(f"evaluate: {found} of {in_band} catalogued pulsars in band found")
         for p in pulsars:
-            best = p["best"]
-            if best is not None and not best["selected"]:
-                print(f"  {p['name']}: its group was removed by {best['removed_by']}")
-            elif p["in_band"] and not p["found"]:
-                print(f"  {p['name']}: not found at its own frequency")
+            state = recall_state(p)
+            if state not in ("", "selected"):
+                print(f"  {p['name']}: {state}")
     lines = summary.get("lines")
     if lines:
         print(
