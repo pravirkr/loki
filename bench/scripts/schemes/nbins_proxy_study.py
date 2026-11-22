@@ -90,7 +90,7 @@ PATTERNS = {
 
 @click.command()
 @click.option("--backend", default="cuda")
-@click.option("--mode", default="robust")
+@click.option("--mode", default="shared")
 @click.option("--patterns", default="seg8,seg32,prod")
 @click.option("--ref-ducy", "ref_ducys", default="0.05,0.1,0.2")
 @click.option("--wtsp", "wtsps", default="1.0,1.2")

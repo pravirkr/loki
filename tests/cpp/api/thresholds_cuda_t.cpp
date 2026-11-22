@@ -82,7 +82,7 @@ TEST_CASE("CUDA DynamicThresholdScheme is bit-reproducible for a fixed seed",
     if (!is_available(Backend::kCUDA)) {
         SKIP("needs a CUDA build");
     }
-    const auto* mode = GENERATE("legacy", "improved");
+    const auto* mode = GENERATE("improved");
     CAPTURE(mode);
     auto scheme_a = make_scheme(mode, 1234);
     scheme_a.run(kThresNeigh);
@@ -109,7 +109,7 @@ TEST_CASE("CUDA DynamicThresholdScheme states are self-consistent",
     if (!is_available(Backend::kCUDA)) {
         SKIP("needs a CUDA build");
     }
-    const auto* mode    = GENERATE("legacy", "improved");
+    const auto* mode    = GENERATE("improved");
     const SizeType nbin = GENERATE(SizeType{32}, SizeType{50}, SizeType{64});
     CAPTURE(mode, nbin);
     auto scheme = make_scheme(mode, 99, nbin);
@@ -188,7 +188,7 @@ TEST_CASE("CUDA DynamicThresholdScheme batch_size only shifts RNG streams",
     }
     // batch_size is kept in the RNG offset bookkeeping for compatibility, so
     // results change with it, but each setting stays reproducible and valid.
-    const auto* mode = GENERATE("legacy", "improved");
+    const auto* mode = GENERATE("improved");
     CAPTURE(mode);
     for (const SizeType batch : {SizeType{16}, SizeType{1024}}) {
         auto a = make_scheme(mode, 7, 64, batch);

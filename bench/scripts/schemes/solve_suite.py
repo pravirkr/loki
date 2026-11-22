@@ -1,4 +1,4 @@
-"""Reduced acceptance suite for DynamicThresholdScheme.solve() (modes "shared", "robust", "descent").
+"""Reduced acceptance suite for DynamicThresholdScheme.solve() (modes "shared", "descent").
 
 A smaller version of the research workspace's quick tier: the production
 pattern and the issue #15 patterns at several S/N, targets and solver seeds.
@@ -14,7 +14,7 @@ The judged cost C, its scatter over seeds and the cost per detection
 L = C / Pd are printed per case (geometric means over seeds); compare
 backends or modes with --mode and --backend.
 
-    PYTHONPATH=src python solve_suite.py --backend cuda --mode robust
+    PYTHONPATH=src python solve_suite.py --backend cuda --mode descent
 """
 
 from __future__ import annotations
@@ -100,8 +100,8 @@ def judge(case, thresholds, backend, nthreads):
 @click.option("--backend", default="cuda")
 @click.option(
     "--mode",
-    default="robust",
-    type=click.Choice(["shared", "robust", "descent"]),
+    default="descent",
+    type=click.Choice(["shared", "descent"]),
 )
 @click.option(
     "--pd-policy",

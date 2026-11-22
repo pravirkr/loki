@@ -91,7 +91,7 @@ TEST_CASE("DynamicThresholdScheme CPU and CUDA agree on stage-0 survival",
     if (!is_available(Backend::kCUDA)) {
         SKIP("needs a CUDA build");
     }
-    const auto* mode = GENERATE("legacy", "improved");
+    const auto* mode = GENERATE("improved");
     CAPTURE(mode);
 
     std::vector<std::map<SizeType, SurvivalPair>> cpu_maps;

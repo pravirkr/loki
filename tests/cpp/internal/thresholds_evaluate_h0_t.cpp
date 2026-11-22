@@ -29,12 +29,12 @@ std::unique_ptr<ThresholdsEngine> make_engine(Backend backend,
     if (backend == Backend::kCPU) {
         return loki::detection::detail::make_thresholds_cpu(
             bp, 0.1F, nbins, 64, 6, 0.05F, 8.0F, 24, 0.3F, 1.5F, 1.2F, 1,
-            "legacy", nthreads, /*seed=*/17, /*simulate=*/false);
+            "improved", nthreads, /*seed=*/17, /*simulate=*/false);
     }
 #ifdef LOKI_ENABLE_GPU
     return loki::detection::detail::make_thresholds_gpu(
-        bp, 0.1F, nbins, 64, 6, 0.05F, 8.0F, 24, 0.3F, 1.5F, 1.2F, 1, "legacy",
-        256, 0, 17);
+        bp, 0.1F, nbins, 64, 6, 0.05F, 8.0F, 24, 0.3F, 1.5F, 1.2F, 1,
+        "improved", 256, 0, 17);
 #else
     return nullptr;
 #endif

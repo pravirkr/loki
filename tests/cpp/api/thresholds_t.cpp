@@ -33,7 +33,7 @@ TEST_CASE("DynamicThresholdScheme getters", "[thresholds]") {
     constexpr SizeType kNthresholds            = 20;
     const detection::DynamicThresholdScheme dyn_scheme(
         branching_pattern, 0.5F, kNbins, kNtrials, kNprobs, 0.1F, 6.0F,
-        kNthresholds, 0.3F, 1.0F, 0.7F, 0, "legacy", /*seed=*/std::nullopt,
+        kNthresholds, 0.3F, 1.0F, 0.7F, 0, "improved", /*seed=*/std::nullopt,
         /*batch_size=*/256, loki::Exec::cpu(1));
 
     REQUIRE(dyn_scheme.get_branching_pattern() == branching_pattern);
@@ -54,7 +54,7 @@ TEST_CASE("DynamicThresholdScheme runs back to back with different nbins",
     // Fewer stages than a search tree. snr_final is lowered with them so the
     // beam stays low enough for a full path to survive.
     const std::vector<float> branching_pattern(3, 3.0F);
-    const auto* mode = GENERATE("legacy", "improved");
+    const auto* mode = GENERATE("improved");
     std::vector<float> first_path;
     for (const SizeType nbins : {32U, 64U, 32U}) {
         CAPTURE(mode, nbins);
@@ -227,7 +227,7 @@ TEST_CASE("DynamicThresholdScheme evaluate does not depend on thread count",
 TEST_CASE("DynamicThresholdScheme run is reproducible for a fixed seed",
           "[thresholds]") {
     const std::vector<float> branching = {4.0F, 9.0F, 1.0F, 2.5F, 4.0F, 3.0F};
-    const auto* mode                   = GENERATE("legacy", "improved");
+    const auto* mode                   = GENERATE("improved");
     CAPTURE(mode);
     const auto run_states = [&](uint64_t seed, int nthreads) {
         detection::DynamicThresholdScheme dyn(

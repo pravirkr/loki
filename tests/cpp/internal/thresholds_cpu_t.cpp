@@ -32,7 +32,7 @@ bool same_state_bits(const State& a, const State& b) {
 std::unique_ptr<ThresholdsEngine>
 make_engine(const std::vector<float>& branching, int nthreads, bool simulate) {
     return make_thresholds_cpu(branching, 0.1F, 32, 64, 6, 0.05F, 8.0F, 24,
-                               0.3F, 1.0F, 1.2F, 1, "legacy", nthreads,
+                               0.3F, 1.0F, 1.2F, 1, "improved", nthreads,
                                /*seed=*/17, simulate);
 }
 

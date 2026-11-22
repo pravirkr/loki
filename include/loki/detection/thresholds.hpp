@@ -20,49 +20,40 @@ namespace loki::detection {
 // the modes, the default pipeline and its measured behaviour are described in
 // docs/dts.md; the comments here cover the interface only.
 //
-// kLegacy: one Monte Carlo simulation per transition (reference).
-// kImproved: one simulation per parent cell (reference). After run(),
+// kImproved: one simulation per parent cell (the reference search). After
+// run(),
 //   get_best_path_thresholds(min_pd) is the search's selection; its in-run
 //   cost and Pd are optimistic. calibrate() and evaluate() measure it on
 //   independent samples.
 // kShared (default): shared signal trials and the guided beam
 //   (SharedOptions), one search pass; after run(), solve() returns the
 //   schedule to use with its Pd and cost measured on fresh samples.
-// kRobust: kShared with a second pass and a refinement in solve(); slower,
-//   lower cost per detection.
 // kDescent: no search over a grid. solve() moves a whole schedule, by single
 //   stages and blocks of stages, on fixed samples until the cost saved per
 //   unit Pd lost is the same everywhere, with Pd held at min_pd; then pins
 //   and reports on fresh samples as kShared does. run() does nothing.
 // The cost C of the shared modes includes w_terminal times the survivors of
-// the last stage; legacy and improved use w = 0.
-enum class DynamicThresholdMode : uint8_t {
-    kLegacy,
-    kImproved,
-    kShared,
-    kRobust,
-    kDescent
-};
+// the last stage; improved uses w = 0. Modes "legacy" and "robust" were
+// removed (docs/dts.md, History).
+enum class DynamicThresholdMode : uint8_t { kImproved, kShared, kDescent };
 
-/// Modes with shared signal trials, the guided beam and solve().
+/// Mode "shared": shared signal trials, the guided beam and solve().
 inline bool is_shared_family(DynamicThresholdMode m) {
-    return m == DynamicThresholdMode::kShared ||
-           m == DynamicThresholdMode::kRobust;
+    return m == DynamicThresholdMode::kShared;
 }
 
 inline DynamicThresholdMode
 dynamic_threshold_mode_from_string(std::string_view s) {
-    if (s == "legacy") {
-        return DynamicThresholdMode::kLegacy;
+    if (s == "legacy" || s == "robust") {
+        throw std::invalid_argument(std::string("mode '").append(s).append(
+            "' was removed: use 'improved' (reference search), 'shared' "
+            "or 'descent'"));
     }
     if (s == "improved") {
         return DynamicThresholdMode::kImproved;
     }
     if (s == "shared") {
         return DynamicThresholdMode::kShared;
-    }
-    if (s == "robust") {
-        return DynamicThresholdMode::kRobust;
     }
     if (s == "descent") {
         return DynamicThresholdMode::kDescent;
@@ -72,14 +63,10 @@ dynamic_threshold_mode_from_string(std::string_view s) {
 
 inline std::string mode_to_string(DynamicThresholdMode m) {
     switch (m) {
-    case DynamicThresholdMode::kLegacy:
-        return "legacy";
     case DynamicThresholdMode::kImproved:
         return "improved";
     case DynamicThresholdMode::kShared:
         return "shared";
-    case DynamicThresholdMode::kRobust:
-        return "robust";
     case DynamicThresholdMode::kDescent:
         return "descent";
     }
@@ -198,7 +185,7 @@ inline std::string pd_policy_to_string(PdPolicy p) {
     return "unknown";
 }
 
-/// Settings of modes "shared", "robust" and "descent"; the other modes ignore
+/// Settings of modes "shared" and "descent"; mode "improved" ignores
 /// them. Mode "descent" uses min_pd, w_terminal, fap, final_threshold,
 /// pd_policy and the descent_* fields.
 struct SharedOptions {
@@ -288,10 +275,10 @@ struct SchemeSolution {
     /// pattern (the signal side is 1). Not a forecast for another pattern:
     /// evaluate() those.
     std::vector<State> eval_states;
-    /// The candidate paths of the shortlist, after tightening (mode robust
-    /// only).
+    /// Always empty: it held the shortlist of the removed mode "robust" and
+    /// is kept so the result keeps its fields.
     std::vector<std::vector<float>> shortlist;
-    /// Raw search selection before tightening, repair and refinement, with
+    /// Raw search selection before tightening and repair, with
     /// its in-run Pd and C. Both are optimistic.
     std::vector<float> search_thresholds;
     /// Mode "descent": the thresholds in units of the unpruned signal score,
@@ -366,7 +353,7 @@ public:
     ///
     /// Probability grid: @p nprobs log-spaced bins of cumulative Pd from
     /// @p prob_min to 1; a cell keeps one path per (threshold, bin). Modes
-    /// shared and robust build it from SharedOptions::min_pd instead: nprobs
+    /// shared builds it from SharedOptions::min_pd instead: nprobs
     /// bins from min_pd to 1 and at most 16 below it (prob_min is unused).
     /// Run time and run() memory grow linearly with nprobs (docs/dts.md).
     DynamicThresholdScheme(std::span<const float> branching_pattern,
@@ -385,13 +372,13 @@ public:
                            std::optional<uint64_t> seed = std::nullopt,
                            SizeType batch_size          = 256,
                            Exec exec                    = {});
-    /// As above, with the beam guess of modes legacy and improved:
+    /// As above, with the beam guess of mode improved:
     /// "analytic" (the default above: the lower of the expected signal S/N
     /// and the trials-aware S/N), "pilot" (the median score of an unpruned
     /// signal simulation instead of the expected S/N) or "window" (every grid
     /// threshold in a window of signal quantiles and every transition, two
     /// passes ranked with a cost to go; thres_neigh and beam_width unused).
-    /// Modes shared and robust ignore it and use the guided beam.
+    /// Mode shared ignores it and uses the guided beam.
     DynamicThresholdScheme(std::span<const float> branching_pattern,
                            float ref_ducy,
                            SizeType nbins,
@@ -409,7 +396,7 @@ public:
                            SizeType batch_size,
                            std::string_view guess,
                            Exec exec = {});
-    /// As above, with the settings of modes "shared" and "robust".
+    /// As above, with the settings of modes "shared" and "descent".
     DynamicThresholdScheme(std::span<const float> branching_pattern,
                            float ref_ducy,
                            SizeType nbins,
@@ -473,9 +460,9 @@ public:
     /// change the search states or get_best_path_thresholds().
     CalibratedPath calibrate(float min_pd                   = 0.1F,
                              const CalibrationOptions& opts = {}) const;
-    /// Modes "shared", "robust" and "descent", after run(): the schedule to
+    /// Modes "shared" and "descent", after run(): the schedule to
     /// use, with the Pd and cost of exactly those thresholds measured on fresh
-    /// samples. Tightens (robust: also selects among candidates and refines)
+    /// samples. Tightens
     /// and repairs on independent samples, then reports; nothing reported
     /// was used to choose. Frees the
     /// search's device memory. Deterministic per (seed, toolchain), and on the

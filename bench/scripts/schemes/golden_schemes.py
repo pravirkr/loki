@@ -30,9 +30,7 @@ SEED = 20261004
 
 CONFIGS = {
     "prod_improved": (BRANCHING_PROD, {**PROD_KW, "mode": "improved"}, 11),
-    "prod_legacy": (BRANCHING_PROD, {**PROD_KW, "mode": "legacy"}, 11),
     "small_improved": (BRANCHING_PROD[:24], {**SMALL_KW, "mode": "improved"}, 6),
-    "small_legacy": (BRANCHING_PROD[:24], {**SMALL_KW, "mode": "legacy"}, 6),
     "small32_improved": (
         BRANCHING_PROD[:24],
         {**SMALL_KW, "nbins": 32, "mode": "improved"},
@@ -61,16 +59,6 @@ CONFIGS = {
     "batch64_improved": (
         BRANCHING_PROD[:40],
         {**SMALL_KW, "mode": "improved", "batch_size": 64},
-        6,
-    ),
-    "batch64_legacy": (
-        BRANCHING_PROD[:40],
-        {**SMALL_KW, "mode": "legacy", "batch_size": 64},
-        6,
-    ),
-    "nb50_legacy": (
-        BRANCHING_PROD[:24],
-        {**SMALL_KW, "nbins": 50, "mode": "legacy"},
         6,
     ),
 }

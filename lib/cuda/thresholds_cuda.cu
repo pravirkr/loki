@@ -582,91 +582,6 @@ __global__ void genealogy_parent_kernel(const uint32_t* __restrict__ idx,
     parent[t] = idx[src];
 }
 
-// ------------------------------ legacy mode --------------------------------
-
-// Compacts the valid items of the stage in item order: item_rng_idx[item] is
-// its rank among valid items (its RNG stream), or kInvalidIndex. Also clears
-// the per-item survivor counts.
-template <uint32_t kBlock>
-__global__ __launch_bounds__(kBlock) void compact_items_kernel(
-    const ThresholdPairItem* __restrict__ pairs,
-    uint32_t n_items,
-    uint32_t nprobs,
-    const State* __restrict__ prev_states,
-    const uint32_t* __restrict__ ntrials_par,
-    uint32_t* __restrict__ item_rng_idx,
-    uint2* __restrict__ counts,
-    unsigned long long* __restrict__ best_h0,
-    unsigned long long* __restrict__ rng_state,
-    uint32_t rng_round_to,
-    uint32_t ntrials) {
-    using BlockScan = cub::BlockScan<uint32_t, kBlock>;
-    __shared__ typename BlockScan::TempStorage temp_storage;
-    uint32_t running = 0;
-    for (uint32_t base = 0; base < n_items; base += kBlock) {
-        const uint32_t item = base + threadIdx.x;
-        uint32_t valid      = 0;
-        if (item < n_items) {
-            const ThresholdPairItem pair = pairs[item / nprobs];
-            const uint32_t kprob         = item % nprobs;
-            valid = parent_is_valid(prev_states, ntrials_par, pair.jthres_abs,
-                                    (pair.jslot_prev * nprobs) + kprob, nprobs,
-                                    kprob)
-                        ? 1U
-                        : 0U;
-        }
-        uint32_t pos   = 0;
-        uint32_t total = 0;
-        BlockScan(temp_storage).ExclusiveSum(valid, pos, total);
-        if (item < n_items) {
-            item_rng_idx[item] = (valid != 0) ? running + pos : kInvalidIndex;
-            counts[item]       = make_uint2(0U, 0U);
-            best_h0[item]      = 0ULL;
-        }
-        running += total;
-        __syncthreads(); // temp_storage reuse
-    }
-    if (threadIdx.x == 0) {
-        advance_rng(rng_state, running, rng_round_to, ntrials);
-    }
-}
-
-__global__ void decide_items_kernel(const ThresholdPairItem* __restrict__ pairs,
-                                    uint32_t n_items,
-                                    const uint32_t* __restrict__ item_rng_idx,
-                                    const State* __restrict__ prev_states,
-                                    const uint2* __restrict__ counts,
-                                    const float* __restrict__ thresholds,
-                                    const float* __restrict__ probs,
-                                    State* __restrict__ cand_states,
-                                    unsigned long long* __restrict__ cell_keys,
-                                    uint32_t ntrials,
-                                    uint32_t nprobs,
-                                    float nbranches) {
-    const uint32_t item = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (item >= n_items || item_rng_idx[item] == kInvalidIndex) {
-        return;
-    }
-    const ThresholdPairItem pair = pairs[item / nprobs];
-    const uint32_t kprob         = item % nprobs;
-    const uint2 cnt              = counts[item];
-    const float ntrials_f        = static_cast<float>(ntrials);
-    // No H0 survivor: counted as one (commit_items keeps the best trial)
-    const uint32_t count_h0 = max(cnt.x, 1U);
-    const auto state_next =
-        prev_states[(pair.jthres_abs * nprobs) + kprob].gen_next(
-            thresholds[pair.ithres_abs],
-            __fdiv_rn(static_cast<float>(count_h0), ntrials_f),
-            __fdiv_rn(static_cast<float>(cnt.y), ntrials_f), nbranches);
-    cand_states[item] = state_next;
-    const int iprob =
-        find_bin_index_device(probs, nprobs, state_next.success_h1_cumul);
-    if (iprob >= 0 && iprob < static_cast<int>(nprobs)) {
-        atomicMin(&cell_keys[(pair.ithres_abs * nprobs) + iprob],
-                  transition_key(state_next.complexity_cumul, item));
-    }
-}
-
 // Owning wrapper for a CUDA stream.
 class CudaStream {
 public:
@@ -1003,7 +918,9 @@ public:
             max_beam = std::max(max_beam, beam_size);
         }
         if (!m_score_sigma.empty()) {
-            // Any recentred beam (mode robust's second pass) fits the pools.
+            // The pools fit any recentred guided beam (sized for the second
+            // pass of the removed mode robust; kept so the memory use is
+            // unchanged).
             max_beam = std::max(max_beam, detail::guided_beam_capacity(
                                               m_thresholds, m_window,
                                               m_score_sigma, m_guide_width));
@@ -1044,35 +961,23 @@ public:
 
         const SizeType neigh = m_all_transitions ? m_nthresholds : thres_neigh;
         // "window" beam: a first pass ranks cell candidates by cost so far;
-        // the second (modes improved and robust) ranks them by cost so far
-        // plus the first pass's cost to go of their noise survivors
-        // (detail::cost_to_go_scheme), and in mode robust searches around
-        // the guess recentred on the first pass's path.
+        // in mode improved a second ranks them by cost so far plus the first
+        // pass's cost to go of their noise survivors
+        // (detail::cost_to_go_scheme).
         m_cost_to_go.clear();
         m_h1_bank_valid = false;
-        m_h1_bank_host.clear();
         if (!m_score_sigma.empty()) {
             m_guess_path = m_guess_pilot;
             m_beam = detail::guided_beam(m_window, m_guess_path, m_score_sigma,
                                          m_guide_width);
         }
         run_pass(neigh, kVarInit, kVarAdd, stream);
-        if (m_mode == DynamicThresholdMode::kRobust) {
-            m_first_states = m_states;
-        }
         // Mode shared stops after one pass.
-        if (m_all_transitions && (m_mode == DynamicThresholdMode::kImproved ||
-                                  m_mode == DynamicThresholdMode::kRobust)) {
+        if (m_all_transitions && m_mode == DynamicThresholdMode::kImproved) {
             m_cost_to_go = detail::cost_to_go_scheme(
                 m_states, m_thresholds, m_probs, m_nstages, m_nthresholds,
                 m_nprobs, 8.0F, 4, m_w);
             if (!m_cost_to_go.empty()) {
-                if (!m_score_sigma.empty()) {
-                    m_guess_path = detail::recentre_guess(
-                        m_guess_pilot, get_best_path_thresholds(m_min_pd));
-                    m_beam = detail::guided_beam(m_window, m_guess_path,
-                                                 m_score_sigma, m_guide_width);
-                }
                 run_pass(neigh, kVarInit, kVarAdd, stream);
             }
         }
@@ -1096,11 +1001,7 @@ public:
         for (auto& v : m_ntrials_d) {
             thrust::fill(thrust::cuda::par.on(stream), v.begin(), v.end(), 0U);
         }
-        if (m_mode != DynamicThresholdMode::kLegacy) {
-            run_improved(neigh, var_init, var_add, stream);
-        } else {
-            run_legacy(neigh, var_init, var_add, stream);
-        }
+        run_improved(neigh, var_init, var_add, stream);
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(m_states.data(),
                             thrust::raw_pointer_cast(m_states_d.data()),
@@ -1123,7 +1024,6 @@ public:
     /// Device bytes of the pools and state grid that run() allocates.
     SizeType run_memory_bytes() const {
         const SizeType pool_rows = pool_rows_count();
-        const bool parent_map    = m_mode != DynamicThresholdMode::kLegacy;
         // Shared mode: the H1 score matrix, its chunked simulation's fold
         // buffers, and the survivor and pass bitmasks.
         const SizeType shared_bytes =
@@ -1135,8 +1035,7 @@ public:
                        sizeof(uint32_t))
                 : 0;
         return (2 * pool_rows * m_nbins_padded * sizeof(float)) +
-               (parent_map ? pool_rows * (2 * sizeof(uint32_t) + sizeof(float))
-                           : 0) +
+               (pool_rows * (2 * sizeof(uint32_t) + sizeof(float))) +
                (m_states.size() * sizeof(State)) + shared_bytes;
     }
 
@@ -1160,7 +1059,7 @@ public:
         return m_box_score_widths;
     }
 
-    // Static per-stage layout shared by both pipelines. Stage s reads the
+    // Static per-stage layout of the search. Stage s reads the
     // beam of stage s-1 (stage 0 reads a virtual one-threshold beam holding
     // the initial state); its transitions are pairs x nprobs items.
     struct StagePlan {
@@ -1176,8 +1075,6 @@ public:
         std::vector<StagePlan> stages;
         thrust::device_vector<uint32_t> beams_d;
         thrust::device_vector<ThresholdPairItem> pairs_d;
-        // Legacy: items of each stage grouped by parent cell.
-        thrust::device_vector<uint32_t> item_order_d;
         SizeType max_items{1};
         SizeType max_parents{1};
     };
@@ -1193,12 +1090,11 @@ public:
             m_guess_path[istage - 1], m_score_sigma[istage], m_guide_reach);
     }
 
-    StagePlans build_stage_plans(SizeType thres_neigh, bool with_order) const {
+    StagePlans build_stage_plans(SizeType thres_neigh) const {
         StagePlans plans;
         plans.stages.resize(m_nstages);
         std::vector<uint32_t> beams_flat = {0U}; // virtual beam before stage 0
         std::vector<ThresholdPairItem> pairs_flat;
-        std::vector<uint32_t> order_flat;
         std::vector<SizeType> beam_prev_idx = {0};
         uint32_t beam_prev_offset           = 0;
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
@@ -1250,28 +1146,11 @@ public:
             plans.max_parents =
                 std::max(plans.max_parents,
                          static_cast<SizeType>(plan.n_beam_prev) * m_nprobs);
-            if (with_order) {
-                std::vector<uint32_t> order(n_items);
-                std::iota(order.begin(), order.end(), 0U);
-                const auto* pairs    = pairs_flat.data() + plan.pair_offset;
-                const auto parent_of = [&](uint32_t item) {
-                    return (pairs[item / m_nprobs].jslot_prev * m_nprobs) +
-                           (item % m_nprobs);
-                };
-                std::ranges::stable_sort(order, {}, parent_of);
-                order_flat.insert(order_flat.end(), order.begin(), order.end());
-            }
             beam_prev_offset = plan.beam_cur_offset;
             beam_prev_idx    = beam_cur_idx;
         }
-        if (with_order && pairs_flat.size() * m_nprobs >
-                              std::numeric_limits<uint32_t>::max()) {
-            throw std::overflow_error(
-                "ThresholdsCuda: too many transitions per run");
-        }
-        plans.beams_d      = beams_flat;
-        plans.pairs_d      = pairs_flat;
-        plans.item_order_d = order_flat;
+        plans.beams_d = beams_flat;
+        plans.pairs_d = pairs_flat;
         return plans;
     }
 
@@ -1353,7 +1232,7 @@ public:
         const auto grid_stride =
             static_cast<SizeType>(m_nthresholds) * m_nprobs;
 
-        const auto plans = build_stage_plans(thres_neigh, false);
+        const auto plans = build_stage_plans(thres_neigh);
         thrust::device_vector<uint2> counts_d(plans.max_items);
         thrust::device_vector<State> cand_states_d(plans.max_items);
         thrust::device_vector<ParentCandidate> parents_d(plans.max_parents);
@@ -1529,143 +1408,6 @@ public:
         }
     }
 
-    void run_legacy(SizeType thres_neigh,
-                    float var_init,
-                    float var_add,
-                    cudaStream_t stream) {
-        constexpr uint32_t kCompactBlock = 1024;
-        constexpr uint32_t kSimBlock     = 256;
-        constexpr uint32_t kDecideBlock  = 256;
-        constexpr uint32_t kCommitBlock  = 256;
-        const auto ntrials               = static_cast<uint32_t>(m_ntrials);
-        const auto nprobs                = static_cast<uint32_t>(m_nprobs);
-        const auto grid_stride =
-            static_cast<SizeType>(m_nthresholds) * m_nprobs;
-
-        const auto plans = build_stage_plans(thres_neigh, true);
-        thrust::device_vector<uint2> counts_d(plans.max_items);
-        thrust::device_vector<State> cand_states_d(plans.max_items);
-        thrust::device_vector<uint32_t> item_rng_idx_d(plans.max_items);
-        thrust::device_vector<unsigned long long> best_h0_d(plans.max_items);
-        thrust::device_vector<unsigned long long> rng_state_d(2);
-        thrust::device_vector<uint32_t> error_flag_d(1, 0U);
-        thrust::device_vector<State> init_states_d(m_nprobs, State{});
-        init_states_d[0] = State::initial();
-
-        // Ping-pong buffers: index (s & 1) is written at stage s.
-        float* folds[2] = {thrust::raw_pointer_cast(m_folds_d[0].data()),
-                           thrust::raw_pointer_cast(m_folds_d[1].data())};
-        uint32_t* ntrials_desc[2] = {
-            thrust::raw_pointer_cast(m_ntrials_d[0].data()),
-            thrust::raw_pointer_cast(m_ntrials_d[1].data())};
-        simulate_initial_folds(folds[1], ntrials_desc[1],
-                               thrust::raw_pointer_cast(rng_state_d.data()),
-                               var_init, stream);
-
-        float var_in = var_init;
-        for (SizeType istage = 0; istage < m_nstages; ++istage) {
-            const auto& plan     = plans.stages[istage];
-            const uint32_t cur   = istage & 1U;
-            const uint32_t prev  = cur ^ 1U;
-            const auto nbranches = m_branching_pattern[istage];
-            const State* prev_states =
-                istage == 0 ? thrust::raw_pointer_cast(init_states_d.data())
-                            : thrust::raw_pointer_cast(m_states_d.data()) +
-                                  ((istage - 1) * grid_stride);
-            State* cur_states = thrust::raw_pointer_cast(m_states_d.data()) +
-                                (istage * grid_stride);
-            const uint32_t* beams =
-                thrust::raw_pointer_cast(plans.beams_d.data());
-            const ThresholdPairItem* pairs =
-                thrust::raw_pointer_cast(plans.pairs_d.data()) +
-                plan.pair_offset;
-            const auto n_items = static_cast<uint32_t>(
-                static_cast<SizeType>(plan.n_pairs) * m_nprobs);
-            const auto params = trial_sim_params(var_in, var_add);
-            var_in += var_add;
-            if (n_items == 0) {
-                continue; // no transitions: this and later stages stay empty
-            }
-
-            // The original walk simulated the initial transitions in one
-            // launch (exact offset) and later stages in batches.
-            compact_items_kernel<kCompactBlock>
-                <<<1, kCompactBlock, 0, stream>>>(
-                    pairs, n_items, nprobs, prev_states, ntrials_desc[prev],
-                    thrust::raw_pointer_cast(item_rng_idx_d.data()),
-                    thrust::raw_pointer_cast(counts_d.data()),
-                    thrust::raw_pointer_cast(best_h0_d.data()),
-                    thrust::raw_pointer_cast(rng_state_d.data()),
-                    istage == 0 ? 1U : static_cast<uint32_t>(m_batch_size),
-                    ntrials);
-            cuda_utils::check_last_cuda_error("compact_items_kernel");
-
-            const SizeType sim_threads =
-                static_cast<SizeType>(n_items) * 2 * m_ntrials;
-            const dim3 sim_grid((sim_threads + kSimBlock - 1) / kSimBlock);
-            cuda_utils::check_kernel_launch_params(sim_grid, dim3(kSimBlock));
-            with_scorer([&]<typename Scorer>() {
-                ScorerLaunch<Scorer>::simulate_count_items(
-                    sim_grid, kSimBlock, stream,
-                    thrust::raw_pointer_cast(plans.item_order_d.data()) +
-                        (static_cast<SizeType>(plan.pair_offset) * m_nprobs),
-                    n_items, pairs,
-                    thrust::raw_pointer_cast(item_rng_idx_d.data()),
-                    thrust::raw_pointer_cast(rng_state_d.data()), folds[prev],
-                    ntrials_desc[prev],
-                    thrust::raw_pointer_cast(m_thresholds_d.data()),
-                    reinterpret_cast<uint32_t*>(
-                        thrust::raw_pointer_cast(counts_d.data())),
-                    thrust::raw_pointer_cast(best_h0_d.data()), params, ntrials,
-                    nprobs);
-            });
-            cuda_utils::check_last_cuda_error("simulate_count_items_kernel");
-
-            decide_items_kernel<<<(n_items + kDecideBlock - 1) / kDecideBlock,
-                                  kDecideBlock, 0, stream>>>(
-                pairs, n_items, thrust::raw_pointer_cast(item_rng_idx_d.data()),
-                prev_states, thrust::raw_pointer_cast(counts_d.data()),
-                thrust::raw_pointer_cast(m_thresholds_d.data()),
-                thrust::raw_pointer_cast(m_probs_d.data()),
-                thrust::raw_pointer_cast(cand_states_d.data()),
-                thrust::raw_pointer_cast(m_cell_keys_d.data()), ntrials, nprobs,
-                nbranches);
-            cuda_utils::check_last_cuda_error("decide_items_kernel");
-
-            const SizeType n_out_cells =
-                static_cast<SizeType>(plan.n_beam_cur) * m_nprobs;
-            if (n_out_cells > 0) {
-                with_scorer([&]<typename Scorer>() {
-                    static_assert(kCommitBlock ==
-                                  ScorerLaunch<Scorer>::kCommitItemsBlock);
-                    ScorerLaunch<Scorer>::commit_items(
-                        n_out_cells, kCommitBlock, stream,
-                        beams + plan.beam_cur_offset, pairs,
-                        thrust::raw_pointer_cast(item_rng_idx_d.data()),
-                        thrust::raw_pointer_cast(rng_state_d.data()),
-                        thrust::raw_pointer_cast(counts_d.data()),
-                        thrust::raw_pointer_cast(cand_states_d.data()),
-                        cur_states,
-                        thrust::raw_pointer_cast(m_cell_keys_d.data()),
-                        folds[prev], ntrials_desc[prev],
-                        thrust::raw_pointer_cast(m_thresholds_d.data()),
-                        thrust::raw_pointer_cast(best_h0_d.data()), folds[cur],
-                        ntrials_desc[cur],
-                        thrust::raw_pointer_cast(error_flag_d.data()), params,
-                        ntrials, nprobs);
-                });
-                cuda_utils::check_last_cuda_error("commit_items_kernel");
-            }
-        }
-        const uint32_t error_flag = error_flag_d[0];
-        if (error_flag != 0) {
-            throw std::runtime_error(
-                fmt::format("ThresholdsCuda: legacy survivor regeneration "
-                            "disagreed with the counting pass (flag {})",
-                            error_flag));
-        }
-    }
-
     std::string save(const std::string& outdir = "./") const {
         const std::filesystem::path filebase = fmt::format(
             "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
@@ -1737,24 +1479,12 @@ public:
             m_w);
     }
 
-    detail::SearchPath first_pass_path(float min_pd) const {
-        if (m_first_states.empty()) {
-            throw std::logic_error(
-                "ThresholdsCuda::first_pass_path: needs run() in mode "
-                "'robust'");
-        }
-        return selected_path(m_first_states, min_pd);
-    }
-
     /// The shared H1 trials of the last run(), stage-major (nstages x nh1).
     std::vector<float> shared_h1_bank() const {
-        if (!m_h1_bank_host.empty()) {
-            return m_h1_bank_host;
-        }
         if (!is_shared_family(m_mode) || !m_h1_bank_valid) {
             throw std::logic_error(
                 "ThresholdsCuda::shared_h1_bank: needs run() in mode "
-                "'shared' or 'robust'");
+                "'shared'");
         }
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         std::vector<float> out(m_nstages * m_nh1);
@@ -1770,11 +1500,6 @@ public:
     /// Frees the pools allocate_pools() made; run() allocates them again.
     void release_search_memory() {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
-        // Mode robust's shortlist replays paths on the search's bank: keep it
-        // on the host, so that solve() can run again.
-        if (m_mode == DynamicThresholdMode::kRobust && m_h1_bank_valid) {
-            m_h1_bank_host = shared_h1_bank();
-        }
         const auto drop = [](auto& v) {
             using V = std::remove_reference_t<decltype(v)>;
             V().swap(v);
@@ -2489,13 +2214,8 @@ private:
     // cell candidates by complexity_cumul).
     std::vector<float> m_cost_to_go;
     std::vector<State> m_states;
-    // Shared mode: the states after the first pass (the second pass
-    // overwrites m_states), for the shortlist.
-    std::vector<State> m_first_states;
     // Shared mode: the H1 matrix of this run() is simulated.
     bool m_h1_bank_valid{false};
-    // Mode robust: host copy of the bank after release_search_memory().
-    std::vector<float> m_h1_bank_host;
 
     // Device constants
     thrust::device_vector<float> m_thresholds_d;
@@ -2512,8 +2232,7 @@ private:
 
     // Ping-pong fold pools, index (s & 1) written at stage s. A cell is
     // (beam slot, prob bin) with [H0 | H1] x ntrials rows of nbins_padded.
-    //  - legacy: survivor folds of the stage's cells;
-    //  - improved: simulated folds of the stage's parent cells.
+    // The simulated folds of the stage's parent cells.
     std::array<thrust::device_vector<float>, 2> m_folds_d;
     // Per cell survivor counts [H0, H1].
     std::array<thrust::device_vector<uint32_t>, 2> m_ntrials_d;
@@ -2546,15 +2265,13 @@ private:
         for (auto& v : m_ntrials_d) {
             v.resize(cells * 2);
         }
-        if (m_mode != DynamicThresholdMode::kLegacy) {
-            for (auto& v : m_src_d) {
-                v.resize(cells);
-            }
-            for (auto& v : m_idx_d) {
-                v.resize(pool_rows);
-            }
-            m_scores_d.resize(pool_rows);
+        for (auto& v : m_src_d) {
+            v.resize(cells);
         }
+        for (auto& v : m_idx_d) {
+            v.resize(pool_rows);
+        }
+        m_scores_d.resize(pool_rows);
         if (is_shared_family(m_mode)) {
             for (auto& v : m_h1_mask_d) {
                 v.resize(cells * m_h1_words);
@@ -2675,9 +2392,6 @@ public:
         return m_impl.run_memory_bytes();
     }
     uint64_t get_seed() const override { return m_impl.get_seed(); }
-    detail::SearchPath first_pass_path(float min_pd) const override {
-        return m_impl.first_pass_path(min_pd);
-    }
     std::vector<float> shared_h1_bank() const override {
         return m_impl.shared_h1_bank();
     }

@@ -184,12 +184,6 @@ inline bool within_reach(float cur,
     return std::abs(d) <= reach * sigma_cur;
 }
 
-/** Guess learnt from a searched path: g + smoothed (path - g), the offset
- * averaged over 3 consecutive stages. @p guess_path if @p path is empty.
- */
-std::vector<float> recentre_guess(std::span<const float> guess_path,
-                                  std::span<const float> path);
-
 /// Indices of @p thresholds inside [lo, hi].
 std::vector<SizeType>
 beam_indices(std::span<const float> thresholds, float lo, float hi);
@@ -249,8 +243,8 @@ SizeType best_terminal_cell(std::span<const State> states,
                             double w_terminal);
 
 /** Expected future cost per surviving noise leaf, per stage, from a finished
- * run (the second pass of modes improved with the "window" beam and robust
- * ranks cell candidates by cost so far plus h[s] * complexity). Paths: the
+ * run (the second pass of mode improved with the "window" beam ranks cell
+ * candidates by cost so far plus h[s] * complexity). Paths: the
  * cheapest terminal cell (terminal_rank) of every probability bin below
  * pd_max_factor * probs[0]. Per stage, h of a path is (C_final - C_s) / n_s;
  * the result is the median over paths, then a moving average over up to 2 *
@@ -320,17 +314,9 @@ float relax_schedule(std::vector<float>& thresholds,
 std::pair<SizeType, SizeType> tighten_schedule(std::vector<float>& thresholds,
                                                const SignalBank& bank);
 
-/** Cut points (stage indices, first 0, last nstages) of up to four blocks of
- * equal total log-branching. */
-std::vector<SizeType> refinement_blocks(std::span<const float> branching);
-
-/** DynamicThresholdScheme::solve on a mode "shared" or "robust" engine after
- * run(). @p robust adds the shortlist and the block refinement.
- */
-SchemeSolution solve_scheme(ThresholdsEngine& engine,
-                            float min_pd,
-                            double w_terminal,
-                            bool robust);
+/** DynamicThresholdScheme::solve on a mode "shared" engine after run(). */
+SchemeSolution
+solve_scheme(ThresholdsEngine& engine, float min_pd, double w_terminal);
 
 /** Re-fits a schedule found at a smaller nbins to the folds of @p engine (an
  * evaluation-only engine at the true nbins; nothing else of it is used).

@@ -126,13 +126,7 @@ public:
     virtual std::string save(const std::string& outdir) const = 0;
     /// Seed of the search (the seed of every derived stream of solve()).
     virtual uint64_t get_seed() const = 0;
-    /// Mode "robust": the cost and Pd of the terminal path selected at the
-    /// end of the first pass (empty thresholds when none met @p min_pd).
-    virtual SearchPath first_pass_path(float /*min_pd*/) const {
-        throw std::logic_error(
-            "first_pass_path: the engine is not in mode 'robust'");
-    }
-    /// Modes "shared" and "robust": the signal trials the search counted its Pd
+    /// Mode "shared": the signal trials the search counted its Pd
     /// on, stage-major (nstages x nh1), after run().
     virtual std::vector<float> shared_h1_bank() const {
         throw std::logic_error(
@@ -220,7 +214,7 @@ make_thresholds_cpu(std::span<const float> branching_pattern,
                     float beam_sigma       = 3.0F,
                     float reach_sigma      = 1.0F);
 
-/// Modes "shared" and "robust" on the CPU (lib/cpu/thresholds_shared_cpu.cpp):
+/// Mode "shared" on the CPU (lib/cpu/thresholds_shared_cpu.cpp):
 /// @p nprobs bins from @p min_pd to 1, the guided beam.
 std::unique_ptr<ThresholdsEngine>
 make_thresholds_shared_cpu(std::span<const float> branching_pattern,

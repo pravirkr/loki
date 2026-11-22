@@ -88,7 +88,7 @@ TEST_CASE("a second SIGINT with a default handler kills the process",
 
 TEST_CASE("a pending request stops DynamicThresholdScheme::run",
           "[interrupt][thresholds]") {
-    const auto* mode = GENERATE("legacy", "shared");
+    const auto* mode = GENERATE("improved", "shared");
     CAPTURE(mode);
     const std::vector<float> branching_pattern(4, 2.0F);
     loki::detection::DynamicThresholdScheme scheme(

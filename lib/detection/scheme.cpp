@@ -390,25 +390,6 @@ SizeType guided_beam_capacity(std::span<const float> thresholds,
     return capacity;
 }
 
-std::vector<float> recentre_guess(std::span<const float> guess_path,
-                                  std::span<const float> path) {
-    std::vector<float> guess(guess_path.begin(), guess_path.end());
-    if (path.size() != guess.size()) {
-        return guess;
-    }
-    const auto n = guess.size();
-    for (SizeType s = 0; s < n; ++s) {
-        const SizeType a = s == 0 ? 0 : s - 1;
-        const SizeType b = std::min(s + 1, n - 1);
-        float offset     = 0.0F;
-        for (SizeType k = a; k <= b; ++k) {
-            offset += path[k] - guess_path[k];
-        }
-        guess[s] += offset / static_cast<float>(b - a + 1);
-    }
-    return guess;
-}
-
 std::vector<SizeType>
 beam_indices(std::span<const float> thresholds, float lo, float hi) {
     std::vector<SizeType> result;

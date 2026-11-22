@@ -866,6 +866,12 @@ stages, `min_pd` 0.1). Schedules were judged on samples that chose nothing
 (2^17 signal trials, 3 × 2^16 noise trials). See `docs/dts.md` for the
 method.
 
+Modes `legacy` and `robust` were removed after these measurements
+(`docs/dts.md`, History). The rows below that name `robust` are kept as the
+record of what was measured; the kept modes (`improved` with every guess,
+`shared`, `descent` and `evaluate()`) gave bit-identical states, schedules,
+`solve()` results, saved files and plans before and after the removal.
+
 What the measurements say about the existing modes:
 
 - On the long patterns L = C / Pd rises steeply with Pd, so `min_pd` binds

@@ -400,12 +400,12 @@ SchemeSolution DynamicThresholdScheme::solve() {
     }
     if (!is_shared_family(m_impl->m_mode)) {
         throw std::invalid_argument(
-            "DynamicThresholdScheme::solve: only modes 'shared', 'robust' "
-            "and 'descent'");
+            "DynamicThresholdScheme::solve: only modes 'shared' and "
+            "'descent'");
     }
-    m_impl->m_solution = detail::solve_scheme(
-        *m_impl->m_engine, m_impl->m_shared.min_pd, m_impl->m_shared.w_terminal,
-        /*robust=*/m_impl->m_mode == DynamicThresholdMode::kRobust);
+    m_impl->m_solution =
+        detail::solve_scheme(*m_impl->m_engine, m_impl->m_shared.min_pd,
+                             m_impl->m_shared.w_terminal);
     return *m_impl->m_solution;
 }
 const SchemeSolution* DynamicThresholdScheme::solution() const {

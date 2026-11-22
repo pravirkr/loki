@@ -219,8 +219,8 @@ struct Pool {
  * buffering strategy to improve cache locality.
  *
  * Manages two slot types: fold profiles (ntrials x nbins) and per-trial scores
- * (ntrials). Score pools are optional (score_slots_per_pool == 0 in legacy
- * mode).
+ * (ntrials). Score pools are optional (score_slots_per_pool == 0 when no
+ * search runs).
  */
 class DualPoolFoldManager {
 public:
@@ -900,35 +900,6 @@ simulate_and_score(const FoldsType& folds_cur,
 }
 
 std::pair<State, FoldsType>
-gen_next_using_thresh(const State& state_cur,
-                      const FoldsType& folds_cur,
-                      float threshold,
-                      float nbranches,
-                      float bias_snr,
-                      std::span<const float> profile,
-                      const StreamKey& key,
-                      DualPoolFoldManager& manager,
-                      ThreadLocalBuffers& buffers,
-                      BoxcarWidthsCache& box_cache,
-                      search::TimerStats::TimerMap& thread_timers,
-                      float var_add    = 1.0F,
-                      SizeType ntrials = 1024) {
-    auto rng_h0                        = key.stream(0);
-    auto rng_h1                        = key.stream(1);
-    auto [folds_h0_pruned, success_h0] = simulate_score_prune_fused(
-        *folds_cur.folds_h0, profile, rng_h0, manager, buffers, box_cache,
-        threshold, thread_timers, /*keep_best=*/true, 0.0F, var_add, ntrials);
-    auto [folds_h1_pruned, success_h1] = simulate_score_prune_fused(
-        *folds_cur.folds_h1, profile, rng_h1, manager, buffers, box_cache,
-        threshold, thread_timers, /*keep_best=*/false, bias_snr, var_add,
-        ntrials);
-    const auto state_next =
-        state_cur.gen_next(threshold, success_h0, success_h1, nbranches);
-    return {state_next,
-            FoldsType{std::move(folds_h0_pruned), std::move(folds_h1_pruned)}};
-}
-
-std::pair<State, FoldsType>
 gen_next_using_surv_prob(const State& state_cur,
                          const FoldsType& folds_cur,
                          float surv_prob_h0,
@@ -1035,12 +1006,10 @@ public:
           m_simulate(simulate),
           m_guess(guess) {
         const auto beam_guess = detail::beam_guess_from_string(guess);
-        if (is_shared_family(m_mode)) {
-            // make_thresholds_cpu builds modes 'shared' and 'robust' with
-            // their own engine.
-            throw std::logic_error(
-                "ThresholdsCpuEngine: modes 'shared' and 'robust' have their "
-                "own engine");
+        if (m_mode != DynamicThresholdMode::kImproved) {
+            // make_thresholds_cpu builds mode 'shared' with its own engine;
+            // 'descent' uses an evaluation-only 'improved' engine.
+            throw std::logic_error("ThresholdsCpuEngine: mode 'improved' only");
         }
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
@@ -1121,11 +1090,7 @@ public:
                 fold_slots_per_pool, score_slots_per_pool, pool_memory_size_gb);
             m_folds_current.resize(m_nthresholds * m_nprobs);
             m_folds_next.resize(m_nthresholds * m_nprobs);
-            if (m_mode == DynamicThresholdMode::kImproved) {
-                init_states_improved();
-            } else {
-                init_states_legacy();
-            }
+            init_states_improved();
         }
     }
     ~ThresholdsCpuEngine() override                                = default;
@@ -1175,7 +1140,7 @@ public:
         // to go of their noise survivors (detail::cost_to_go_scheme).
         m_cost_to_go.clear();
         run_pass(neigh, show_progress);
-        if (m_all_transitions && m_mode == DynamicThresholdMode::kImproved) {
+        if (m_all_transitions) {
             m_cost_to_go =
                 detail::cost_to_go_scheme(m_states, m_thresholds, m_probs,
                                           m_nstages, m_nthresholds, m_nprobs);
@@ -1202,31 +1167,18 @@ public:
                 folds.invalidate();
             }
             std::ranges::fill(m_states, State{});
-            if (m_mode == DynamicThresholdMode::kImproved) {
-                init_states_improved();
-            } else {
-                init_states_legacy();
-            }
+            init_states_improved();
         }
         m_has_run = true;
         progress::ProgressTracker bar("Computing scheme", m_nstages - 1,
                                       show_progress);
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             loki::check_interrupt();
-            if (m_mode == DynamicThresholdMode::kImproved) {
-                run_segment_improved(istage, neigh);
-                m_manager->swap_pools();
-                std::swap(m_folds_current, m_folds_next);
-                for (auto& fold_opt : m_folds_next) {
-                    fold_opt.invalidate();
-                }
-            } else {
-                run_segment_legacy(istage, neigh);
-                m_manager->swap_pools();
-                std::swap(m_folds_current, m_folds_next);
-                for (auto& fold_opt : m_folds_next) {
-                    fold_opt.invalidate();
-                }
+            run_segment_improved(istage, neigh);
+            m_manager->swap_pools();
+            std::swap(m_folds_current, m_folds_next);
+            for (auto& fold_opt : m_folds_next) {
+                fold_opt.invalidate();
             }
             bar.set_progress(istage);
         }
@@ -1706,13 +1658,10 @@ private:
         const auto max_persistent = max_active_per_stage * m_nprobs * 2;
         const auto max_temporary  = static_cast<SizeType>(m_nthreads) * 2;
         SizeType fold_slots       = max_persistent + max_temporary;
-        SizeType score_slots      = 0;
-        if (m_mode == DynamicThresholdMode::kImproved) {
-            // Full simulated folds (h0 + h1) per parent state in the beam;
-            // scores only live in those stage-local folds
-            fold_slots += max_active_per_stage * m_nprobs * 2;
-            score_slots = max_active_per_stage * m_nprobs * 2;
-        }
+        // Full simulated folds (h0 + h1) per parent state in the beam;
+        // scores only live in those stage-local folds
+        fold_slots += max_active_per_stage * m_nprobs * 2;
+        const SizeType score_slots = max_active_per_stage * m_nprobs * 2;
         return {fold_slots, score_slots};
     }
 
@@ -1732,25 +1681,14 @@ private:
         const auto max_temporary        = static_cast<SizeType>(m_nthreads) * 2;
         const auto [fold_slots, score_slots] = pool_slots();
 
-        if (m_mode == DynamicThresholdMode::kImproved) {
-            const auto max_sim_folds = max_active_per_stage * m_nprobs * 2;
-            spdlog::debug(
-                "Allocation analysis (improved): {} active thresholds "
-                "max, {} prob bins, {} threads",
-                max_active_per_stage, m_nprobs, m_nthreads);
-            spdlog::debug("Fold pool: {} persistent + {} sim_folds + {} "
-                          "temporary = {} slots",
-                          max_persistent, max_sim_folds, max_temporary,
-                          fold_slots);
-            spdlog::debug("Score pool: {} stage-local slots", score_slots);
-        } else {
-            spdlog::debug("Allocation analysis: {} active thresholds max, {} "
-                          "prob bins, {} threads",
-                          max_active_per_stage, m_nprobs, m_nthreads);
-            spdlog::debug(
-                "Need {} persistent + {} temporary = {} fold slots per pool",
-                max_persistent, max_temporary, fold_slots);
-        }
+        const auto max_sim_folds = max_active_per_stage * m_nprobs * 2;
+        spdlog::debug("Allocation analysis (improved): {} active thresholds "
+                      "max, {} prob bins, {} threads",
+                      max_active_per_stage, m_nprobs, m_nthreads);
+        spdlog::debug("Fold pool: {} persistent + {} sim_folds + {} "
+                      "temporary = {} slots",
+                      max_persistent, max_sim_folds, max_temporary, fold_slots);
+        spdlog::debug("Score pool: {} stage-local slots", score_slots);
         return {fold_slots, score_slots};
     }
 
@@ -1785,35 +1723,6 @@ private:
         };
     }
 
-    void init_states_legacy() {
-        auto buffers_ptr =
-            std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
-        auto boxcar_widths_cache_ptr =
-            std::make_unique<detection::BoxcarWidthsCache>(m_box_score_widths,
-                                                           m_nbins);
-
-        const auto fold_state     = create_initial_fold_state(*buffers_ptr);
-        State const initial_state = State::initial();
-        const auto thresholds_idx = get_current_thresholds_idx(0);
-        search::TimerStats::TimerMap thread_timers;
-        for (SizeType const ithres : thresholds_idx) {
-            auto [cur_state, cur_fold_state] = gen_next_using_thresh(
-                initial_state, fold_state, m_thresholds[ithres],
-                m_branching_pattern[0], m_bias_snr, m_profile,
-                step_key(0, 0, ithres), *m_manager, *buffers_ptr,
-                *boxcar_widths_cache_ptr, thread_timers, 1.0F, m_ntrials);
-
-            const auto iprob = utils::find_lower_bin_index(
-                m_probs, cur_state.success_h1_cumul);
-            if (iprob < 0 || std::cmp_greater_equal(iprob, m_nprobs)) {
-                continue;
-            }
-            const auto fold_idx       = (ithres * m_nprobs) + iprob;
-            m_states[fold_idx]        = cur_state;
-            m_folds_current[fold_idx] = std::move(cur_fold_state);
-        }
-    }
-
     void init_states_improved() {
         auto buffers_ptr =
             std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
@@ -1839,87 +1748,6 @@ private:
             m_states[fold_idx]        = cur_state;
             m_folds_current[fold_idx] = std::move(cur_fold_state);
         }
-    }
-
-    // Run a segment of the dynamic threshold scheme (legacy mode)
-    void run_segment_legacy(SizeType istage, SizeType thres_neigh = 10) {
-        const auto beam_idx_cur      = get_current_thresholds_idx(istage);
-        const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
-        const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
-        const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
-
-        // Local stats for this segment
-        search::TimerStats segment_stats(m_nthreads);
-
-        // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
-#pragma omp parallel num_threads(m_nthreads)
-        {
-            // Not thread_local: it would keep an earlier scheme's sizes
-            auto buffers_ptr =
-                std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
-            auto boxcar_widths_cache_ptr =
-                std::make_unique<detection::BoxcarWidthsCache>(
-                    m_box_score_widths, m_nbins);
-
-            auto& thread_timers = segment_stats.get_thread_local();
-#pragma omp for schedule(dynamic)
-            for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
-                const auto ithres = beam_idx_cur[i];
-                // Find nearest neighbors in the previous beam
-                const auto neighbour_beam_indices =
-                    utils::find_neighbouring_indices(beam_idx_prev, ithres,
-                                                     thres_neigh);
-                for (SizeType const jthresh : neighbour_beam_indices) {
-                    for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
-                        const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
-                        const auto prev_state =
-                            m_states[stage_offset_prev + prev_fold_idx];
-
-                        if (prev_state.is_empty) {
-                            continue;
-                        }
-                        const auto& prev_fold_state =
-                            m_folds_current[prev_fold_idx];
-                        if (!prev_fold_state.is_valid() ||
-                            prev_fold_state.is_empty()) {
-                            continue;
-                        }
-                        auto [cur_state, cur_fold_state] =
-                            gen_next_using_thresh(
-                                prev_state, prev_fold_state,
-                                m_thresholds[ithres],
-                                m_branching_pattern[istage], m_bias_snr,
-                                m_profile,
-                                step_key(istage, prev_fold_idx, ithres),
-                                *m_manager, *buffers_ptr,
-                                *boxcar_widths_cache_ptr, thread_timers, 1.0F,
-                                m_ntrials);
-
-                        const auto iprob = utils::find_lower_bin_index(
-                            m_probs, cur_state.success_h1_cumul);
-                        if (iprob < 0 ||
-                            std::cmp_greater_equal(iprob, m_nprobs)) {
-                            continue;
-                        }
-
-                        const auto cur_idx       = (ithres * m_nprobs) + iprob;
-                        const auto cur_state_idx = stage_offset_cur + cur_idx;
-
-                        State& existing_state     = m_states[cur_state_idx];
-                        FoldsType& existing_folds = m_folds_next[cur_idx];
-
-                        if (existing_state.is_empty ||
-                            cur_state.complexity_cumul <
-                                existing_state.complexity_cumul) {
-                            existing_state = cur_state;
-                            existing_folds = std::move(cur_fold_state);
-                        }
-                    }
-                }
-            }
-        }
-        // Merge this segment's stats into global
-        m_timer_stats.merge(segment_stats);
     }
 
     FoldGrid

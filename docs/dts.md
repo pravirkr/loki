@@ -50,10 +50,8 @@ cells: it improves one schedule on fixed samples (see
 
 | mode | search | after the search | use |
 |---|---|---|---|
-| `legacy` | one simulation per transition, analytic beam | none | reference, paper figures |
 | `improved` | one simulation per parent cell, analytic beam (or `guess`) | none (`calibrate()` optional) | reference, paper figures |
 | `shared` (default) | shared signal trials, guided beam, one pass | `solve()`: tighten, repair, report | production |
-| `robust` | as `shared`, plus a second pass | `solve()`: shortlist, block refinement, repair, report | when ~2.5x the run time buys a lower L |
 | `descent` | none: constrained descent of one schedule on a signal bank and a noise genealogy | `solve()` is the whole mode: descent, pin/repair, report | near-lowest C at Pd = `min_pd` (`pd_policy = "pin"`, default) or low L = C / Pd at Pd ≥ `min_pd` (`pd_policy = "free"`) across all bin counts; optional floor on the last threshold (`fap`) |
 
 The EP planner uses `descent` with `pd_policy = "pin"` on both backends, once
@@ -69,7 +67,7 @@ Picking the best of many noisy candidates also picks the one whose estimate
 came out luckiest (the optimiser's or winner's curse). The scheme suffers
 from it twice.
 
-1. **Pd side.** In `legacy` and `improved` every candidate's Pd comes from its
+1. **Pd side.** In `improved` every candidate's Pd comes from its
    own resampled signal trials, and each cell keeps the cheapest candidate
    whose Pd cleared its bin, i.e. the one whose Pd estimate was high by chance.
    This acts at every stage: on the 127-stage production pattern the in-run Pd
@@ -113,8 +111,8 @@ measuring the chosen schedule on samples that took no part in choosing it
   plus `w_terminal` times the survivors at the last stage). In the search's
   states, a noise survivor count below 8 per 1024 trials is treated as 8 (a
   near-zero count is mostly luck, and a deep search would exploit it): the
-  floored pass rate enters the cost so far, every descendant's cost and the
-  `robust` cost to go. The survivor maps keep the actual trials, and `solve()`
+  floored pass rate enters the cost so far and every descendant's cost. The
+  survivor maps keep the actual trials, and `solve()`
   measures C on fresh noise, so the reported C is not floored. The Pd grid has `nprobs` bins from `min_pd`
   to 1 (`min_pd` is an edge) and at most 16 below it.
 - **`solve()` on fresh samples** (2^17 signal trials each, 2^15 noise trials):
@@ -127,12 +125,9 @@ measuring the chosen schedule on samples that took no part in choosing it
   3. *report* on bank C, which chose nothing: Pd is a direct count with its
      binomial error; C is an evaluation on fresh noise.
 
-Mode `robust` adds a second search pass (candidates ranked by cost so far plus
-the first pass's cost to go of their noise survivors, the beam recentred on
-the first pass's path), compares up to four candidate paths on fresh noise, and
-moves blocks of stages by ±2 grid steps when that lowers L by 2 % on one fresh
-noise sample and by 0.5 % on a second. These constants are heuristics chosen
-once in the research workspace (`dts_work`), not tuned per pattern.
+The removed mode `robust` (see [History](#history)) added a second search
+pass, a shortlist of four candidate paths compared on fresh noise and block
+moves of ±2 grid steps on top of this.
 
 ## The bank descent
 
@@ -271,7 +266,7 @@ mean and coefficient of variation over 8 search seeds:
 |---|---|---|---|---|---|---|---|
 | `improved` | 0.088 | 0.068 | 4.9e4 | 0.18 | 5.5e5 | 0.12 | 0.16 s |
 | `shared` | 0.104 | 0.043 | 5.6e4 | 0.11 | 5.4e5 | 0.074 | 0.22 s |
-| `robust` | 0.103 | 0.023 | 5.1e4 | 0.041 | 4.9e5 | 0.039 | 0.60 s |
+| `robust` (removed) | 0.103 | 0.023 | 5.1e4 | 0.041 | 4.9e5 | 0.039 | 0.60 s |
 
 The same suite with `descent` (2026-11, L40, 8 seeds, 4 host threads; Pd is
 the lowest and highest seed, C the geometric mean):
@@ -279,18 +274,18 @@ the lowest and highest seed, C the geometric mean):
 | case | mode | Pd | C | cv of C | time |
 |---|---|---|---|---|---|
 | production, `min_pd` 0.1 | `shared` | 0.102-0.114 | 5.75e4 | 0.099 | 0.23 s |
-| | `robust` | 0.102-0.108 | 5.26e4 | 0.024 | 0.56 s |
+| | `robust` (removed) | 0.102-0.108 | 5.26e4 | 0.024 | 0.56 s |
 | | `descent` (`pin`) | 0.101-0.104 | 4.68e4 | 0.020 | 0.16 s |
 | | `descent` (`free`) | 0.101-0.104 | 4.66e4 | 0.023 | 0.21 s |
 | production, `min_pd` 0.05 | `shared` | 0.051-0.056 | 1.29e4 | 0.129 | 0.23 s |
-| | `robust` | 0.052-0.052 | 1.14e4 | 0.029 | 0.54 s |
+| | `robust` (removed) | 0.052-0.052 | 1.14e4 | 0.029 | 0.54 s |
 | | `descent` (`pin`) | 0.051-0.053 | 1.07e4 | 0.030 | 0.17 s |
 | | `descent` (`free`) | 0.051-0.053 | 1.07e4 | 0.018 | 0.20 s |
 
 On short patterns (4-64 stages, 64 bins, 8 seeds) `descent` with
 `pd_policy = "free"` delivers interior Pd > `min_pd` where L = C / Pd is lower,
-matching or beating both `shared` (0.904-0.998 of its L) and `robust`
-(0.911-0.998 of its L) in 0.027-0.100 s (see [performance.md](performance.md)).
+matching or beating both `shared` (0.904-0.998 of its L) and the removed
+`robust` (0.911-0.998 of its L) in 0.027-0.100 s (see [performance.md](performance.md)).
 
 On 127-stage patterns a cold `descent` (`pin`) solve takes 0.130 / 0.138 /
 0.172 / 0.198 / 0.249 / 0.363 / 0.593 s at 16 / 32 / 64 / 128 / 256 / 512 /
@@ -313,11 +308,11 @@ and zero delivered `short`; every judged Pd stayed inside `target + 2 SE ± 5 SE
 
 ## Settings
 
-`SharedOptions` holds the settings of the shared modes: `min_pd`,
+`SharedOptions` holds the settings of mode `shared`: `min_pd`,
 `w_terminal` (1), `beam_sigma` (3) and `reach_sigma` (1). The constructor's
 `nprobs` is the number of Pd bins from `min_pd` to 1; `ntrials` (1024) is the
 noise population per cell. `prob_min`, `guess`, `beam_width` and
-`thres_neigh` apply to `legacy` and `improved` only.
+`thres_neigh` apply to `improved` only.
 
 Mode `descent` reads `min_pd`, `w_terminal`, `pd_policy` (`"pin"` default, or
 `"free"`), `fap`, `final_threshold`, `descent_passes` (builds of the noise
@@ -360,7 +355,7 @@ the selected path rescored on 2^20 trials):
 The default (40 bins above `min_pd`) is the compromise. More thresholds do not
 help (`nthresholds` 50-200 were equivalent).
 
-`legacy` and `improved` accept `guess = "analytic"` (the lower of the expected
+`improved` accepts `guess = "analytic"` (the lower of the expected
 signal S/N and the trials-aware S/N, the beam of the paper),
 `"pilot"` (the median unpruned signal score instead of the expected S/N) or
 `"window"` (every grid threshold in the feasibility window and every
@@ -372,8 +367,8 @@ the production pattern.
 
 `solve()` returns a `SchemeSolution`: the thresholds, their reported Pd (with
 standard error and trial count), C and L, the noise evaluation per stage, the
-raw search selection with its in-run (optimistic) Pd and C, the shortlist
-(`robust`), named diagnostics, and a delivery status (`met`,
+raw search selection with its in-run (optimistic) Pd and C, `shortlist`
+(always empty, kept from the removed `robust`), named diagnostics, and a delivery status (`met`,
 `within_tolerance`, `short`, `no_path`). `within_tolerance` means the reported
 Pd is below `min_pd` but at least 0.9 `min_pd`. In `descent` the pin aims 2
 standard errors above `min_pd` on one bank and the report counts on another,
@@ -382,10 +377,9 @@ with an independently judged Pd in the normal range): it is sampling error,
 not a failure.
 
 `save()` writes the search states (stage × threshold × Pd bin), the grids,
-`beam_lo`/`beam_hi`, `guess_path` (the guess searched around: in `robust` the
-second pass's recentred guess, which follows the first pass's path by
-construction) and, in the shared modes, `guess_path_pilot`; after `solve()`
-also a group `solution`. In the shared modes the `cost` of the last stage's
+`beam_lo`/`beam_hi`, `guess_path` (the guess searched around) and, in mode
+`shared`, `guess_path_pilot`; after `solve()` also a group `solution`. In
+mode `shared` the `cost` of the last stage's
 cells is the terminal rank (C + w n_{M-1}) / Pd, so ranking the saved terminal
 cells by `cost` selects the same path as the solver; in the other modes and
 stages it is `complexity_cumul / success_h1_cumul`.
@@ -413,8 +407,31 @@ seeds s and s ^ (salt_a ^ salt_b) share samples across roles (for `descent`,
 e.g. seeds 4 and 7 swap the signal sample and the pin bank). Use widely
 spaced seeds, not consecutive ones, for independent replications.
 `bench/scripts/schemes/golden_solve.py record|check` keeps a bit-exact CUDA
-regression golden of both shared modes (valid for one toolchain);
+regression golden of mode `shared` (valid for one toolchain);
 `golden_evaluate.py` does the same for `evaluate()`.
+
+## History
+
+Two modes were removed in 2026-11, after `descent` became the production
+mode; commit `caf17c0` is the last that has them.
+
+- **`legacy`** was the published algorithm transcribed literally: the same
+  threshold × Pd grid search with the analytic beam as `improved`, but with
+  one Monte Carlo simulation per transition, i.e. every (parent cell, child
+  threshold) pair simulated its own noise and signal trials, and the winner
+  of each cell regenerated its survivors. It and `improved` were the
+  references for the paper figures. `improved` keeps the same search and simulates once per parent
+  cell, the children sharing those trials: each transition's estimate is
+  still unbiased, at a fraction of the simulation work, and `improved` is the
+  reference implementation now. The two do not give the same bits (different
+  random streams).
+- **`robust`** was `shared` with a second search pass (candidates ranked by
+  cost so far plus the first pass's cost to go, the beam recentred on the
+  first pass's path), a shortlist of up to four candidate paths compared on
+  fresh noise, and block moves of ±2 grid steps kept when they lowered L by
+  2 % on one fresh noise sample and by 0.5 % on a second. It cost about 2.5
+  times the run time of `shared` for a lower L; `descent` is cheaper than
+  both on long patterns (Measured behaviour above).
 
 ## Limitations
 
@@ -431,7 +448,7 @@ regression golden of both shared modes (valid for one toolchain);
   reference shape at the design S/N, folded without loss. Mismatch loss of the
   EP search and multi-leaf detection are outside it.
 - Pd is survival to the final candidate list, not completeness at a
-  false-alarm rate. In the four search modes the last threshold is chosen by
+  false-alarm rate. In the search modes (`improved`, `shared`) the last threshold is chosen by
   cost alone (`w_terminal` weighs the final survivors) and nothing bounds the
   false-alarm probability per final trial; `descent` with `fap` or
   `final_threshold` bounds it from below (issue #42). At low S/N a high Pd can need a final list that keeps about

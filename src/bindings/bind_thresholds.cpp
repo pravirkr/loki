@@ -150,9 +150,9 @@ void bind_thresholds(py::module_& m) {
                 auto sol = long_call([&] { return self.solve(); });
                 return solution_to_dict(std::move(sol));
             },
-            "Modes 'shared' and 'robust', after run(): the schedule to use "
+            "Modes 'shared' and 'descent', after run(): the schedule to use "
             "with the Pd and cost of exactly those thresholds measured on "
-            "fresh samples (tightening, selection, refinement and repair use "
+            "fresh samples (tightening and repair use "
             "other samples than the report). Frees the search's device "
             "memory.")
         .def(

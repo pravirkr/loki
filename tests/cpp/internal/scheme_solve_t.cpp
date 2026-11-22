@@ -169,33 +169,6 @@ TEST_CASE("tighten_schedule raises thresholds without losing a survivor",
     REQUIRE(none == untouched);
 }
 
-TEST_CASE("refinement_blocks cuts the stages into equal log-branching",
-          "[thresholds][solve]") {
-    // Uniform branching: four equal blocks
-    const std::vector<float> flat(16, 2.0F);
-    const auto cuts = detail::refinement_blocks(flat);
-    REQUIRE(cuts.size() == 5);
-    REQUIRE(cuts.front() == 0);
-    REQUIRE(cuts.back() == 16);
-    for (SizeType k = 1; k < 4; ++k) {
-        // a cut lands within one stage of the exact quarter
-        REQUIRE(cuts[k] + 1 >= 4 * k);
-        REQUIRE(cuts[k] <= 4 * k);
-    }
-    // Everything in the first stage: the other cuts collapse
-    std::vector<float> front(8, 1.0F);
-    front[0]      = 1000.0F;
-    const auto fc = detail::refinement_blocks(front);
-    REQUIRE(fc.front() == 0);
-    REQUIRE(fc.back() == 8);
-    REQUIRE(std::ranges::is_sorted(fc));
-    REQUIRE(std::ranges::adjacent_find(fc) == fc.end());
-    // Fewer stages than blocks
-    const auto two = detail::refinement_blocks(std::vector<float>{2.0F, 2.0F});
-    REQUIRE(two.front() == 0);
-    REQUIRE(two.back() == 2);
-}
-
 TEST_CASE("window_scheme order statistics equal a full sort",
           "[thresholds][solve]") {
     constexpr SizeType kN = 2048;
@@ -282,8 +255,7 @@ TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
     constexpr float kMinPd      = 0.3F;
     auto proxy                  = shared_engine(bp, 64, kMinPd);
     proxy->run(10, /*show_progress=*/false);
-    const auto searched =
-        detail::solve_scheme(*proxy, kMinPd, 1.0, /*robust=*/false);
+    const auto searched = detail::solve_scheme(*proxy, kMinPd, 1.0);
     REQUIRE_FALSE(searched.thresholds.empty());
     proxy.reset();
 
@@ -307,8 +279,7 @@ TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
     // nbins)
     auto native = shared_engine(bp, 256, kMinPd);
     native->run(10, /*show_progress=*/false);
-    const auto sol =
-        detail::solve_scheme(*native, kMinPd, 1.0, /*robust=*/false);
+    const auto sol           = detail::solve_scheme(*native, kMinPd, 1.0);
     const double native_cost = cost_per_detection(*native, sol.thresholds);
     CAPTURE(native_cost);
     REQUIRE(refitted < 1.5 * native_cost);
