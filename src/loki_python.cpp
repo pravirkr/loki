@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/backend.hpp"
+#include "loki/common/build_info.hpp"
 #include "loki/common/interrupt.hpp"
 #include "loki/common/progress.hpp"
 
@@ -46,6 +47,10 @@ PYBIND11_MODULE(libloki, m) {
             return names;
         },
         "Backends compiled into this build, e.g. ['cpu'] or ['cpu', 'cuda'].");
+
+    // `git describe --always --dirty` of the source this module was built
+    // from, or "unknown" outside a git checkout.
+    m.attr("git_commit") = std::string(loki::git_commit());
 
     m.def(
         "set_log_level",
