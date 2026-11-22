@@ -279,6 +279,7 @@ def compact(result: Path, out: Path, provenance: dict[str, Any]) -> dict[str, in
                 src.copy(src[name], dst, name=name)
         for name in ("candidates", "clusters"):
             counts[name] = _rows(src, name)
+        counts.update(_copy_level_stats(src, dst))
         meta = dst.create_group("survey")
         for key, value in provenance.items():
             meta.attrs[key] = (
@@ -288,6 +289,38 @@ def compact(result: Path, out: Path, provenance: dict[str, Any]) -> dict[str, in
         if leaves is not None:
             meta.create_dataset("leaves", data=leaves)
     return counts
+
+
+def _copy_level_stats(src: h5py.File, dst: h5py.File) -> dict[str, int]:
+    """Keep each EP run's per-level table, and count its overloads.
+
+    loki writes ``level_stats`` (survivors, harvests, overloads per pruning
+    level) in every EP run group under ``/chunks``, which the compact output
+    otherwise drops. A run whose buffer overflowed had its survivors trimmed.
+    """
+    n_runs = n_overloaded = n_overloads = 0
+    chunks = src.get("chunks", {})
+    for chunk_name, chunk in chunks.items():
+        runs = chunk.get("runs", {})
+        for run_name, run in runs.items():
+            if "level_stats" not in run:
+                continue
+            stats = run["level_stats"]
+            src.copy(
+                stats,
+                dst.require_group(f"level_stats/{chunk_name}"),
+                name=run_name,
+            )
+            n_runs += 1
+            if "n_overloads" in (stats.dtype.names or ()):
+                k = int(np.asarray(stats["n_overloads"]).sum())
+                n_overloads += k
+                n_overloaded += k > 0
+    return {
+        "n_runs": n_runs,
+        "n_runs_overloaded": n_overloaded,
+        "n_overloads": n_overloads,
+    }
 
 
 def _rows(handle: h5py.File, name: str) -> int:
@@ -374,6 +407,9 @@ def run_unit(run: RunDir, unit_id: str, attempt: int) -> dict[str, Any]:
         "peak_rss_gb": peak_rss_gb(),
         "n_candidates": counts.get("candidates", 0),
         "n_clusters": counts.get("clusters", 0),
+        "n_runs": counts["n_runs"],
+        "n_runs_overloaded": counts["n_runs_overloaded"],
+        "n_overloads": counts["n_overloads"],
         "raw_kept": raw_kept,
         "candidates_republished": republished,
         "resumed_from": str(spool) if spool is not None else None,

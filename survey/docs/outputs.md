@@ -53,10 +53,16 @@ common candidate tables, described in loki's `docs/candidates.md`:
   - `candidates_republished` and `resumed_from`, which say whether the
     candidate step ran again from loki's spool;
   - `/survey/leaves` (EP only), each candidate's final leaf, which `fold`
-    uses.
+    uses;
+- `/level_stats/<chunk>/<run>` (EP only): loki's per-level table of each
+  pruning run (survivors, harvests, `n_overloads`). An overload means the run's
+  buffer filled and loki trimmed its survivors.
 
 `out/<unit>.json` is the summary:
 - `n_candidates` and `n_clusters`;
+- `n_runs`, `n_runs_overloaded` and `n_overloads`: EP pruning runs, those whose
+  buffer overflowed, and the overloads in all (0 for FFA units). The report
+  lists the units with overflowed runs;
 - `search_s`, `total_s` and `peak_rss_gb`;
 - `output_sha256`, the hash of the HDF5 file;
 - `science_sha256`;

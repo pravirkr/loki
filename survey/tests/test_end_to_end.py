@@ -110,6 +110,24 @@ def test_simulated_pulsar_is_found(tmp_path: Path, unit_python: str) -> None:
             assert "science_sha256" in handle["survey"].attrs
         assert (run / "out" / "raw").is_dir()
 
+    # The EP unit keeps loki's per-level table of each run, overloads included;
+    # the FFA unit has no pruning runs.
+    ep_uid = "sim_DM10.00__mid__b0__ep_accel"
+    ep = json.loads((run / "out" / f"{ep_uid}.json").read_text())
+    assert ep["n_runs"] >= 1
+    assert 0 <= ep["n_runs_overloaded"] <= ep["n_runs"]
+    with h5py.File(run / "out" / f"{ep_uid}.h5", "r") as handle:
+        tables: list[str] = []
+        handle["level_stats"].visititems(
+            lambda name, node: (
+                tables.append(name) if isinstance(node, h5py.Dataset) else None
+            ),
+        )
+        assert len(tables) == ep["n_runs"]
+        assert "n_overloads" in handle["level_stats"][tables[0]].dtype.names
+    ffa = json.loads((run / "out" / "sim_DM10.00__mid__b0__ffa_accel.json").read_text())
+    assert ffa["n_runs"] == 0
+
     # Collected, matched and reported: FFA and EP found the pulsar, one group.
     summary = json.loads((run / "collect" / "summary.json").read_text())
     assert summary["groups"] >= 1

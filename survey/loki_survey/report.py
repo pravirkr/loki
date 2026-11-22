@@ -33,6 +33,8 @@ REPORT_HTML = "index.html"
 # The page lists this many candidates and ledger rows; the files hold them all.
 TOP_CANDIDATES = 100
 TOP_LEDGER = 100
+# Units with overflowed EP runs named on the page; the JSON keeps them all.
+TOP_OVERLOADED = 20
 SPEED_OF_LIGHT = 299792458.0
 SECONDS_PER_HOUR = 3600.0
 
@@ -67,12 +69,26 @@ def _units_section(run: RunDir, units: list[Unit]) -> dict[str, Any]:
         excluded = db.excluded_hosts()
     finally:
         db.close()
+    overloaded = []
+    for unit in units:
+        path = run.unit_summary(unit.id)
+        summary = read_json(path) if path.is_file() else {}
+        if summary.get("n_runs_overloaded"):
+            overloaded.append(
+                {
+                    "unit": unit.id,
+                    "runs": summary["n_runs_overloaded"],
+                    "of": summary["n_runs"],
+                    "overloads": summary["n_overloads"],
+                },
+            )
     return {
         "planned_or_split": len(units),
         "states": counts,
         "attempts": int(attempts),
         "failures": failures,
         "excluded_hosts": excluded,
+        "overloaded": overloaded,
     }
 
 
@@ -432,6 +448,19 @@ def render_html(doc: dict[str, Any]) -> str:
     if units["excluded_hosts"]:
         hosts = _e(", ".join(units["excluded_hosts"]))
         parts.append(f'<p class="warn">Excluded hosts: {hosts}</p>')
+    if units.get("overloaded"):
+        listed = ", ".join(
+            f"<code>{_e(o['unit'])}</code> ({o['runs']} of {o['of']} runs)"
+            for o in units["overloaded"][:TOP_OVERLOADED]
+        )
+        more = len(units["overloaded"]) - TOP_OVERLOADED
+        parts.append(
+            f'<p class="warn">{len(units["overloaded"])} units had EP runs whose '
+            "buffer overflowed, so loki trimmed their survivors (per-level counts "
+            f"in each unit's <code>/level_stats</code>): {listed}"
+            + (f" and {more} more" if more > 0 else "")
+            + ".</p>",
+        )
     if units["failures"]:
         parts.append(
             _table(
