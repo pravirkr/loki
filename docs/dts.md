@@ -447,6 +447,16 @@ mode; commit `caf17c0` is the last that has them.
   2^17-trial count) and holds for the simulated signal model: a pulse of the
   reference shape at the design S/N, folded without loss. Mismatch loss of the
   EP search and multi-leaf detection are outside it.
+- `min_pd` is delivered, with no hidden margin. Earlier designs delivered
+  Pd 0.11-0.17 for a target of 0.1 above 128 bins by accident, so they kept
+  pulses below the design S/N more often: at S/N 7 the descent's per-run Pd
+  is 10-25 % lower than theirs. Matching them needs `min_pd` 0.12-0.15, at
+  1.2-1.9 times the cost (see [performance.md](performance.md)). The runs of
+  a search are correlated, so Pd per search is well below
+  1 - (1 - Pd)^nruns.
+- The descent minimises the total work C, not the peak population of a
+  chunk: on one production plan `max_sugg` rose by 34 % while C fell (see
+  [memory.md](memory.md#planning)).
 - Pd is survival to the final candidate list, not completeness at a
   false-alarm rate. In the search modes (`improved`, `shared`) the last threshold is chosen by
   cost alone (`w_terminal` weighs the final survivors) and nothing bounds the
