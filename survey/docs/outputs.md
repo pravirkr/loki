@@ -45,7 +45,12 @@ common candidate tables, described in loki's `docs/candidates.md`:
   series' metadata (DM, `tobs`, `reference_time_seconds`) and the candidate
   options;
 - root attributes: `n_detections`, `n_clusters`, `n_candidates`, and
-  `n_cell_dropped` when `[candidates] max_per_cell` is set;
+  `n_cell_dropped` when `[candidates] max_per_cell` is set. With the cap,
+  loki keeps up to `max_per_cell` trials in each cell of width
+  `cell_log_width` in ln f, and `n_detections` counts the trials kept. A
+  source spreads over about 1/(f T) in ln f, so with a narrower cell it keeps
+  trials in several neighbouring cells, which loki's clustering joins into
+  one cluster: `n_detections` is then a few times `n_clusters`;
 - `/survey`, added by loki-survey:
   - attributes: the unit, `science_sha256`, `inputs_sha256`, `arrays_sha256`,
     the code versions, host, attempt, backend, threads and loki's memory
@@ -132,7 +137,9 @@ especially with many groups and `harmonic_max` 16.
 
 `lines_<series>.json` caches the line search of the lowest-DM series: the
 frequency resolution `df`, the power threshold, and each line's frequency
-range and power.
+range and power. Lines are searched in that one series and applied to every
+group: undispersed interference is strongest at the lowest DM. A survey of
+several observations or beams therefore gets lines from one of them only.
 
 ## `folds/`
 
