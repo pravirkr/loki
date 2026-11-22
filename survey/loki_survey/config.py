@@ -17,6 +17,7 @@ analysis output records the hash it was made with.
 
 from __future__ import annotations
 
+import re
 import sys
 import tomllib
 from dataclasses import asdict, dataclass, replace
@@ -171,6 +172,9 @@ class Evaluate:
     dm_tol: float = 0.0
     line_fap: float = DEFAULT_LINE_FAP
     line_tol_bins: float = 1.0
+    # A regular expression naming each series' observation (group "obs", or
+    # its one group); "": the series id without its DM token.
+    observation: str = ""
 
 
 @dataclass(frozen=True)
@@ -586,8 +590,22 @@ def parse_analysis(doc: dict[str, Any], where: str = "survey.toml") -> Analysis:
     if line_fap >= 1:
         msg = f"{ew}.line_fap: expected a probability in (0, 1)"
         raise ConfigError(msg)
+    observation = raw.get("observation", edefaults.observation)
+    if not isinstance(observation, str):
+        msg = f"{ew}.observation: expected a regular expression"
+        raise ConfigError(msg)
+    if observation:
+        try:
+            pattern = re.compile(observation)
+        except re.error as err:
+            msg = f"{ew}.observation: not a regular expression: {err}"
+            raise ConfigError(msg) from err
+        if pattern.groups > 1 and "obs" not in pattern.groupindex:
+            msg = f"{ew}.observation: with several groups, name the observation's 'obs'"
+            raise ConfigError(msg)
     evaluate = Evaluate(
         catalogue=catalogue,
+        observation=observation,
         harmonic_max=int(
             _positive(
                 raw.get("harmonic_max", edefaults.harmonic_max),

@@ -110,7 +110,8 @@ start tutorial_DM00.00__mid__b0__ep_accel (attempt 1, 4.0 GB)
 done 8  running 0  queued 0  pending 0  failed 0  of 8
 collect: 17 unit candidates from 8 of 8 units in 3 groups; 3 selected, 0 removed (ledger demo/collect/ledger.jsonl)
 evaluate: 1 of 1 catalogued pulsars in band found
-evaluate: 1 lines in tutorial_DM00.00; 1 groups lie on one
+evaluate: 1 lines in tutorial_DM00.00
+evaluate: 1 groups lie on a line
 fold: group 0 at 142.298466 Hz: S/N 16.90 (search 17.02, control 2.69, halves 11.61/13.35; taylor)
 fold: group 1 at 150.005448 Hz: S/N 15.34 (search 16.24, control 2.74, halves 11.14/10.86; taylor)
 fold: group 2 at 117.100310 Hz: S/N 14.03 (search 15.41, control 2.77, halves 10.54/10.94; taylor)

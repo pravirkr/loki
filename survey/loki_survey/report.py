@@ -631,11 +631,15 @@ def render_html(doc: dict[str, Any]) -> str:
         )
     lines = doc["lines"]
     if lines:
+        searched = "; ".join(
+            f"{o['n_lines']} in <code>{_e(o['series'])}</code> (DM {_num(o['dm'], 2)})"
+            for o in lines["observations"]
+        )
         parts.append(
-            f'<p class="note">{lines["n_lines"]} spectral lines in '
-            f"<code>{_e(lines['series'])}</code> (DM {_num(lines['dm'], 2)}, "
-            f"false-alarm rate {lines['fap']:g}); {lines['groups_on_lines']} groups "
-            "lie on one.</p>",
+            f'<p class="note">Spectral lines, searched in each observation\'s '
+            f"lowest-DM series at a false-alarm rate of {lines['fap']:g}: "
+            f"{searched}. {lines['groups_on_lines']} groups lie on a line of an "
+            "observation they were found in.</p>",
         )
 
     folds = doc.get("folds")

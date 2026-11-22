@@ -119,7 +119,8 @@ gives:
 - `group`, `f0`, `snr` and `dm`;
 - `catalogue`: each matching pulsar, with its `name`, the harmonic `p`/`q`,
   `df_hz` and `dm_offset`;
-- `line`: the spectral line the group lies on, if any.
+- `line`: the spectral line the group lies on, if any, with the
+  `observation` it was found in.
 
 `summary.json` lists:
 - every catalogued pulsar: in band or not, `found` (a group at its own
@@ -129,17 +130,26 @@ gives:
   else the strongest kept harmonic group, else the strongest removed one. The
   page and the command line state it as selected, found as p/q, removed by a
   rule, or not found;
-- the lines found.
+- `lines`: the false-alarm rate, and per observation the series searched,
+  its DM, the power threshold and the number of lines; the total, and
+  `groups_on_lines`.
 
 A match is a coincidence in frequency within the window, not a check that the
 group is that pulsar: a sub- or high-order harmonic match can be chance,
 especially with many groups and `harmonic_max` 16.
 
-`lines_<series>.json` caches the line search of the lowest-DM series: the
-frequency resolution `df`, the power threshold, and each line's frequency
-range and power. Lines are searched in that one series and applied to every
-group: undispersed interference is strongest at the lowest DM. A survey of
-several observations or beams therefore gets lines from one of them only.
+Lines are searched in each observation's lowest-DM series, where undispersed
+interference is strongest. A group is labelled with a line only of an
+observation one of its members came from: interference in one observation or
+beam says nothing of another. A series' observation is its id without the
+`_DM<dm>` token PRESTO's prepsubband writes, so `obsA_DM10.00` and
+`obsA_DM20.00` are one observation and `obsB_DM10.00` another. For other
+names, set `[evaluate] observation` to a regular expression whose group `obs`
+(or its one group) is the observation; a series it does not match is its own.
+
+`lines_<series>.json` caches the line search of one series: the frequency
+resolution `df`, the power threshold, and each line's frequency range and
+power.
 
 ## `folds/`
 

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
 
+from loki_survey import evaluate as evaluate_module
 from loki_survey.collect import collect
 from loki_survey.config import Analysis, Evaluate
 from loki_survey.evaluate import (
@@ -15,11 +17,22 @@ from loki_survey.evaluate import (
     evaluate,
     find_lines,
     match_lines,
+    observation_of,
     read_catalogue,
     recall_state,
 )
+from loki_survey.rundir import RunDir
 
-from .synthetic import HARMONIC, LONE, PULSAR, make_run, resolved
+from .synthetic import (
+    HARMONIC,
+    LONE,
+    PULSAR,
+    TOBS,
+    make_run,
+    resolved,
+    unit_for,
+    write_output,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -143,3 +156,76 @@ def test_find_lines_finds_a_sinusoid_and_nothing_in_noise() -> None:
     hits = match_lines(np.array([60.0, 61.0]), np.full(2, found["df"]), found["lines"])
     assert hits[0] is not None
     assert hits[1] is None
+
+
+def test_observation_of_a_series() -> None:
+    # By default, the DM trials of one observation share its name.
+    assert observation_of("obsA_DM10.00") == "obsA"
+    assert observation_of("obsA_DM-2.5_beam3") == "obsA_beam3"
+    assert observation_of("obsA") == "obsA"
+    # A pattern names it by its group "obs", its one group, or its match.
+    assert observation_of("ter5_b3_dm12.0", r"^(?P<obs>.*)_dm") == "ter5_b3"
+    assert observation_of("ter5_b3_dm12.0", r"_(b[0-9]+)_") == "b3"
+    assert observation_of("ter5_b3_dm12.0", r"b[0-9]+") == "b3"
+    # A series the pattern does not match is its own observation.
+    assert observation_of("other", r"_(b[0-9]+)_") == "other"
+
+
+def test_lines_of_one_observation_label_only_its_groups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hum, other_hum = 50.0, 60.0
+    run = RunDir.at(tmp_path / "run")
+    run.root.mkdir(parents=True)
+    # Observation a has lines at both frequencies, observation b at neither:
+    # the 50 Hz candidate is a's, the 60 Hz one only b's.
+    rows = {
+        ("a", 0.0): [(hum, 20.0)],
+        ("a", 10.0): [(hum, 12.0)],
+        ("b", 0.0): [(other_hum, 15.0)],
+    }
+    units = []
+    for (obs, dm), cands in rows.items():
+        unit = unit_for("ffa", dm)
+        series = f"{obs}_DM{dm:05.1f}"
+        unit = replace(unit, id=unit.id.replace(unit.series, series), series=series)
+        units.append(unit)
+        write_output(run, unit, dm, cands)
+        (run.prep_dir / series).mkdir(parents=True)
+    df = 1 / TOBS
+    lines_of = {
+        "a_DM000.0": [hum, other_hum],
+        "b_DM000.0": [],
+    }
+    searched = []
+
+    def fake_series_lines(_run: RunDir, series: str, fap: float) -> dict:
+        searched.append(series)
+        lines = [
+            {"f": f, "f_lo": f - df, "f_hi": f + df, "power": 99.0}
+            for f in lines_of[series]
+        ]
+        return {"series": series, "df": df, "threshold": fap, "lines": lines}
+
+    monkeypatch.setattr(evaluate_module, "series_lines", fake_series_lines)
+    res = resolved()
+    collect(run, res, units)
+    summary = evaluate(run, res)
+
+    # Each observation's lowest-DM series is searched, once.
+    assert sorted(searched) == ["a_DM000.0", "b_DM000.0"]
+    lines = summary["lines"]
+    searched_in = [
+        (o["observation"], o["series"], o["n_lines"]) for o in lines["observations"]
+    ]
+    assert searched_in == [("a", "a_DM000.0", 2), ("b", "b_DM000.0", 0)]
+    assert lines["n_lines"] == 2
+    assert lines["groups_on_lines"] == 1
+    entries = [
+        json.loads(line)
+        for line in (run.evaluate_dir / "matches.jsonl").read_text().splitlines()
+    ]
+    assert len(entries) == 1
+    assert entries[0]["f0"] == pytest.approx(hum)
+    assert entries[0]["line"]["observation"] == "a"

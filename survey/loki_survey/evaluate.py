@@ -8,17 +8,19 @@ plus the orbit's v/c when the catalogue gives the orbit) times the frequency,
 and ``radius_bins`` resolutions 1/T. With ``dm_tol`` above zero the DMs must
 also agree that closely.
 
-Lines are the strong narrow features of the power spectrum of the lowest-DM
-series, where an undispersed periodic signal (interference) is strongest. A
-group whose frequency lies on a line, within ``line_tol_bins`` resolutions, is
-labelled with it. Labels remove nothing; removing is ``collect``'s, with a
-ledger.
+Lines are the strong narrow features of the power spectrum of each
+observation's lowest-DM series, where an undispersed periodic signal
+(interference) is strongest. The DM trials of one observation share a name
+(``observation_of``). A group whose frequency lies, within ``line_tol_bins``
+resolutions, on a line of an observation it was found in is labelled with it.
+Labels remove nothing; removing is ``collect``'s, with a ledger.
 """
 
 from __future__ import annotations
 
 import csv
 import math
+import re
 from typing import TYPE_CHECKING, Any
 
 import h5py
@@ -231,6 +233,8 @@ def evaluate(run: RunDir, resolved: Resolved) -> dict[str, Any]:
             else handle["units"][key][:]
             for key in handle["units"]
         }
+        member_group = handle["members"]["group"][:]
+        member_unit = handle["members"]["unit"][:]
     f0 = np.asarray(groups["f0"], dtype=np.float64)
     dm = np.asarray(groups["dm"], dtype=np.float64)
     tobs = (
@@ -255,18 +259,11 @@ def evaluate(run: RunDir, resolved: Resolved) -> dict[str, Any]:
             "pulsars": _recall(pulsars, matches, groups, units),
         }
 
-    series_dm = {}
-    for series, unit_dm in zip(units["series"], units["dm"], strict=True):
-        series_dm.setdefault(str(series), float(unit_dm))
-    line_hits: list[dict | None] = [None] * f0.size
-    if series_dm:
-        known = {s: d for s, d in series_dm.items() if np.isfinite(d)}
-        lowest = min(known, key=known.get) if known else min(series_dm)
-        if not (run.prep_dir / lowest).is_dir():
-            summary["lines"] = None
-            print(f"evaluate: no prepared series {lowest}; lines not measured")
-        else:
-            line_hits = _lines(run, lowest, series_dm[lowest], f0, tobs, cfg, summary)
+    unit_obs = [observation_of(str(s), cfg.observation) for s in units["series"]]
+    group_obs: list[set[str]] = [set() for _ in range(f0.size)]
+    for g, u in zip(member_group, member_unit, strict=True):
+        group_obs[int(g)].add(unit_obs[int(u)])
+    line_hits = _lines(run, units, unit_obs, group_obs, f0, tobs, cfg, summary)
 
     entries = [
         {
@@ -290,25 +287,90 @@ def evaluate(run: RunDir, resolved: Resolved) -> dict[str, Any]:
     return summary
 
 
+# PRESTO's prepsubband names the DM trials of one observation <base>_DM<dm>.
+DM_TOKEN = re.compile(r"_DM-?[0-9]+(?:\.[0-9]+)?")
+
+
+def observation_of(series: str, pattern: str = "") -> str:
+    """Name the observation a series belongs to.
+
+    By default, the series id without its DM token, so that the DM trials of
+    one observation share a name while other observations and beams, with
+    other base names, keep theirs. A pattern (``[evaluate] observation``)
+    overrides it: its group "obs", else its one group, else the whole match;
+    a series it does not match is its own observation.
+    """
+    if not pattern:
+        return DM_TOKEN.sub("", series, count=1)
+    found = re.search(pattern, series)
+    if found is None:
+        return series
+    if "obs" in found.groupdict():
+        return found.group("obs")
+    return found.group(1) if found.re.groups else found.group(0)
+
+
 def _lines(
     run: RunDir,
-    series: str,
-    series_dm: float,
+    units: dict[str, np.ndarray],
+    unit_obs: list[str],
+    group_obs: list[set[str]],
     f0: np.ndarray,
     tobs: np.ndarray,
     cfg: Evaluate,
     summary: dict[str, Any],
 ) -> list[dict | None]:
-    """Measure a series' lines, label the groups on them, and summarise."""
-    found = series_lines(run, series, cfg.line_fap)
+    """Label each group with a line of an observation its members came from.
+
+    Lines are searched in each observation's lowest-DM series: undispersed
+    interference is strongest at the lowest DM, and it belongs to one
+    observation, so a line found in one observation says nothing of another.
+    """
+    hits: list[dict | None] = [None] * f0.size
+    summary["lines"] = None
+    series_dm: dict[str, dict[str, float]] = {}
+    for series, unit_dm, obs in zip(
+        units["series"],
+        units["dm"],
+        unit_obs,
+        strict=True,
+    ):
+        series_dm.setdefault(obs, {}).setdefault(str(series), float(unit_dm))
     line_tol = cfg.line_tol_bins / tobs if f0.size else f0
-    hits = match_lines(f0, line_tol, found["lines"])
+    per_obs = []
+    obs_hits: dict[str, list[dict | None]] = {}
+    for obs in sorted(series_dm):
+        dms = series_dm[obs]
+        known = {s: d for s, d in dms.items() if np.isfinite(d)}
+        lowest = min(known, key=known.get) if known else min(dms)
+        if not (run.prep_dir / lowest).is_dir():
+            print(f"evaluate: no prepared series {lowest}; lines of {obs} not measured")
+            continue
+        found = series_lines(run, lowest, cfg.line_fap)
+        obs_hits[obs] = [
+            None if hit is None else {**hit, "observation": obs}
+            for hit in match_lines(f0, line_tol, found["lines"])
+        ]
+        per_obs.append(
+            {
+                "observation": obs,
+                "series": lowest,
+                "dm": dms[lowest],
+                "threshold": found["threshold"],
+                "n_lines": len(found["lines"]),
+            },
+        )
+    if not per_obs:
+        return hits
+    for g in range(f0.size):
+        for obs in sorted(group_obs[g] & obs_hits.keys()):
+            if obs_hits[obs][g] is not None:
+                hits[g] = obs_hits[obs][g]
+                break
     summary["lines"] = {
-        "series": series,
-        "dm": series_dm,
         "fap": cfg.line_fap,
-        "threshold": found["threshold"],
-        "n_lines": len(found["lines"]),
+        "observations": per_obs,
+        "n_lines": sum(o["n_lines"] for o in per_obs),
         "groups_on_lines": sum(hit is not None for hit in hits),
     }
     return hits

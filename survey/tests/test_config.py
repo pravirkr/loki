@@ -186,6 +186,9 @@ def test_analysis_has_its_own_hash() -> None:
         ("[collect]\ndrop_undispersed = 1\n", "true or false"),
         ("[evaluate]\nline_fap = 1.5\n", "probability"),
         ("[evaluate]\ndoppler = -1e-4\n", ">= 0"),
+        ("[evaluate]\nobservation = 3\n", "expected a regular expression"),
+        ('[evaluate]\nobservation = "("\n', "not a regular expression"),
+        ('[evaluate]\nobservation = "(a)_(b)"\n', "name the observation"),
     ],
 )
 def test_invalid_analysis(extra: str, message: str) -> None:

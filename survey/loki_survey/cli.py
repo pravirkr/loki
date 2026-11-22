@@ -290,10 +290,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 print(f"  {p['name']}: {state}")
     lines = summary.get("lines")
     if lines:
-        print(
-            f"evaluate: {lines['n_lines']} lines in {lines['series']}; "
-            f"{lines['groups_on_lines']} groups lie on one",
-        )
+        for obs in lines["observations"]:
+            print(f"evaluate: {obs['n_lines']} lines in {obs['series']}")
+        print(f"evaluate: {lines['groups_on_lines']} groups lie on a line")
     return 0
 
 
