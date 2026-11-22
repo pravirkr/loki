@@ -21,6 +21,7 @@ import platform
 import re
 import resource
 import shutil
+import subprocess
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -53,6 +54,8 @@ from loki_survey.rundir import (
 # full result file.
 COMMON_GROUPS = ("observation", "processing", "search", "candidates", "clusters")
 RESULT_SUFFIX = {"ffa": "_ffa_results.h5", "ep": "_ep_results.h5"}
+# A git query for loki's commit that takes longer than this is abandoned.
+GIT_TIMEOUT_S = 10
 SPOOL_SUFFIX = {"ffa": "_ffa_spool.h5", "ep": "_ep_spool.h5"}
 # Written into the work directory before the search: what the search depends
 # on, so a later attempt can tell whether a spool kept there is still its own.
@@ -67,6 +70,43 @@ def keeps_raw(unit_id: str, raw_fraction: float) -> bool:
     return draw < raw_fraction
 
 
+def loki_commit(package_dir: Path, libloki: object) -> str:
+    """Return the git commit of the loki that runs, as far as it can be told.
+
+    loki writes its commit only into results of its command line (/run_stats),
+    not through the Python bindings. So: a commit the bindings report
+    (``libloki.git_commit``), else the git checkout loki's package was imported
+    from (an editable install), with "-dirty" for uncommitted changes to
+    tracked files, else "unknown". An editable install's library is the one
+    built at install time; ``libloki_sha256`` names that.
+    """
+    commit = getattr(libloki, "git_commit", None)
+    if isinstance(commit, str) and commit:
+        return commit
+    root = package_dir.parent.parent  # <checkout>/src/loki
+    if not (root / ".git").exists():
+        return "unknown"
+    git = ["git", "-C", str(root)]
+    try:
+        head = subprocess.run(
+            [*git, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=GIT_TIMEOUT_S,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            [*git, "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=GIT_TIMEOUT_S,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return head + ("-dirty" if dirty else "")
+
+
 def versions() -> dict[str, str]:
     """Describe the code behind an output: versions and the built library."""
     import loki  # noqa: PLC0415
@@ -75,6 +115,7 @@ def versions() -> dict[str, str]:
     return {
         "loki_survey": loki_survey.__version__,
         "loki": getattr(loki, "__version__", "unknown"),
+        "loki_commit": loki_commit(Path(loki.__file__).resolve().parent, libloki),
         "libloki_sha256": sha256_file(Path(libloki.__file__)),
         "python": platform.python_version(),
     }

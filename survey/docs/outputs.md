@@ -49,7 +49,10 @@ common candidate tables, described in loki's `docs/candidates.md`:
 - `/survey`, added by loki-survey:
   - attributes: the unit, `science_sha256`, `inputs_sha256`, `arrays_sha256`,
     the code versions, host, attempt, backend, threads and loki's memory
-    budget;
+    budget. The versions include `loki_commit`: the commit the loki bindings
+    report, else the git checkout loki was imported from (an editable install;
+    "-dirty" with uncommitted changes), else "unknown". Its library is named by
+    `libloki_sha256`;
   - `candidates_republished` and `resumed_from`, which say whether the
     candidate step ran again from loki's spool;
   - `/survey/leaves` (EP only), each candidate's final leaf, which `fold`
