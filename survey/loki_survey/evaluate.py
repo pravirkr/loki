@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 import h5py
 import numpy as np
 
-from loki_survey.collect import CANDIDATES_H5, SUMMARY, load_groups
+from loki_survey.collect import CANDIDATES_H5, NO_PARENT, SUMMARY, load_groups
 from loki_survey.prep import load_arrays
 from loki_survey.rundir import (
     RunDir,
@@ -386,10 +386,15 @@ def _best_match(
     In order: its strongest kept fundamental group, its strongest removed
     fundamental group, its kept harmonic group, its removed one. A stronger
     harmonic must not hide a kept fundamental, nor a removed fundamental hide
-    that the pulsar was removed. Among harmonic groups the lowest-order ratio
-    p/q (smallest p * q) tells most, and S/N only between equal orders: with p
-    and q up to ``harmonic_max`` there are many high-order ratios, and a
-    bright unrelated group often lies near one by chance.
+    that the pulsar was removed. Within each, a group ``collect`` calls a
+    harmonic of another comes after the groups it calls a harmonic of none:
+    its frequency is that group's times p/q, within ``radius_bins``, a far
+    closer tie than the catalogue window, so a pulsar it matches says no more
+    than its parent does (a comb of an interference line lies near many
+    ratios). Then the lowest-order ratio p/q (smallest p * q) tells most, and
+    S/N only between equal orders: with p and q up to ``harmonic_max`` there
+    are many high-order ratios, and a bright unrelated group often lies near
+    one by chance.
     """
 
     def most_telling(
@@ -397,7 +402,11 @@ def _best_match(
     ) -> tuple[int, dict[str, Any]] | None:
         return min(
             cands,
-            key=lambda h: (h[1]["p"] * h[1]["q"], -groups["snr"][h[0]]),
+            key=lambda h: (
+                groups["harmonic_of"][h[0]] != NO_PARENT,
+                h[1]["p"] * h[1]["q"],
+                -groups["snr"][h[0]],
+            ),
             default=None,
         )
 

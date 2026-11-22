@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from loki_survey import evaluate as evaluate_module
-from loki_survey.collect import collect
+from loki_survey.collect import NO_PARENT, collect
 from loki_survey.config import Analysis, Evaluate
 from loki_survey.evaluate import (
     _recall,
@@ -84,16 +84,24 @@ def test_catalogue_recall_harmonics_and_doppler(tmp_path: Path) -> None:
     assert summary["lines"] is None
 
 
-def recall_of(groups: list[tuple[float, bool, str, list[tuple[int, int]]]]) -> dict:
+def recall_of(
+    groups: list[tuple[float, bool, str, list[tuple[int, int]]]],
+    parents: dict[int, int] | None = None,
+) -> dict:
     """_recall of one pulsar at 100 Hz (in band) over hand-made groups.
 
     Each group: (S/N, kept, removed_by, [(p, q) it matches the pulsar at]).
+    parents: group -> the group collect calls it a harmonic of.
     """
     snr, kept, removed, ratios = zip(*groups, strict=True)
+    harmonic_of = np.full(len(groups), NO_PARENT)
+    for child, parent in (parents or {}).items():
+        harmonic_of[child] = parent
     table = {
         "snr": np.array(snr),
         "selected": np.array(kept),
         "removed_by": np.array(removed),
+        "harmonic_of": harmonic_of,
     }
     matches = [[{"name": "P", "p": p, "q": q} for p, q in rs] for rs in ratios]
     units = {"f_min": np.array([50.0]), "f_max": np.array([200.0])}
@@ -125,6 +133,18 @@ def test_recall_prefers_a_low_order_harmonic_to_a_stronger_high_order_one() -> N
     # Between equal orders, the stronger group.
     row = recall_of([(9.0, True, "", [(3, 1)]), (12.0, True, "", [(1, 3)])])
     assert recall_state(row) == "found as 1/3"
+
+
+def test_recall_puts_a_harmonic_of_another_group_after_the_rest() -> None:
+    # A line at 7/3 and its comb tooth near 1/2: the tooth outshines the
+    # pulsar's own 2/1 group, but collect ties it to the line.
+    groups = [
+        (40.0, True, "", [(7, 3)]),
+        (11.0, True, "", [(1, 2)]),
+        (9.0, True, "", [(2, 1)]),
+    ]
+    assert recall_state(recall_of(groups)) == "found as 1/2"
+    assert recall_state(recall_of(groups, parents={1: 0})) == "found as 2/1"
 
 
 def test_recall_says_removed_when_the_fundamental_was_removed() -> None:

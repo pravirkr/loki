@@ -136,7 +136,10 @@ gives:
   most: the strongest kept fundamental group, else the strongest removed one,
   else the kept harmonic group of the lowest-order ratio (smallest p × q, then
   the strongest), else such a removed one. A high-order match is more often
-  chance than a low-order one. The
+  chance than a low-order one. Before either, a group that `collect` calls a
+  harmonic of another comes after the groups it calls a harmonic of none: it
+  says no more than its parent (a comb of an interference line lies near many
+  ratios of a pulsar). The
   page and the command line state it as selected, found as p/q, removed by a
   rule, or not found;
 - `lines`: the false-alarm rate, and per observation the series searched,
