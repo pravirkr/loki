@@ -15,6 +15,7 @@ from loki_survey.config import (
     ConfigError,
     Resolved,
     load_resolved,
+    load_resolved_analysis,
     resolve,
     resolved_dict,
 )
@@ -258,7 +259,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     from loki_survey.plan import load_units  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
-    resolved = load_resolved(run)
+    resolved = load_resolved_analysis(run)
     summary = collect(run, resolved, load_units(run), partial=args.partial)
     removed = sum(summary["removed"].values())
     print(
@@ -276,7 +277,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     from loki_survey.evaluate import evaluate  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
-    summary = evaluate(run, load_resolved(run))
+    summary = evaluate(run, load_resolved_analysis(run))
     catalogue = summary.get("catalogue")
     if catalogue:
         pulsars = catalogue["pulsars"]
@@ -303,7 +304,7 @@ def cmd_fold(args: argparse.Namespace) -> int:
     from loki_survey.plan import load_units  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
-    summary = fold(run, load_resolved(run), load_units(run))
+    summary = fold(run, load_resolved_analysis(run), load_units(run))
     for row in summary["groups"]:
         print(
             f"fold: group {row['group']} at {row['f0']:.6f} Hz: S/N {row['snr']:.2f} "
@@ -319,7 +320,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     from loki_survey.report import REPORT_HTML, write_report  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
-    write_report(run, load_resolved(run), load_units(run))
+    write_report(run, load_resolved_analysis(run), load_units(run))
     print(f"report: {run.report_dir / REPORT_HTML}")
     return 0
 

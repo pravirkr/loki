@@ -11,6 +11,7 @@ from loki_survey.config import (
     Resolved,
     analysis_sha256,
     load_resolved,
+    load_resolved_analysis,
     parse_analysis,
     parse_site,
     parse_survey,
@@ -205,3 +206,26 @@ def test_resolved_keeps_the_analysis(tmp_path: Path) -> None:
     assert again.analysis == resolved.analysis
     assert again.analysis.evaluate.catalogue == "cat.csv"
     assert again.analysis_sha256 == resolved.analysis_sha256
+
+
+def test_analysis_stages_refuse_an_edit_made_after_check(tmp_path: Path) -> None:
+    run = RunDir.at(tmp_path)
+    (tmp_path / "survey.toml").write_text(SURVEY + "[collect]\nsnr_min = 8.0\n")
+    site = resources.files("loki_survey.templates").joinpath("site.toml").read_text()
+    (tmp_path / "site.toml").write_text(site)
+    atomic_write_json(run.resolved_json, resolved_dict(resolve(run), {}))
+    assert load_resolved_analysis(run).analysis.collect.snr_min == 8.0
+
+    # A comment or a science edit leaves the analysis as resolved.
+    (tmp_path / "survey.toml").write_text(
+        "# tuned\n"
+        + SURVEY.replace("snr_min = 7.0", "snr_min = 6.5")
+        + "[collect]\nsnr_min = 8.0\n",
+    )
+    assert load_resolved_analysis(run).analysis.collect.snr_min == 8.0
+
+    # [collect] edited without 'check': collect would use the old rules.
+    (tmp_path / "survey.toml").write_text(SURVEY + "[collect]\nsnr_min = 9.0\n")
+    with pytest.raises(ConfigError, match="run 'loki-survey check' again"):
+        load_resolved_analysis(run)
+    assert load_resolved(run).analysis.collect.snr_min == 8.0

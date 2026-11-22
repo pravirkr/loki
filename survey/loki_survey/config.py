@@ -995,6 +995,25 @@ def load_resolved(run: RunDir) -> Resolved:
     return Resolved(survey=survey, site=site, science_sha256=sha, analysis=analysis)
 
 
+def load_resolved_analysis(run: RunDir) -> Resolved:
+    """``load_resolved`` for collect, evaluate, fold and report.
+
+    It refuses when survey.toml's [collect], [evaluate] or [fold] no longer
+    match ``resolved.json``: an edit made after ``check``, which those stages
+    would otherwise ignore.
+    """
+    resolved = load_resolved(run)
+    if run.survey_toml.is_file():
+        current = parse_analysis(load_toml(run.survey_toml), str(run.survey_toml))
+        if analysis_sha256(current) != resolved.analysis_sha256:
+            msg = (
+                f"{run.survey_toml}: [collect], [evaluate] or [fold] changed since "
+                "'loki-survey check'; run 'loki-survey check' again"
+            )
+            raise ConfigError(msg)
+    return resolved
+
+
 def resolved_dict(resolved: Resolved, versions: dict[str, str]) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
