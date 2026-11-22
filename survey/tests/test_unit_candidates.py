@@ -22,11 +22,14 @@ if TYPE_CHECKING:
 
 FFA_UNIT = "sim_DM10.00__mid__b0__ffa_accel"
 EP_UNIT = "sim_DM10.00__mid__b0__ep_accel"
-# The FFA box alone, down to S/N 5: the noise leaves far more distinct tracks
-# than loki's smallest candidate memory can group.
+# The FFA box alone, down to S/N 4: the noise leaves about 200 detections,
+# against the 10-15 tracks loki's smallest candidate memory can group, so the
+# candidate step fails on any platform. At S/N 5 it was about 60 here, and the
+# simulated noise differs between C++ standard libraries: on macOS it left too
+# few to fail.
 FFA_SURVEY = SURVEY.split('[[search.box]]\nname = "ep_accel"')[0].replace(
     "snr_min = 7.0",
-    "snr_min = 5.0",
+    "snr_min = 4.0",
 )
 TINY_CANDIDATE_GB = 1e-4
 
