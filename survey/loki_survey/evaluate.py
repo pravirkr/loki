@@ -384,20 +384,27 @@ def _best_match(
     """Return the match that tells most about a catalogued pulsar.
 
     In order: its strongest kept fundamental group, its strongest removed
-    fundamental group, its strongest kept harmonic group, its strongest
-    removed one. A stronger harmonic must not hide a kept fundamental, nor a
-    removed fundamental hide that the pulsar was removed.
+    fundamental group, its kept harmonic group, its removed one. A stronger
+    harmonic must not hide a kept fundamental, nor a removed fundamental hide
+    that the pulsar was removed. Among harmonic groups the lowest-order ratio
+    p/q (smallest p * q) tells most, and S/N only between equal orders: with p
+    and q up to ``harmonic_max`` there are many high-order ratios, and a
+    bright unrelated group often lies near one by chance.
     """
 
-    def strongest(
+    def most_telling(
         cands: list[tuple[int, dict[str, Any]]],
     ) -> tuple[int, dict[str, Any]] | None:
-        return max(cands, key=lambda h: groups["snr"][h[0]], default=None)
+        return min(
+            cands,
+            key=lambda h: (h[1]["p"] * h[1]["q"], -groups["snr"][h[0]]),
+            default=None,
+        )
 
     harmonic = [h for h in hits if h not in fundamental]
     for cands in (fundamental, harmonic):
         kept = [h for h in cands if groups["selected"][h[0]]]
-        best = strongest(kept) or strongest(cands)
+        best = most_telling(kept) or most_telling(cands)
         if best is not None:
             return best
     return None

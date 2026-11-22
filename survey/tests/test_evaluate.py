@@ -118,6 +118,15 @@ def test_recall_says_found_as_a_harmonic_when_only_that_group_is_kept() -> None:
     assert recall_state(row) == "found as 2/1"
 
 
+def test_recall_prefers_a_low_order_harmonic_to_a_stronger_high_order_one() -> None:
+    # A bright unrelated group near 7/3 must not hide the pulsar's 2/1 group.
+    row = recall_of([(40.0, True, "", [(7, 3)]), (9.0, True, "", [(2, 1)])])
+    assert recall_state(row) == "found as 2/1"
+    # Between equal orders, the stronger group.
+    row = recall_of([(9.0, True, "", [(3, 1)]), (12.0, True, "", [(1, 3)])])
+    assert recall_state(row) == "found as 1/3"
+
+
 def test_recall_says_removed_when_the_fundamental_was_removed() -> None:
     row = recall_of(
         [(10.0, False, "remove_harmonics", [(1, 1)]), (15.0, True, "", [(1, 2)])],

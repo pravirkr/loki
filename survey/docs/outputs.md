@@ -134,7 +134,9 @@ gives:
   frequency, 1/1), `fundamental_selected` (such a group was kept), and its
   `best` group with whether a rule removed it. `best` is the group that tells
   most: the strongest kept fundamental group, else the strongest removed one,
-  else the strongest kept harmonic group, else the strongest removed one. The
+  else the kept harmonic group of the lowest-order ratio (smallest p × q, then
+  the strongest), else such a removed one. A high-order match is more often
+  chance than a low-order one. The
   page and the command line state it as selected, found as p/q, removed by a
   rule, or not found;
 - `lines`: the false-alarm rate, and per observation the series searched,
