@@ -145,5 +145,10 @@ it alone:
 - catalogue recall, lines and folds;
 - the ledger.
 
+evaluate and fold each record the sha256 of the collect candidates they read.
+collect renumbers its groups, so the report leaves out an evaluation or folds
+made from an earlier collect. `stale` lists the stages left out, and the page
+names the commands to run again.
+
 To compare runs or build your own plots, read `report.json` or the tables
 above, not the HTML.

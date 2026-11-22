@@ -54,6 +54,38 @@ def test_report_shows_units_cost_candidates_catalogue_and_ledger(
     assert render_html(saved) == page
 
 
+def test_report_leaves_out_an_evaluation_of_an_earlier_collect(tmp_path: Path) -> None:
+    run, units = make_run(tmp_path)
+    (run.root / "cat.csv").write_text(f"name,f0,dm\nPSR_A,{PULSAR},10.0\n")
+    res = resolved(Analysis(evaluate=Evaluate(catalogue="cat.csv")))
+    atomic_write_json(run.resolved_json, {"versions": {}})
+    collect(run, res, units)
+    evaluate(run, res)
+    assert write_report(run, res, units)["stale"] == []
+
+    # collect again under other rules: its groups are renumbered, and the
+    # evaluation's labels would land on other groups.
+    rules = Analysis(
+        collect=Collect(drop_undispersed=True),
+        evaluate=Evaluate(catalogue="cat.csv"),
+    )
+    collect(run, resolved(rules), units)
+    doc = write_report(run, resolved(rules), units)
+    assert doc["stale"] == ["evaluate"]
+    assert doc["catalogue"] is None
+    assert doc["lines"] is None
+    assert not any(r["catalogue"] for r in doc["candidates"]["rows"])
+    assert (
+        "Left out, made from an earlier collect: evaluate"
+        in (run.report_dir / "index.html").read_text()
+    )
+
+    evaluate(run, resolved(rules))
+    doc = write_report(run, resolved(rules), units)
+    assert doc["stale"] == []
+    assert doc["catalogue"]["pulsars"][0]["found"]
+
+
 def test_report_escapes_names(tmp_path: Path) -> None:
     run, units = make_run(tmp_path)
     (run.root / "cat.csv").write_text(f"name,f0\n<script>x</script>,{PULSAR}\n")

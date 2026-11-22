@@ -115,7 +115,7 @@ def _read_table(handle: h5py.File, name: str) -> dict[str, np.ndarray]:
     }
 
 
-def _candidates_section(run: RunDir) -> dict[str, Any] | None:
+def _candidates_section(run: RunDir, *, labelled: bool = True) -> dict[str, Any] | None:
     path = run.collect_dir / CANDIDATES_H5
     if not path.is_file():
         return None
@@ -125,7 +125,7 @@ def _candidates_section(run: RunDir) -> dict[str, Any] | None:
         curves = _read_table(handle, "dm_curves")
     labels: dict[int, dict[str, Any]] = {}
     matches = run.evaluate_dir / MATCHES
-    if matches.is_file():
+    if labelled and matches.is_file():
         for line in matches.read_text().splitlines():
             entry = json.loads(line)
             labels[entry["group"]] = entry
@@ -210,11 +210,35 @@ def _folds_section(run: RunDir) -> dict[str, Any] | None:
     return {"control_factor": summary["fold"]["control_factor"], "rows": rows}
 
 
+def _stale_stages(run: RunDir) -> list[str]:
+    """Evaluate and fold outputs made from another collect than the current one.
+
+    Both record the collect candidates' sha256 they read; collect renumbers
+    its groups, so their rows would label or show other groups.
+    """
+    collected = run.collect_dir / COLLECT_SUMMARY
+    if not collected.is_file():
+        return []
+    current = read_json(collected)["candidates_sha256"]
+    summaries = {
+        "evaluate": run.evaluate_dir / EVAL_SUMMARY,
+        "fold": run.root / "folds" / "summary.json",
+    }
+    return [
+        stage
+        for stage, path in summaries.items()
+        if path.is_file()
+        and read_json(path).get("collect_candidates_sha256") != current
+    ]
+
+
 def build_report(run: RunDir, resolved: Resolved, units: list[Unit]) -> dict[str, Any]:
     """Gather everything the page shows into one document."""
     resolved_doc = read_json(run.resolved_json)
     evaluated = run.evaluate_dir / EVAL_SUMMARY
     collected = run.collect_dir / COLLECT_SUMMARY
+    stale = _stale_stages(run)
+    evaluated_now = evaluated.is_file() and "evaluate" not in stale
     return {
         "schema": SCHEMA,
         "time": time.time(),
@@ -232,12 +256,11 @@ def build_report(run: RunDir, resolved: Resolved, units: list[Unit]) -> dict[str
         },
         "units": _units_section(run, units),
         "cost": _cost_section(run, resolved, units),
-        "candidates": _candidates_section(run),
-        "catalogue": read_json(evaluated).get("catalogue")
-        if evaluated.is_file()
-        else None,
-        "lines": read_json(evaluated).get("lines") if evaluated.is_file() else None,
-        "folds": _folds_section(run),
+        "stale": stale,
+        "candidates": _candidates_section(run, labelled="evaluate" not in stale),
+        "catalogue": read_json(evaluated).get("catalogue") if evaluated_now else None,
+        "lines": read_json(evaluated).get("lines") if evaluated_now else None,
+        "folds": None if "fold" in stale else _folds_section(run),
         "ledger": _ledger_section(run),
     }
 
@@ -360,6 +383,19 @@ def render_html(doc: dict[str, Any]) -> str:
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         f"<title>{_e(run['name'])} report</title><style>{CSS}</style></head><body>",
         f"<h1>{_e(run['name'])}</h1>",
+        *(
+            [
+                '<p class="warn">Left out, made from an earlier collect: '
+                + ", ".join(doc["stale"])
+                + ". Run "
+                + " and ".join(
+                    f"<code>loki-survey {_e(s)}</code>" for s in doc["stale"]
+                )
+                + " again.</p>",
+            ]
+            if doc.get("stale")
+            else []
+        ),
         '<p class="meta">'
         f"Made {_e(time.strftime('%Y-%m-%d %H:%M', time.localtime(doc['time'])))} "
         f"from <code>{_e(run['root'])}</code>. Science "

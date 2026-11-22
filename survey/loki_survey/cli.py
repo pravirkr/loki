@@ -320,8 +320,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     from loki_survey.report import REPORT_HTML, write_report  # noqa: PLC0415
 
     run = RunDir.at(args.rundir)
-    write_report(run, load_resolved_analysis(run), load_units(run))
+    doc = write_report(run, load_resolved_analysis(run), load_units(run))
     print(f"report: {run.report_dir / REPORT_HTML}")
+    for stage in doc["stale"]:
+        print(
+            f"  {stage} predates the current collect and was left out; "
+            f"run 'loki-survey {stage}'",
+        )
     return 0
 
 
