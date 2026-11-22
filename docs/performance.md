@@ -971,7 +971,7 @@ samples:
 
 The warm solves below 1 show that the full solve is about 2 % from
 converged. Two passes from a neighbour take 0.10 / 0.12 / 0.16 s at 16 / 64 /
-128 bins, within the time of `shared` (0.11 / 0.23 / 0.43 s). The optimal
+128 bins, within the time of `shared` (0.11 / 0.23 / 0.43 s). The converged
 schedules share a shape in signal z-scores (mean minus threshold over the
 standard deviation of the unpruned signal score) on the 127-stage patterns:
 0.6-2.6 at the first stage, low a quarter of the way in (-0.3 to 0.8 at
@@ -1027,125 +1027,255 @@ average), against 0.995 (worst 1.05, the target of 0.9) for the default.
 With r = 0.15 the flat start alone was 1.010 (worst 1.04) in the table
 above: lower r if such patterns matter more than 20 ms.
 
-The current default on the checks above:
+The current default (`pd_policy = "pin"`) and `"free"` on the checks above:
 
-- Suite, 8 seeds (`solve_suite.py`, Dinkelbach $L = C / P_d$): production
-  pattern at 0.1: Pd 0.101-0.104, C 4.66e4 (cv 0.023), L 4.55e5, 0.25 s; at
-  0.05: Pd 0.051-0.053, C 1.07e4 (cv 0.018), L 2.05e5, 0.25 s. On low-cost
-  short trees (`min(C_flat, C_smooth) <= 500 * (1 + B_0)`), higher-Pd flat
-  start probes on the first genealogy, the Dinkelbach lower bound
-  $\lambda \ge C / P_d$, conditional pinning and one-sided repair let the
-  descent settle at interior $L = C / P_d$ minima above `min_pd` in
-  0.02-0.05 s: `seg8` (S/N 8.1, target 0.5) L 3.05 at Pd 0.750 (against 4.02
-  when pinned to 0.5), `seg16` (S/N 8.1, target 0.1) L 5.87 at Pd 0.484
-  (against 20.8), `seg32` (S/N 6.0, target 0.1) L 39.7 at Pd 0.154 (against
-  44.6), and `seg4` (S/N 10, target 0.9) L 4.29 at Pd 0.968 (against 4.60).
-- 230 patterns, one seed: all `met` (212) or `within_tolerance` (18), Pd on
-  2^16 independent trials 0.0974-0.106, reported C 0.991 of the six-pass
-  plan's (0.988 up to 128 bins), free last thresholds 5.6-8.2 (below 7 on 69).
-- 22 patterns × 8 seeds: Pd 0.0990-0.1044 over 176 solves (median 0.1013,
-  standard deviation per pattern 0.0004-0.0011), cv of C 0.015 (median) and
-  0.048 (worst).
-- Time on 127 stages, 3 parameters, constructor + `run()` + `solve()` across
-  16 to 1024 bins. Above 64 bins, CUDA uses a warp-collaborative shared-memory
-  scorer (`GenericScorer::run_warp`, 8 warps/block, up to 32 KB shared memory
-  at 1024 bins, bit-identical to scalar `GenericScorer::run`) instead of
-  spilling 4 KB/thread to local memory, and above 128 bins evaluates the
-  2^16-trial pin/report signal banks with stage-pruned kernels
+- Suite, 8 seeds (`solve_suite.py --pd-policy free`, Dinkelbach L = C / Pd):
+  production pattern at 0.1: Pd 0.101-0.104, C 4.66e4 (cv 0.023), L 4.55e5; at
+  0.05: Pd 0.051-0.053, C 1.07e4 (cv 0.018), L 2.05e5 (`"pin"`: C 4.68e4 /
+  1.07e4, cv 0.020 / 0.030). On short patterns (64 bins, target 0.1, 8 seeds;
+  `shared` and `robust` with `ntrials` 1024, `nprobs` 40 and the `window`
+  guess; judged on 2^17 signal and 3 × 2^16 noise trials), `"free"` uses a bracketing + bisection start search over Pd (exiting
+  on the first upward probe when L rises on deep trees), a wider coarse level
+  (margin 0.8, step 0.4) for flat/interior starts, a global-shift block (one
+  block over every stage, at every pass), and
+  scaled one-sided repair (`search_pd > target + max(0.15 min(target, 1 - target), 6 SE)`):
+
+  | Pattern | `descent` (`free`) L (Pd) | `shared` L | `descent / shared` | `descent / robust` | time |
+  |---|---|---|---|---|---|
+  | 4 segments, S/N 10 | 4.20 (0.992-0.994) | 4.21 | 0.998 | 0.998 | 0.027 s |
+  | 8 segments, S/N 8.1 | 3.01 (0.760-0.780) | 3.02 | 0.996 | 0.998 | 0.037 s |
+  | 16 segments, S/N 8.1 | 5.71 (0.490-0.523) | 5.75 | 0.994 | 0.996 | 0.055 s |
+  | 32 segments, S/N 8.1 | 14.05 (0.277-0.324) | 14.28 | 0.984 | 0.995 | 0.084 s |
+  | 32 segments, S/N 6.0 | 39.63 (0.119-0.177) | 40.93 | 0.968 | 0.984 | 0.077 s |
+  | production, first 16 stages | 15.13 (0.432-0.459) | 15.45 | 0.980 | 0.996 | 0.054 s |
+  | production, first 32 stages | 65.80 (0.142-0.152) | 68.13 | 0.966 | 0.987 | 0.078 s |
+  | production, first 64 stages | 1656 (0.099-0.103) | 1832 | 0.904 | 0.911 | 0.100 s |
+
+  On 14 short patterns it was not tuned on (real patterns cut to 6-48 stages
+  at 16-1024 bins, synthetic ones at other S/N, bin counts and targets
+  0.02-0.3; 4 seeds) `"free"` is 0.954-1.000 of `shared`'s L and
+  0.980-1.002 of `robust`'s. Its design time at 1024 bins is 0.59-0.89 s on
+  127 stages and 0.09-0.39 s on 7-64 stages (`"pin"`: 0.55-0.64 s and
+  0.05-0.36 s).
+- The global-shift block of `"free"` was cut into two half-blocks on every
+  second pass (the half-block offset of the other block sizes applied to it
+  too). Kept as one block over every stage, measured against the half-block
+  version on the same seeds: L(new) / L(old), paired by pattern, target and
+  seed, is 1.0003 +/- 0.0006 (geometric mean over 132 cells of 33 patterns x
+  targets 0.01 / 0.1 / 0.5 / 0.9, 6 seeds; cells 0.973-1.020, none worse
+  beyond 3 SE and 1 %); 2-parameter 1024-bin pattern 1.004 (16 seeds); the
+  14 unseen short patterns 0.9995; no solve judged below target - 3 SE. Neutral, and
+  kept because it does what the code describes.
+
+- Pd jitter across targets, bins and patterns (`pd_policy = "pin"`, 21
+  patterns: 2/3/5-parameter 127-stage at 16/64/128/512/1024 bins, 64-stage, and
+  five 8-32 stage patterns × 8 seeds = 168 solves per target, judged on 2^17
+  independent signal trials and 2 × 2^16 noise trials):
+
+  | target | SE (2^17) | judged Pd range | Pd / target | (Pd - target) / SE | < target - 3 SE | `short` | C cv (med / max) |
+  |---|---|---|---|---|---|---|---|
+  | 0.01 | 0.00027 | 0.0094-0.0113 | 0.939-1.134 | -2.2 to +4.9 | 0 / 168 | 0 | 0.038 / 0.091 |
+  | 0.02 | 0.00039 | 0.0193-0.0219 | 0.965-1.097 | -1.8 to +5.0 | 0 / 168 | 0 | 0.030 / 0.074 |
+  | 0.05 | 0.00060 | 0.0490-0.0529 | 0.979-1.058 | -1.7 to +4.8 | 0 / 168 | 0 | 0.019 / 0.067 |
+  | 0.10 | 0.00083 | 0.0976-0.1038 | 0.976-1.038 | -2.9 to +4.6 | 0 / 168 | 0 | 0.015 / 0.045 |
+  | 0.20 | 0.00110 | 0.1980-0.2051 | 0.990-1.026 | -1.8 to +4.6 | 0 / 168 | 0 | 0.010 / 0.034 |
+  | 0.50 | 0.00138 | 0.4966-0.5064 | 0.993-1.013 | -2.4 to +4.7 | 0 / 168 | 0 | 0.008 / 0.040 |
+  | 0.90 | 0.00083 | 0.8983-0.9047 | 0.998-1.005 | -2.1 to +5.7 | 0 / 168 | 0 | 0.008 / 0.027 |
+  | 0.99 | 0.00027 | 0.9900-0.9916 | 1.000-1.002 | -0.2 to +5.9 | 0 / 168 | 0 | 0.020 / 0.055 |
+
+  Every one of the 1,344 solves lands inside `target + 2 SE ± 5 SE` with zero
+  `short` deliveries. High-bin low-cost trees (2-parameter, 1024 bins, 16
+  seeds at target 0.1) stay strictly unimodal at Pd 0.1006-0.1029 (sd 0.0006,
+  C cv 0.026).
+- Distance to repeated restarts (no global-minimum guarantee): restarting a
+  cold `pin` solve four times from its own z-scores on fresh samples across 12
+  patterns (16/64/128/512 bins × 2/3/5 parameters) gives best-of-4 / cold L =
+  0.990 (geometric mean, 0.971 worst; single restarts scatter 0.971-1.074).
+  A stronger reference finds more: the best judged C of three cold solves
+  and six chained restarts with 2^17 signal trials, 2^15 noise trials per
+  genealogy and finer steps (0.1 / 0.05 / 0.025 / 0.0125), every schedule
+  re-pinned to Pd 0.1 + 2 SE and judged on fresh samples (14 patterns:
+  127 stages at 16 / 64 / 256 / 1024 bins x 2 / 3 / 5 parameters, a 64- and
+  a 32-stage truncation). Cold over best of nine: 1.071 geometric mean
+  (1.036-1.127; 1.04-1.10 on 127 stages, 1.12-1.13 on the truncations); the
+  first restart alone (no selection) is 1.016 of the best, so a cold `pin`
+  solve costs about 1.05 of what one such restart reaches. This is an upper
+  bound on the optimum, not a lower one; seed scatter of C is within
+  0.95-1.05 (mostly +/-1.5 %).
+- Against the grid modes at equal Pd (same re-pinning and judge; descent 4
+  seeds, `shared` / `robust` 2): on costly patterns the descent is cheaper
+  (`shared` 1.14-1.35 and `robust` 1.11-1.16 of its C on 5 parameters,
+  `shared` 1.01-1.07 on most 3-parameter ones); on cheap and mid-length ones
+  the grid modes win by 2-8.5 % (`robust` 0.939 on a 2-parameter 64-bin
+  pattern and 0.976 on a 3-parameter 256-bin one, `shared` 0.915 / 0.938 on
+  the 64- and 32-stage truncations).
+- Cold time on 127 stages, 3 parameters, constructor + `run()` + `solve()`
+  across 16 to 1024 bins (medians of 3 warmed runs, L40 GPU + EPYC CPU). Above
+  64 bins CUDA uses a warp-collaborative shared-memory scorer
+  (`GenericScorer::run_warp`, 8 warps/block, up to 32 KB shared memory at 1024
+  bins, bit-identical to `GenericScorer::run`), and above 128 bins evaluates the
+  2^17-trial pin/report signal banks with stage-pruned kernels
   (`h1_margins_above` / `count_h1_survivors`, CUB compaction every 8 stages,
-  one H1 fold buffer instead of two). CPU tiles H1 evaluation in L2 (`kTile =
-  64` trials/thread, peak H1 RAM ~3 MB instead of 3.2 GB at 1024 bins, dropping
-  dead trials per stage) and parallelises the host `SignalSample` transpose,
-  active-trial `block_deltas`, and `pin_shift`:
-  - CUDA, 4 host threads (cold): 0.25 / 0.23 / 0.25 / 0.34 / 0.33 / 0.43 /
-    0.68 s at 16 / 32 / 64 / 128 / 256 / 512 / 1024 bins (0.42 / 0.40 / 0.42 /
-    0.53 / 0.49 / 0.62 / 0.87 s with 1 host thread; down from 0.67 / 2.0 /
-    7.5 s at 256 / 512 / 1024 bins before warp scoring and stage-pruned H1).
-    Its engine skips the pilot simulation of the data-driven beams (constructor
-    6-10 ms at every bin count instead of 19 ms at 16 bins and 720 ms at 1024).
-  - CPU, 4 threads (cold): 2.1 / 2.3 / 3.7 / 6.1 / 10.4 / 18.8 / 34.8 s at
-    16 / 32 / 64 / 128 / 256 / 512 / 1024 bins (~4.7× faster at large bin
-    counts, bit-identical across thread counts).
-- Floor of 7 (`final_threshold`), 170 patterns up to 128 bins: with KKT
-  active-floor pinning (holding $\gamma_{M-1} = \gamma_{\text{floor}}$ and
-  shifting `[0, M-1)` whenever $\gamma_{M-1} \le \gamma_{\text{floor}}$, rather
-  than lifting $\gamma_{M-1}$ off an active floor on positive shifts), C is
-  0.999 of the post-hoc floor baseline (against 1.009 previously), and
-  bit-identical to the free solve whenever the floor is inactive.
+  one H1 fold buffer instead of two). On the host, a 64 × 32 cache-blocked
+  `SignalSample` transpose eliminates power-of-2 L1 set-aliasing at 2^15
+  trials, `pin_shift` runs vectorized on the active trials above `g_ref`
+  (exact fallback otherwise), and OpenMP is limited to multi-block `block_deltas`
+  (bit-identical across 1/2/4/8 threads). CPU tiles H1 trajectories in L2
+  (`kTile = 64` trials/thread: an H1 tile of about 3 MB per thread instead
+  of 3.2 GB of H1 folds at 1024 bins; the whole CPU design grows host RSS by
+  41 / 115 / 437 MB at 64 / 256 / 1024 bins, and a CUDA design peaks at
+  0.45 / 0.52 / 0.69 GB of device memory including the context):
+
+  | nbins | `descent` GPU (4 thr / 1 thr) | `descent` GPU (floor 7) | `shared` GPU | `descent` host moves / noise (passes) | `descent` CPU (4 thr) |
+  |---|---|---|---|---|---|
+  | 16 | 0.130 / 0.131 s | 0.134 s | 0.108 s | 71 / 18 ms (3) | 1.76 s |
+  | 32 | 0.138 / 0.136 s | 0.136 s | 0.144 s | 75 / 19 ms (3) | 1.73 s |
+  | 64 | 0.172 / 0.183 s | 0.158 s | 0.231 s | 83 / 26 ms (4) | 3.16 s |
+  | 128 | 0.198 / 0.206 s | 0.197 s | 0.424 s | 73 / 26 ms (3) | 5.67 s |
+  | 256 | 0.249 / 0.264 s | 0.279 s | - | 92 / 37 ms (4) | 10.3 s |
+  | 512 | 0.363 / 0.380 s | 0.416 s | - | 90 / 57 ms (4) | 20.2 s |
+  | 1024 | 0.593 / 0.608 s | 0.669 s | - | 77 / 76 ms (3) | 36.4 s |
+
+  `descent` is faster than `shared` from 32 bins upward and within 22 ms at 16
+  bins; at 256 / 512 / 1024 bins it is down from 0.67 / 2.0 / 7.5 s before warp
+  scoring and stage-pruned H1. Its engine skips the pilot simulation of the
+  data-driven beams (constructor 6-10 ms at every bin count instead of 19 ms at
+  16 bins and 720 ms at 1024).
+- Floor of 7 (`final_threshold`), KKT active-floor pinning (holding
+  $\gamma_{M-1} = \gamma_{\text{floor}}$ and shifting `[0, M-1)` whenever
+  $\gamma_{M-1} \le \gamma_{\text{floor}}$): on 170 patterns up to 128 bins, C
+  is 0.999 of the post-hoc floor baseline (against 1.009 before KKT pinning),
+  and bit-identical to the free solve whenever the floor is inactive.
 
 The planner on the descent (three production configurations of 2, 3 and 5
-parameters — `066` accel, `062` jerk, `067` circular — 127 stages, regions of
-16 to 1024 bins, target 0.1; `EPRegionPlanner` leaves `final_threshold` unset
-so DTS chooses $\gamma_{M-1}$ freely by cost and `RunLeafReducer::add` enforces
-`snr_min` strictly after `ascend`; every region's thresholds judged on 2^17
-fresh signal trials and 2 × 2^16 noise trials at the true bin count):
+parameters — acceleration, jerk and circular orbit — 127 stages, regions of 16
+to 1024 bins, target 0.1; `EPRegionPlanner` uses `pd_policy = "pin"` and leaves
+`final_threshold` unset so DTS chooses $\gamma_{M-1}$ freely by cost and
+`RunLeafReducer::add` enforces `snr_min` strictly after `ascend`; every
+region's thresholds judged on 2^17 fresh signal trials and 2 × 2^16 noise
+trials at the true bin count):
 
-| | previous design (`shared`, re-fit above 128 bins) | descent, chained (warp + pruned H1, free $\gamma_{M-1}$) |
+| | previous design (`shared`, re-fit above 128 bins) | descent, chained (`pin`, warp + pruned H1, free $\gamma_{M-1}$) |
 |---|---|---|
-| Pd of a region | 0.0997-0.167 | 0.0992-0.1036 |
-| C per plan (geometric mean over the regions) | 1 | 0.723 / 0.818 / 0.789 |
-| C per region | 1 | 0.535-0.979 |
-| Last threshold | 5.5-7.8 | 5.89-7.83 |
-| Design, 16 / 32 / 64 / 128 bins (GPU) | 0.11-0.14 / 0.15-0.22 / 0.24-0.27 / 0.44-0.47 s | first region 0.22-0.25 s; chained 0.16-0.22 s |
-| Design, 256 / 512 / 1024 bins (GPU) | 1.0 / 3.2 / 12.3 s | 0.24 / 0.33-0.36 / 0.52-0.60 s |
-| Whole plan (GPU, `--plan-only`) | 30.6 / 18.1 / 29.0 s | 3.2 / 3.0 / 13.8 s |
-| Whole plan, 2 parameters, CPU, 4 threads | 444 s | 102.2 s |
+| Pd of a region | 0.0997-0.167 | 0.0991-0.1041 |
+| C per plan (geometric mean over the regions) | 1 | 0.721 / 0.814 / 0.790 |
+| C per region | 1 | 0.538-0.986 |
+| Last threshold | 5.5-7.8 | 5.84-7.83 |
+| Design, 16 / 32 / 64 / 128 bins (GPU) | 0.11-0.14 / 0.15-0.22 / 0.24-0.27 / 0.44-0.47 s | first region 0.14-0.16 s; chained 0.10-0.15 s |
+| Design, 256 / 512 / 1024 bins (GPU) | 1.0 / 3.2 / 12.3 s | 0.18-0.19 / 0.27-0.29 / 0.47-0.54 s |
+| Whole plan (GPU, `--plan-only`, warmed) | 30.6 / 18.1 / 29.0 s | 2.6 / 2.5 / 13.2 s |
+| Whole plan, 2 parameters, CPU, 4 threads | 444 s | 99.4 s |
 
 - Every region across all three plans is cheaper than the previous design
-  (0.535-0.979), with judged Pd 0.0992-0.1036 up to 1024 bins (where the
-  previous re-fit drifted to 0.11-0.17). On the 5-parameter circular plan
-  (`067`), all 7 DTS region solves take ~1.6 s in total; the remaining ~12 s of
-  `--plan-only` is seed-grid generation across 13 chunks.
-- Chained start (the previous region's z-scores, two passes) against the
-  default solve of every region from its own start, same regions: C 0.982 /
-  0.994 / 0.989 per plan (0.944-1.012 per region), saving ~30 % per region
-  across the whole 16-1024 bin range now that scoring and H1 banks are no
-  longer local-memory bound above 128 bins.
+  (0.538-0.986), with judged Pd 0.0991-0.1041 up to 1024 bins (where the
+  previous re-fit drifted to 0.11-0.17). An independent judge (own seeds,
+  2^17 signal and 2 x 2^16 noise trials) gives Pd 0.0995-0.1048 and C
+  0.721 / 0.810 / 0.790 per plan (per region 0.540-0.968). On the 5-parameter circular plan the
+  7 designs of its 10 chunks take 1.4-1.8 s in total; the rest of
+  `--plan-only` is seed-grid generation.
+- Chained start (previous region's z-scores, two warm passes) against cold
+  default solves of every region on the same three plans (16-1024 bins): L
+  chain / cold geometric mean 0.969 / 1.002 / 1.001 (per-region 0.938-1.061),
+  reducing total DTS time across regions by 17 % / 17 % / 24 % (2.53 -> 2.09 s,
+  1.78 -> 1.49 s, 2.32 -> 1.76 s). An independent re-measurement (same seeds
+  and samples, own judge) gives 0.968 / 0.993 / 1.015 (per region
+  0.933-1.072).
+- Other targets (2-parameter plan, every region judged): `min_pd` 0.02 /
+  0.12 / 0.3 / 0.9 / 1.0 give Pd 0.0200-0.0219 / 0.1194-0.1244 /
+  0.3007-0.3075 / 0.9001-0.9030 / 0.9990-0.9992 (`min_pd` 1 cannot be met and
+  is designed at 0.999, with a warning; the peak chunk memory rises from 1.44
+  to 21.3 GB).
+- Small memory limits shrink the design samples as `sample_budget` sets them
+  (2-parameter plan, GPU): at 4 GB, 2^15 signal trials at 1024 bins, Pd
+  0.100-0.105, C 0.998 of the 30 GB plan; at 2 GB, 2^14, Pd 0.100-0.106, C
+  1.008; at 1.6 GB (2^13 at 1024 bins, 2^14 at 512, 15 chunks), Pd 0.100-0.103
+  up to 256 bins but 0.105-0.111 at 512-1024 bins: the pin aims 2 SE above
+  `min_pd`, and the SE of 2^13 trials is 0.0033. On the GPU the limit is the
+  smaller of the user limit and the free device memory, so a plan made on a
+  GPU with little free memory can differ.
+- The replan pass (5-parameter plan at a 20 GB limit: 12 chunks, replanned
+  with fixed shared FFA buffers; at 12 GB, 16 chunks) reuses the same 7
+  region designs, bit-identical to the 30 GB plan (judged Pd 0.0995-0.1030).
+- Plan cache: a current cache is loaded without redesign; one of the previous
+  version (1.22.0) is rejected with a request to re-plan, and a different
+  `min_pd` does not match. `search ep --plan-only` always re-plans.
 - Two plans of one configuration hold bit-identical thresholds.
-- Peak chunk population (`max_sugg`) relative to `0836a1a`: +4.7 % on `066`
-  (`635k -> 665k`), +36 % on `062` (`2.96M -> 4.03M`, down from +50 % when the
-  `snr_min` floor was forced on DTS), and -23.1 % on `067` (`94.0M -> 72.3M`,
-  peak chunk memory `28.8 -> 23.7 GB`, at most 3 seed slices per chunk instead
-  of 5).
-- End-to-end GBT Terzan 5 validation (`2^26` samples, 32 runs, L40 GPU, 4 CPU
-  threads, compared against `061_bench_faf482e`):
-  - `B1` (jerk 10-720 Hz, `DM238.50`, 16-1024 bins, `RGF` 2.0): plan `18.6 ->
-    2.8 s` (6.6×), search `8.9 -> 7.0 s` (-21 %), total `30.0 -> 14.3 s`
-    (2.1×), peak RSS `1.13 -> 0.64 GB`; all 8 known pulsars (`M, N, I, ae, L,
-    J [512 bins], R, P`) match to 0.01 S/N (`16.82, 16.21, 14.02, 11.50, 9.68,
-    8.99, 8.33, 7.42`).
-  - `B2` (jerk 10-720 Hz, `DM236.50`, 16-1024 bins, `RGF` 2.0): plan `18.7 ->
-    2.8 s` (6.7×), search `9.2 -> 6.8 s` (-26 %), total `30.9 -> 14.2 s`;
-    `O, I, M, N, E, R` preserved (`16.63, 12.52, 11.99 vs 12.05, 11.74, 9.60,
-    8.77`).
-  - `B1` at `region_growth_factor = 1.5` (11 regions up to 923 bins): plan
-    `3.7 s` (against `26 s` previously), search `10.9 s`, total `18.1 s`; lifts
-    `M` (`16.82 -> 18.74`), `N` (`16.21 -> 17.86`), `L` (`9.68 -> 9.98`) and
-    `P` (`7.42 -> 7.65`), holds `J` (`8.78` at 923 bins) and `R` (`8.33`), and
-    recovers `Ter5 F` (`8.01`).
-  - `B8` (circular crackle 10-500 Hz, `DM238.50`, 16-512 bins, `eta` 2): plan
-    `5.8 -> 1.8 s` (3.2×), search `295.2 -> 183.9 s` (-38 %, saving 111 s),
-    total `302.3 -> 188.5 s`; `M` `14.97 -> 15.75`, `N` `11.59`, `I` `11.09`.
+- Peak chunk population (`max_sugg`) relative to the previous design: +4.4 %
+  (2-parameter), +34.2 % (3-parameter) and +0.6 % (5-parameter; predicted live
+  leaves +28.9 %, +32.2 % and -6.9 %), with the same chunk counts.
+- Real-data end-to-end searches of survey observations (`2^26` samples,
+  32 runs, L40 GPU, 4 CPU threads, like-for-like growth factors against the
+  previous `shared` + refit planner):
+  - 3-parameter jerk (`10-720 Hz`, `16-1024` bins, growth factor 2.0, two
+    observations): plan `18.6-18.7 -> 2.3 s` (8×), search `8.9-9.2 -> 6.6-6.9 s`
+    (-24 %), total `30-31 -> 11.5-11.9 s`, peak RSS `1.13 -> 0.64 GB`. On the
+    first observation all 8 known pulsars (including one at 512 bins)
+    match to 0.01 S/N; on the second, 6 of 7 match (one drops 0.06 S/N, and one
+    marginal off-DM detection at S/N 7.05 is missed). Across 6 neighbouring
+    DM/segment files with the same jerk configuration, total known
+    pulsar-file detections are 40 (new) against 43 (old): all 40 consistent
+    detections match across both planners, while 3 single-file marginal off-DM
+    detections at S/N 7.01-7.66 (ranks 1584-2285) are recovered only by the old
+    planner.
+  - 3-parameter jerk at growth factor 1.5 (11 regions up to 923 bins,
+    like-for-like baseline at growth factor 1.5): plan `26.1 -> 3.0 s` (8.7×),
+    search `11.5 -> 11.0 s`, total `41.2 -> 17.4 s`. Seven known pulsars
+    match closely; the new planner recovers 1 additional pulsar at 923 bins
+    (S/N 8.78) that the old planner missed, while missing 2 marginal detections
+    (S/N 7.21 and 8.34) that the old planner kept.
+  - 5-parameter circular crackle (`10-500 Hz`, `16-512` bins, `eta` 2, growth
+    factor 2.0): plan `5.8 -> 1.4 s` (4.1×), search `295.2 -> 181.7 s` (-38 %,
+    saving 113 s), total `302.3 -> 185.8 s`; all 3 known pulsars recovered
+    (strongest improves by +0.78 S/N, other two identical).
+  - What the designs predict for the marginal losses: Pd per run of each
+    plan's own thresholds on the search's signal model, region by region (the
+    jerk plans of growth factor 2.0 and 1.5). At S/N 7.0 the previous design
+    held 0.0128-0.0215 and the descent holds 0.0100-0.0171 (0.64-0.92 of the
+    previous up to 615 bins, 1.14 at 923); at S/N 8.34, 0.052-0.072 against
+    0.050-0.060; at S/N 10 the descent is higher up to 128 bins (0.155-0.166
+    against 0.149-0.158). The 32 runs of a search are correlated, so per
+    search an S/N-7 pulsar is kept roughly 20-30 % of the time and an
+    S/N-8.3 one 60-80 %, under either design. The S/N 7.0-7.7 losses (16, 32
+    and 128 bins) fit the 10-25 % lower per-run Pd at S/N 7 there; the 8.34
+    loss sits in a 54-bin region where both designs hold the same Pd
+    (0.056 / 0.053), so it and the new gain at 923 bins are chance outcomes
+    of two different schedules. Matching the previous Pd at S/N 7 needs
+    `min_pd` 0.12-0.15: at 0.15 the descent holds Pd(7) 0.018-0.028 at 1.2-1.9
+    times the previous plan's C (1.5-1.9 up to 128 bins); 0.2 costs 1.8-3.2
+    times.
 - Searches of an injected pulse with each planner's own thresholds (the
   jerk search of `bench/scripts/ep/ep_production_cuda.py`: 2^25 samples, 64
-  bins, 128 segments, 16 runs, `target_snr` 9.2, `snr_min` 5 so the floor is
-  inactive; the same 100 noise seeds per S/N for both planners):
+  bins, 128 segments, 16 runs, `target_snr` 9.2, `snr_min` 5; the same 100
+  noise seeds per S/N for both planners):
 
-  | Injected S/N | Searches that recover it, previous / descent | Runs holding it, previous / descent | Final leaves, previous / descent |
-  |---|---|---|---|
-  | 9.2 | 76 / 77 of 100 | 0.125 / 0.119 | 453 / 316 |
-  | 10 | 97 / 96 | 0.204 / 0.193 | 1011 / 751 |
-  | 11 | 100 / 100 | 0.344 / 0.326 | 2938 / 2441 |
+  | Injected S/N | Searches that recover it, previous / descent | Runs holding it, previous / descent | Final leaves, previous / descent | Mean sweep, previous / descent |
+  |---|---|---|---|---|
+  | 9.2 | 76 / 77 of 100 | 0.125 / 0.119 | 453 / 316 | 0.68 / 0.63 s |
+  | 10 | 97 / 96 | 0.204 / 0.193 | 1011 / 751 | 0.70 / 0.64 s |
+  | 11 | 100 / 100 | 0.344 / 0.326 | 2938 / 2441 | 0.87 / 0.77 s |
 
   The fraction of runs that keep the pulse at the design S/N is above
   `min_pd` = 0.1 with both, and 5 % lower with the descent (its design Pd
-  is 0.099 against 0.101 here). This plan has one region of 64 bins: the
-  regions above 128 bins, where the previous design held Pd 0.11-0.17, were
-  not searched.
-- Price of forcing a floor of 7 on `066 / 062 / 067` (floored against free,
-  judged at equal Pd): C 1.048 (1.02-1.08 per region; free last thresholds
-  5.8-6.4), 1.002 (0.97-1.03; free 6.6-7.1) and 1 (free 7.1-7.8, the floor
-  inactive, bit-identical plans).
+  is 0.099 against 0.101 here), with 17-30 % fewer final leaves and 7-11 %
+  faster sweeps. This plan has one region of 64 bins.
+- The same harness at 512 bins (20 Hz pulse, jerk search 19-21 Hz, 2^25
+  samples, 16 runs, EP default candidate reduction, the same 50 noise seeds
+  per S/N; plan Pd 0.1216 previous, 0.1005 descent):
+
+  | Injected S/N | Searches that recover it, previous / descent | Runs holding it, previous / descent | Paired difference | Final leaves, previous / descent |
+  |---|---|---|---|---|
+  | 9.2 | 50 / 49 of 50 | 0.320 / 0.253 | -0.068 +/- 0.011 | 98 / 91 |
+  | 10 | 50 / 50 | 0.481 / 0.406 | -0.075 +/- 0.011 | 101 / 94 |
+
+  The fraction of runs that hold the pulse falls by 16-21 %, as the ratio of
+  the design Pd predicts (0.1005 / 0.1216 = 0.83): above 128 bins the
+  previous design delivered Pd well above `min_pd` by accident, and the
+  descent removes that margin. The injected S/N of this simulator is not the
+  design S/N at 512 bins, so compare the two planners only.
+- Price of forcing a floor of 7 on the three production plans (cold floored
+  against free, judged at equal Pd on the same regions): L 1.032 (1.002-1.091;
+  free last thresholds 5.82-6.89), 1.016 (1.000-1.037; free 6.55-7.07) and
+  1.002 (0.983-1.040; free 7.08-7.88, inactive on 8 of 10 regions).
 
 Kept:
 
@@ -1182,3 +1312,4 @@ Do not retry:
 | Less memory traffic in the genealogy passes: 16-bit parents and survivor lists, no separate "alive before the stage" buffer (14 MB to 9 MB per forward pass) | Bit-identical schedules, `solve()` 124 ms against 125 ms at 16 bins, 145 against 149 at 64, 215 against 227 at 128: the passes are not bound by memory. |
 | More host threads for the descent | Only the block deltas run in parallel; the forward and backward passes are sequential over stages, and idle threads spinning between the parallel loops slow them. |
 | Smooth-min differentiable genealogy (log-sum-exp survival margin on the noise genealogy and signal sample, optimised with L-BFGS-B and augmented Lagrangian) | C 1.108 of the block coordinate descent on the 127-stage production pattern (6.8 s on CPU against 0.08 s for the host moves): per-element exp/log evaluations and flat gradients on sparse late-stage survivor trees lose both time and cost to exact finite-step block counts. |
+| Strided outer-trial OpenMP transpose and OpenMP `pin_shift` / `prepare_pass` with early break in `SignalSample` | Reading `stage_major[s * n + t]` with `n = 2^15` (128 KB stride) caused L1/TLB set-aliasing (+35-45 ms), the inner `if (m <= -1.0F) break` prevented AVX vectorisation, and short OpenMP regions slowed 16-64 bin solves by 40-50 % (0.21-0.27 s against 0.13-0.17 s with a 64 × 32 cache-blocked serial transpose and vectorised active-trial `pin_shift`). |

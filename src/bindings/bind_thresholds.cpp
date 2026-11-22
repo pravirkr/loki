@@ -80,7 +80,7 @@ void bind_thresholds(py::module_& m) {
                         std::tuple<SizeType, float, float, SizeType, SizeType>>&
                         descent_passes,
                     SizeType descent_nsignal, std::vector<float> descent_start,
-                    bool descent_start_zscores) {
+                    bool descent_start_zscores, std::string_view pd_policy) {
                      std::vector<detection::DescentPass> passes;
                      passes.reserve(descent_passes.size());
                      for (const auto& [n, margin, step, hi, lo] :
@@ -97,7 +97,9 @@ void bind_thresholds(py::module_& m) {
                          .descent_passes        = std::move(passes),
                          .descent_nsignal       = descent_nsignal,
                          .descent_start         = std::move(descent_start),
-                         .descent_start_zscores = descent_start_zscores};
+                         .descent_start_zscores = descent_start_zscores,
+                         .pd_policy =
+                             detection::pd_policy_from_string(pd_policy)};
                      const std::span<const float> pattern(
                          branching_pattern.data(), branching_pattern.size());
                      const auto exec = make_exec(backend, device, nthreads);
@@ -128,6 +130,7 @@ void bind_thresholds(py::module_& m) {
              py::arg("descent_nsignal")       = SizeType{1} << 15U,
              py::arg("descent_start")         = std::vector<float>{},
              py::arg("descent_start_zscores") = false,
+             py::arg("pd_policy")             = "pin",
              "ref_ducy is the reference pulse's full width at a tenth of "
              "maximum (FWTM), in turns: a Gaussian of rms width ref_ducy / "
              "(2 sqrt(2 ln 10)). A pulse of FWHM duty d needs ref_ducy = "

@@ -29,6 +29,13 @@ def _search_config(
     )
 
 
+def _pd_upper(min_pd: float, pd_se: float) -> float:
+    """Highest Pd a "pin" design plausibly reports: it pins at min_pd + 2 SE
+    on one bank and counts Pd on another of the same size (pd_se), so
+    2 SE + 4 sqrt(2) SE above min_pd."""
+    return min_pd + 8.0 * pd_se
+
+
 def test_ep_region_planner_accepts_workers_and_rfi_config() -> None:
     cfg = _search_config(nthreads=2)
     rfi = libloki.prune.PruneRFIConfig(harvest_scheme=[5.0], max_harvests=64)
@@ -254,7 +261,8 @@ def test_ep_planner_accepts_best_available_path(tmp_path: Path, backend: str) ->
     with h5py.File(cache) as saved:
         assert saved.attrs["min_pd"] == 1.0
         # The threshold pipeline is part of the plan; snr_min is not.
-        assert saved.attrs["dts_algorithm"] == "descent-chained"
+        assert saved.attrs["dts_algorithm"] == "descent-chained-v2"
+        assert saved.attrs["dts_pd_policy"] == "pin"
         assert saved.attrs["dts_mode"] == "descent"
         assert "dts_final_threshold" not in saved.attrs
         assert saved.attrs["dts_w_terminal"] == 1.0
@@ -263,6 +271,26 @@ def test_ep_planner_accepts_best_available_path(tmp_path: Path, backend: str) ->
         cfg, min_pd=1.0, ref_segs=[0], plan_cache_file=cache, backend=backend
     )
     assert reloaded.nchunks == planner.nchunks
+
+
+def test_ep_plan_cache_rejects_stale_dts_version_and_policy(tmp_path: Path) -> None:
+    import h5py
+
+    cfg = _search_config(nthreads=1)
+    cache = tmp_path / "stale_plan.h5"
+    libloki.prune.EPRegionPlannerTime(cfg, ref_segs=[0]).save_cache(str(cache))
+
+    for attr, bad_val, match in (
+        ("ep_plan_cache_version", "1.23.0", "has version"),
+        ("dts_algorithm", "descent-chained", "dts_algorithm"),
+        ("dts_pd_policy", "free", "dts_pd_policy"),
+    ):
+        copy = tmp_path / f"bad_{attr}.h5"
+        copy.write_bytes(cache.read_bytes())
+        with h5py.File(copy, "r+") as f:
+            f.attrs[attr] = bad_val
+        with pytest.raises((ValueError, RuntimeError), match=match):
+            libloki.prune.EPRegionPlannerTime(cfg, ref_segs=[0], plan_cache_file=copy)
 
 
 @pytest.mark.parametrize("min_pd", [0.0, -0.1, 1.1, float("nan"), float("inf")])
@@ -357,9 +385,8 @@ def test_ep_planner_runs_region_designs(backend: str) -> None:
         assert 0.0 < chunk.pd <= 1.0
         assert chunk.pd_se >= 0.0
         assert chunk.max_sugg >= chunk.predicted_live
-        # The design guarantees at least min_pd (Dinkelbach may choose a higher
-        # Pd on short 8-segment patterns when that lowers L = C / Pd).
-        assert chunk.pd >= 0.5 - 6.0 * chunk.pd_se
+        # The planner designs under pd_policy "pin": Pd sits at min_pd.
+        assert 0.5 - 6.0 * chunk.pd_se <= chunk.pd <= _pd_upper(0.5, chunk.pd_se)
     # One design per region (the regions here differ only in nbins).
     designs = {
         (chunk.cfg.nbins, tuple(chunk.threshold_scheme)) for chunk in planner.chunk_cfgs
@@ -396,7 +423,7 @@ def test_ep_planner_is_reproducible_and_chains_its_regions() -> None:
     for first, second in zip(schemes[0], schemes[1], strict=True):
         np.testing.assert_array_equal(first, second)
     for chunk in plans[0].chunk_cfgs:
-        assert chunk.pd >= 0.3 - 6.0 * chunk.pd_se
+        assert 0.3 - 6.0 * chunk.pd_se <= chunk.pd <= _pd_upper(0.3, chunk.pd_se)
 
 
 def test_ep_planner_designs_thresholds_independently_of_snr_min() -> None:
@@ -414,7 +441,7 @@ def test_ep_planner_designs_thresholds_independently_of_snr_min() -> None:
     assert low.nchunks == high.nchunks > 0
     for a, b in zip(low.chunk_cfgs, high.chunk_cfgs, strict=True):
         np.testing.assert_array_equal(a.threshold_scheme, b.threshold_scheme)
-        assert a.pd >= 0.9 * 0.9
+        assert 0.9 * 0.9 <= a.pd <= _pd_upper(0.9, a.pd_se)
 
 
 def test_ep_plan_cache_made_on_cuda_serves_cpu(tmp_path: Path) -> None:

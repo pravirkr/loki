@@ -18,6 +18,7 @@
 #include "loki/common/types.hpp"
 
 #include "lib/common/dispatch.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/detection/scheme.hpp"
 #include "lib/detection/thresholds_engine.hpp"
 
@@ -115,6 +116,26 @@ void check_has_search_states(DynamicThresholdMode mode, std::string_view what) {
             "schedule");
     }
 }
+
+/// Mode "descent": settings that describe no descent raise at construction,
+/// on every backend (the other modes do not read them).
+void check_descent_settings(const SharedOptions& shared, SizeType nstages) {
+    if (!utils::is_finite(shared.min_pd) || shared.min_pd <= 0.0F ||
+        shared.min_pd >= 1.0F) {
+        throw std::invalid_argument("descent: min_pd must be in (0, 1)");
+    }
+    if (!utils::is_finite(shared.fap) || shared.fap < 0.0 ||
+        shared.fap >= 1.0) {
+        throw std::invalid_argument(
+            "descent: fap must be in [0, 1) (0: no floor)");
+    }
+    detail::DescentOptions options;
+    options.final_threshold = shared.final_threshold;
+    options.passes          = shared.descent_passes;
+    options.nsignal         = shared.descent_nsignal;
+    options.start           = shared.descent_start;
+    detail::validate_descent_options(options, nstages);
+}
 } // namespace
 
 class DynamicThresholdScheme::Impl {
@@ -122,16 +143,19 @@ public:
     Impl(std::unique_ptr<detail::ThresholdsEngine> engine,
          DynamicThresholdMode mode,
          const SharedOptions& shared,
-         int nthreads)
+         int nthreads,
+         SizeType nbins)
         : m_engine(std::move(engine)),
           m_mode(mode),
           m_shared(shared),
-          m_nthreads(nthreads) {}
+          m_nthreads(nthreads),
+          m_nbins(nbins) {}
 
     std::unique_ptr<detail::ThresholdsEngine> m_engine;
     DynamicThresholdMode m_mode;
     SharedOptions m_shared;
-    int m_nthreads; ///< host threads of mode "descent"'s bookkeeping
+    int m_nthreads;   ///< host threads of mode "descent"'s bookkeeping
+    SizeType m_nbins; ///< profile bins (the CUDA profile is padded)
     std::optional<SchemeSolution> m_solution;
 };
 
@@ -271,7 +295,12 @@ DynamicThresholdScheme::DynamicThresholdScheme(
                     exec),
           dynamic_threshold_mode_from_string(mode),
           shared,
-          exec.nthreads)) {}
+          exec.nthreads,
+          nbins)) {
+    if (m_impl->m_mode == DynamicThresholdMode::kDescent) {
+        check_descent_settings(shared, branching_pattern.size());
+    }
+}
 
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(
@@ -355,9 +384,11 @@ SchemeSolution DynamicThresholdScheme::solve() {
         options.start           = shared.descent_start;
         options.start_zscores   = shared.descent_start_zscores;
         options.nthreads        = m_impl->m_nthreads;
+        options.pd_policy       = shared.pd_policy;
         if (shared.fap > 0.0) {
+            // Templates: every start bin of every box width.
             const auto ntemplates = static_cast<double>(
-                m_impl->m_engine->get_profile().size() *
+                m_impl->m_nbins *
                 m_impl->m_engine->get_box_score_widths().size());
             options.final_threshold =
                 std::max(options.final_threshold,

@@ -364,7 +364,7 @@ struct DescentOptions {
     /// while it still gains).
     std::vector<DescentPass> passes;
     /// Starting schedule, e.g. the solution of a similar pattern (empty: the
-    /// same signal z-score at every stage).
+    /// cheaper of the flat z-score and the smooth-shape candidates).
     std::vector<float> start;
     /// The start holds z-scores, (mean - threshold) / sd of the unpruned
     /// signal score per stage, as SchemeSolution::zscores reports them.
@@ -374,11 +374,23 @@ struct DescentOptions {
     SizeType nbank{0};
     SizeType nnoise{0};
     int nthreads{1};
+    /// kPin: minimise C at Pd = min_pd (two-sided pin); kFree: minimise
+    /// L = C / Pd subject to Pd >= min_pd (Dinkelbach).
+    PdPolicy pd_policy{PdPolicy::kPin};
 };
 
 /// The S/N a noise score exceeds with probability @p fap / @p ntemplates
 /// (one-sided Gaussian tail).
 float fap_threshold(double fap, double ntemplates);
+
+/// Throws std::invalid_argument for settings that describe no descent: a
+/// pass whose ntrials is outside [1, 2^20], whose margin or step is not
+/// finite and positive, whose step is not below its margin (no downward
+/// move would stay above the genealogy's schedule), or whose blocks are
+/// empty (min_block 0 or above max_block); a signal sample outside
+/// [1, 2^20]; a start that is not one finite value per stage of
+/// @p nstages; a non-finite floor.
+void validate_descent_options(const DescentOptions& options, SizeType nstages);
 
 /// The z-scores of a schedule (SchemeSolution::zscores) at @p nstages stages,
 /// as the start of a descent on another pattern: linear in the fractional
@@ -387,13 +399,14 @@ float fap_threshold(double fap, double ntemplates);
 std::vector<float> resample_zscores(std::span<const float> zscores,
                                     SizeType nstages);
 
-/** Mode "descent": minimises L = C / Pd subject to Pd >= min_pd by moving
- * thresholds (single stages and blocks of stages) on fixed samples: a noise
- * genealogy counts the exact change of C of a move, an unpruned signal sample
- * the exact change of Pd, and a Dinkelbach multiplier (>= C / Pd) selects
- * moves that lower C / Pd while keeping Pd >= target. Pins (or repairs when an
- * interior Pd > target is optimal), reports and evaluates on fresh samples as
- * solve() does. See docs/dts.md.
+/** Mode "descent": moves thresholds (single stages and blocks of stages) on
+ * fixed samples: a noise genealogy counts the exact change of C of a move, an
+ * unpruned signal sample the exact change of Pd. Under PdPolicy::kPin it
+ * minimises C subject to Pd = min_pd and always pins two-sided on a fresh
+ * bank; under PdPolicy::kFree it minimises L = C / Pd subject to Pd >= min_pd
+ * via a Dinkelbach multiplier (>= C / Pd) and uses one-sided repair when an
+ * interior Pd exceeds the target by a scaled margin. Reports and evaluates on
+ * fresh samples as solve() does. See docs/dts.md.
  */
 SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                               float min_pd,

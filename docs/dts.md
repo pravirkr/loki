@@ -54,13 +54,14 @@ cells: it improves one schedule on fixed samples (see
 | `improved` | one simulation per parent cell, analytic beam (or `guess`) | none (`calibrate()` optional) | reference, paper figures |
 | `shared` (default) | shared signal trials, guided beam, one pass | `solve()`: tighten, repair, report | production |
 | `robust` | as `shared`, plus a second pass | `solve()`: shortlist, block refinement, repair, report | when ~2.5x the run time buys a lower L |
-| `descent` | none: constrained descent of one schedule on a signal bank and a noise genealogy | `solve()` is the whole mode: descent, pin/repair, report | lowest L = C / Pd at Pd ≥ `min_pd` across all bin counts; optional floor on the last threshold (`fap`) |
+| `descent` | none: constrained descent of one schedule on a signal bank and a noise genealogy | `solve()` is the whole mode: descent, pin/repair, report | near-lowest C at Pd = `min_pd` (`pd_policy = "pin"`, default) or low L = C / Pd at Pd ≥ `min_pd` (`pd_policy = "free"`) across all bin counts; optional floor on the last threshold (`fap`) |
 
-The EP planner uses `descent` on both backends, once per region at the region's
-true `nbins`, with each region started from the previous one's z-scores; every
-chunk of the region runs that schedule, and `snr_min` is applied to the
-reintegrated post-`ascend` scores when writing candidates rather than flooring
-the pruning schedule (see [memory.md](memory.md#planning)).
+The EP planner uses `descent` with `pd_policy = "pin"` on both backends, once
+per region at the region's true `nbins`, with each region started from the
+previous one's z-scores; every chunk of the region runs that schedule, and
+`snr_min` is applied to the reintegrated post-`ascend` scores when writing
+candidates rather than flooring the pruning schedule (see
+[memory.md](memory.md#planning)).
 
 ## The winner's curse, and what the default mode does about it
 
@@ -135,15 +136,20 @@ once in the research workspace (`dts_work`), not tuned per pattern.
 
 ## The bank descent
 
-Mode `descent` solves the same fractional objective as the shared modes,
-**minimise L = C / Pd subject to Pd ≥ `min_pd`**, directly in continuous
-threshold space without a cell grid, Pd bins or a beam, and runs natively at
-the search's own `nbins` up to 1024. On long production patterns L rises
-steeply with Pd, so the constraint binds at Pd = `min_pd` (a schedule delivered
-at Pd 0.11-0.17 for a target of 0.1 costs 6-41 % more than the same schedule
-shifted to 0.1); on short patterns where fixed early-stage work dominates, L
-falls with Pd and the descent settles at the interior Pd > `min_pd` that
-minimises C / Pd.
+Mode `descent` works directly in continuous threshold space without a cell
+grid, Pd bins or a beam, and runs natively at the search's own `nbins` up to
+1024. Its `pd_policy` selects the objective:
+
+- **`pd_policy = "pin"` (default, used by `EPRegionPlanner`):** minimises C
+  subject to Pd = `min_pd`, always pinning two-sided to the target on a fresh
+  bank. On long production patterns L = C / Pd rises steeply with Pd, so
+  pinning keeps delivered Pd unimodal and tightly centred on the target across
+  seeds (a schedule delivered at Pd 0.11-0.17 for a target of 0.1 costs 6-41 %
+  more than the same schedule shifted to 0.1).
+- **`pd_policy = "free"`:** minimises L = C / Pd subject to Pd ≥ `min_pd` via
+  Dinkelbach fractional programming. On short or low-cost trees where fixed
+  early-stage work dominates, L falls with Pd and the descent settles at an
+  interior Pd > `min_pd`.
 
 Two samples make both quantities exact functions of the schedule:
 
@@ -160,48 +166,56 @@ Two samples make both quantities exact functions of the schedule:
 From these the change of C and of Pd for moving one threshold, or one block of
 consecutive thresholds, by ±step is counted exactly (no derivative, no
 noise between the candidates; per pass only signal trials above the reference
-schedule need to be scanned). A Dinkelbach multiplier λ ≥ C / Pd, the cost paid
-per unit of Pd, selects the moves: raise a block where the cost it saves
-exceeds λ times the Pd it loses, lower it where λ times the Pd gained exceeds
-the cost added. At λ = C / Pd any move with positive net score lowers C / Pd;
-when those moves keep Pd ≥ target they are applied directly, otherwise λ is
-bisected above C / Pd until Pd stays at the target and a common shift pins Pd
-to the target on the signal bank. Blocks matter: consecutive late stages score
-nearly the same fold, so one threshold alone cannot move there (single-stage
-moves stall 5-8 % above the block version at a low target). A sweep goes
-through disjoint blocks of 2^k, ..., 2, 1 stages, with the block boundaries
-offset by half a block on alternate sweeps.
+schedule need to be scanned). A multiplier λ, the cost paid per unit of Pd,
+selects the moves: raise a block where the cost it saves exceeds λ times the Pd
+it loses, lower it where λ times the Pd gained exceeds the cost added. Under
+`"pin"`, λ ≥ 0 is bisected to hold Pd at the target and a common shift pins Pd
+on the signal bank; under `"free"`, a Dinkelbach lower bound λ ≥ C / Pd lets
+moves that lower C / Pd while keeping Pd ≥ target apply directly (including a
+full-schedule shift block to adjust Pd globally: one block over every stage on
+every sweep, whatever a pass's block sizes), bisecting above C / Pd only
+when the constraint binds. Blocks matter: consecutive late stages score nearly
+the same fold, so one threshold alone cannot move there (single-stage moves
+stall 5-8 % above the block version at a low target). A sweep goes through
+disjoint blocks of 2^k, ..., 2, 1 stages, with the block boundaries offset by
+half a block on alternate sweeps (except the `"free"` full-schedule block).
 
 A genealogy is valid only above its reference, so the descent rebuilds it a
 few times around the current schedule with a shrinking margin and step. The
 default plan has three levels: 4096 trials at margin 0.4 and step 0.2 with
 every block size, 8192 trials at 0.3/0.1 with blocks of at most 32 stages,
-and 8192 trials at 0.2/0.05 with blocks of at most 8. A level runs a second
-time, on a new genealogy, when its first pass lowered C / Pd by more than
-25 %; `descent_passes` replaces the plan by a list of passes that each run
+and 8192 trials at 0.2/0.05 with blocks of at most 8 (in `"free"` mode when a
+flat or interior start is chosen, one wider coarse level at 0.8/0.4 is
+prepended so early stages can drop below the flat start without hitting the
+margin wall). A level runs a second time, on a new genealogy, when its first
+pass lowered the objective by more than 25 % (5 % for flat/interior starts in
+`"free"`); `descent_passes` replaces the plan by a list of passes that each run
 once.
 
-**The start.** The solutions of long branching patterns share a shape in
+**The start.** The schedules of long branching patterns share a shape in
 units of the unpruned signal score, z_s = (mean_s - γ_s) / σ_s: loose at the
 very first stages (z about 2), at the mean signal score within the first few
 percent of the stages (z about 0), then rising steadily to z about 1.7 at the
-end. The descent builds that shape and a flat-z candidate at the target (plus
-higher-Pd flat candidates when early-stage work is a non-negligible share of
-C, stopping as soon as L rises), evaluates them on one noise sample (4096
-trials, the same for all) and starts from the one of lowest L = C / Pd. On
-127-stage patterns the shape is 1.1 to 6.8 times cheaper than the flat start
-at targets up to 0.5 and is chosen there; on patterns of 4-32 segments a
-higher-Pd flat start is chosen when L falls above `min_pd`. The shape is only
-a start: the moves are free, and a start that is far off makes the levels
-repeat.
+end. The descent builds that shape and a flat-z candidate at the target,
+evaluates both on one noise sample (4096 trials, the same for all) and starts
+from the cheaper one. In `"free"` mode it also tests one upward step above the
+target; if L drops there, a bracketing and bisection search over Pd up to 0.995
+locates a lower-L starting Pd (deep high-cost trees reject the first upward
+probe immediately). On 127-stage patterns the smooth shape is 1.1 to 6.8 times
+cheaper than the flat start at targets up to 0.5 and is chosen there; on
+patterns of 4-32 segments a higher-Pd start is chosen under `"free"` when L
+falls above `min_pd`. The shape is only a start: the moves are free, and a
+start that is far off makes the levels repeat.
 
 After the descent the schedule is measured on samples that took no part in
-it, as in `shared`: when the Pd constraint bound, a common shift of either
-sign pins Pd to `min_pd` + 2 binomial standard errors on a fresh bank of 2^17
-signal trials (when an interior Pd > target was chosen, a one-sided repair
-shifts down only if Pd fell below the target); a second fresh bank reports Pd
-(evaluated with stage-wise pruning of dead signal trials), and a fresh noise
-evaluation reports C.
+it, as in `shared`: under `"pin"`, a common shift of either sign pins Pd to
+`min_pd` + 2 binomial standard errors on a fresh bank of 2^17 signal trials;
+under `"free"`, if the search Pd exceeds the target by more than
+`max(0.15 * min(target, 1 - target), 6 * SE_search)`, a one-sided repair shifts
+down only if Pd fell below the target (otherwise two-sided pinning applies). A
+second fresh bank reports Pd (evaluated with stage-wise pruning of dead signal
+trials above 128 bins on GPU and L2-tiled trajectories on CPU), and a fresh
+noise evaluation reports C.
 
 **The last threshold.** `final_threshold` is an optional floor on γ_{M-1};
 `fap` derives one as the S/N whose one-sided normal tail is `fap` / (nbins ×
@@ -234,12 +248,18 @@ the flat start (mean 0.98), and chains of thresholds at one bin count do not dri
 over 37 links, worst link 1.085).
 
 What it guarantees and what it does not: at the end no block move of the last
-step size lowers C at equal Pd on its samples, which is a first-order
-(Kuhn-Tucker like) condition, not a proof of a global minimum. The evidence
-that it is close is empirical: in the research prototype, starts as
-different as an equal-quantile schedule and a pinned `robust` solution ended
-at the same cost, the cost of the library mode scatters by 2-5 % between
-seeds, and chains of warm starts end about 2 % lower still.
+step size lowers the objective on its samples, which is a first-order
+(Kuhn-Tucker like) condition, not a proof of a global minimum. Empirically,
+restarting from a solve's own z-scores four times on fresh samples across 12
+patterns (16-512 bins, 2-5 parameters) reaches a best L 0.990 of the cold solve
+(geometric mean; 0.971 worst, single restarts 0.971-1.074), and C scatters by
+1.5 % median (4.5 % worst) across seeds at `min_pd` 0.1. A stronger reference
+(2^17 signal and 2^15 noise trials, finer steps, nine solves, best judged C)
+puts a cold `pin` solve at about 1.05 of one such restart and 1.07 of the best
+of nine (1.04-1.13 over 14 patterns), and at equal Pd the grid modes are
+2-8.5 % cheaper on cheap and mid-length patterns and 11-35 % costlier on
+costly ones (see [performance.md](performance.md)). The descent's
+C is near the lowest found, not the lowest.
 
 ## Measured behaviour
 
@@ -260,34 +280,36 @@ the lowest and highest seed, C the geometric mean):
 |---|---|---|---|---|---|
 | production, `min_pd` 0.1 | `shared` | 0.102-0.114 | 5.75e4 | 0.099 | 0.23 s |
 | | `robust` | 0.102-0.108 | 5.26e4 | 0.024 | 0.56 s |
-| | `descent` | 0.101-0.104 | 4.68e4 | 0.020 | 0.18 s |
+| | `descent` (`pin`) | 0.101-0.104 | 4.68e4 | 0.020 | 0.16 s |
+| | `descent` (`free`) | 0.101-0.104 | 4.66e4 | 0.023 | 0.21 s |
 | production, `min_pd` 0.05 | `shared` | 0.051-0.056 | 1.29e4 | 0.129 | 0.23 s |
 | | `robust` | 0.052-0.052 | 1.14e4 | 0.029 | 0.54 s |
-| | `descent` | 0.051-0.053 | 1.07e4 | 0.030 | 0.19 s |
+| | `descent` (`pin`) | 0.051-0.053 | 1.07e4 | 0.030 | 0.17 s |
+| | `descent` (`free`) | 0.051-0.053 | 1.07e4 | 0.018 | 0.20 s |
 
-On the short patterns of issue #15 both the shared modes and `descent` deliver
-a Pd well above `min_pd` because L = C / Pd is lowest there (8 segments, target
-0.5: `descent` Pd 0.73-0.76, L 3.05 in 0.025 s; 16 segments, target 0.1: Pd
-0.48-0.50, L 5.87 in 0.037 s; 32 segments at S/N 6, target 0.1: Pd 0.13-0.19,
-L 39.7 in 0.053 s; 4 segments, target 0.9: Pd 0.97, L 4.29 in 0.017 s).
+On short patterns (4-64 stages, 64 bins, 8 seeds) `descent` with
+`pd_policy = "free"` delivers interior Pd > `min_pd` where L = C / Pd is lower,
+matching or beating both `shared` (0.904-0.998 of its L) and `robust`
+(0.911-0.998 of its L) in 0.027-0.100 s (see [performance.md](performance.md)).
 
-On 127-stage patterns a cold `descent` solve takes 0.23-0.25 / 0.34 / 0.33 /
-0.43 / 0.68 s at 16-64 / 128 / 256 / 512 / 1024 bins on the GPU with 4 host
-threads (and 0.16-0.22 / 0.24 / 0.33 / 0.52 s when chained across regions in
-the EP planner), with no refit and no proxy bin count: warp-collaborative
+On 127-stage patterns a cold `descent` (`pin`) solve takes 0.130 / 0.138 /
+0.172 / 0.198 / 0.249 / 0.363 / 0.593 s at 16 / 32 / 64 / 128 / 256 / 512 /
+1024 bins on the GPU with 4 host threads (faster than `shared` from 32 bins
+upward; 0.10-0.15 / 0.18 / 0.28 / 0.50 s when chained across regions in the EP
+planner), with no refit and no proxy bin count: warp-collaborative
 shared-memory boxcar scoring eliminates local-memory prefix-sum spilling above
-128 bins and periodic compaction drops dead signal trials in the pin and report
-banks. On the CPU with 4 threads it takes 2.1 / 2.3 / 3.7 / 6.1 / 10.4 / 18.8 /
-34.8 s across 16 .. 1024 bins using L2-tiled signal trajectories.
+64 bins, periodic compaction drops dead signal trials in the pin and report
+banks above 128 bins, and cache-blocked transposition + active-trial pinning
+keep host moves at 71-92 ms. On the CPU with 4 threads it takes 1.8 / 1.7 /
+3.2 / 5.7 / 10.3 / 20.2 / 36.4 s across 16 .. 1024 bins using L2-tiled signal
+trajectories (the H1 working set is a tile of about 3 MB per thread; a whole
+CPU design grows host memory by 41 / 115 / 437 MB at 64 / 256 / 1024 bins).
 
-On 230 branching patterns of a production plan (2-5 parameters, 16-1024
-bins, target 0.1, one seed each) every solve returned `met` or
-`within_tolerance`, and the Pd counted on 2^16 independent trials was
-0.0974-0.106 (the count itself has an error of 1.2 %). Over 8 seeds on 22 of
-them, counted on 2^17 trials, Pd was 0.0990-0.1044 in all 176 solves, with a
-standard deviation per pattern of 0.0004-0.0011 (the binomial error of the
-pin is 0.0008), and C scattered by 1.5 % (median; 4.8 % on the worst
-pattern).
+Across 1,344 `pin` solves spanning `min_pd` from 0.01 to 0.99 (21 patterns from
+8 to 127 stages and 16 to 1024 bins × 8 seeds, judged on 2^17 fresh signal
+trials), zero solves fell more than 3 binomial standard errors below `min_pd`
+and zero delivered `short`; every judged Pd stayed inside `target + 2 SE ± 5 SE`
+(for `min_pd = 0.1`, 0.0976-0.1038 across all 168 solves).
 
 ## Settings
 
@@ -297,12 +319,25 @@ pattern).
 noise population per cell. `prob_min`, `guess`, `beam_width` and
 `thres_neigh` apply to `legacy` and `improved` only.
 
-Mode `descent` reads `min_pd`, `w_terminal`, `fap`, `final_threshold`,
-`descent_passes` (builds of the noise genealogy: trials, margin below the
-current schedule, step, largest and smallest block), `descent_nsignal`
-(2^15; 2^14 costs 2-7 % in C), `descent_start` and `descent_start_zscores`. `run()` does nothing in this mode and the
-constructor's `ntrials`, `nprobs`, `nthresholds` and beam settings are not
-used.
+Mode `descent` reads `min_pd`, `w_terminal`, `pd_policy` (`"pin"` default, or
+`"free"`), `fap`, `final_threshold`, `descent_passes` (builds of the noise
+genealogy: trials, margin below the current schedule, step, largest and
+smallest block), `descent_nsignal` (2^15; 2^14 costs 2-7 % in C),
+`descent_start` and `descent_start_zscores`. `run()` does nothing in this mode
+and the constructor's `ntrials`, `nprobs`, `nthresholds` and beam settings are
+not used. The constructor checks these settings and throws
+`std::invalid_argument` (`ValueError` in Python) for any that describe no
+descent: `min_pd` outside (0, 1); `fap` outside [0, 1); a negative or
+non-finite `final_threshold`; `descent_nsignal` outside [1, 2^20]; a pass
+whose `ntrials` is outside [1, 2^20], whose margin or step is not finite and
+positive, whose step is not below its margin (a down move would have no room)
+or whose block sizes are not 1 <= smallest <= largest; a `descent_start`
+without exactly one finite value per stage. Other modes do not read the
+descent settings and do not check them. A given start must be a plausible
+schedule: one far below the noise sits on a plateau where no block move
+changes the cost (measured: a start at z-score +50, i.e. 50 standard
+deviations below the mean signal score, made no move and cost 32 times the
+default solve, reported `met`).
 
 `ref_ducy` is the reference pulse's full width at a tenth of maximum (FWTM),
 in turns: the simulated pulse is a Gaussian of rms width
@@ -339,7 +374,12 @@ the production pattern.
 standard error and trial count), C and L, the noise evaluation per stage, the
 raw search selection with its in-run (optimistic) Pd and C, the shortlist
 (`robust`), named diagnostics, and a delivery status (`met`,
-`within_tolerance`, `short`, `no_path`).
+`within_tolerance`, `short`, `no_path`). `within_tolerance` means the reported
+Pd is below `min_pd` but at least 0.9 `min_pd`. In `descent` the pin aims 2
+standard errors above `min_pd` on one bank and the report counts on another,
+so about 10 % of solves report `within_tolerance` (169 of 1,584 measured, all
+with an independently judged Pd in the normal range): it is sampling error,
+not a failure.
 
 `save()` writes the search states (stage × threshold × Pd bin), the grids,
 `beam_lo`/`beam_hi`, `guess_path` (the guess searched around: in `robust` the
@@ -356,13 +396,22 @@ stages it is `complexity_cumul / success_h1_cumul`.
 schedule on the engine's backend with a given seed (on CUDA with a
 device-wide compaction). The free function `evaluate_scheme(...)` is the same
 evaluation on the CPU; like `determine_scheme(...)`, it takes an optional
-`seed` and draws a fresh random one when it is unset. The EP planner
-evaluates the chunk branching patterns with `evaluate()` on its own backend.
+`seed` and draws a fresh random one when it is unset. The EP planner does not
+evaluate the chunk patterns separately: a chunk's Pd is its region design's
+report (the branching changes neither Pd nor the pass rates), and the chunk is
+sized from that design's noise evaluation.
 
 ## Reproducibility
 
 Results depend on the seed, `ntrials`, `nprobs`, the sample sizes above and,
-on the GPU, `batch_size`; on the CPU they do not depend on the thread count.
+on the GPU, `batch_size`; on the CPU they do not depend on the thread count,
+and `descent` gives bit-identical results with 1, 2, 4 or 8 host threads on
+either backend. Each sample of a solve draws from `derive_seed(seed ^ salt)`
+with a fixed salt per role (signal sample, pin bank, report bank, noise
+genealogies, report noise), and the salts differ in their low bits, so two
+seeds s and s ^ (salt_a ^ salt_b) share samples across roles (for `descent`,
+e.g. seeds 4 and 7 swap the signal sample and the pin bank). Use widely
+spaced seeds, not consecutive ones, for independent replications.
 `bench/scripts/schemes/golden_solve.py record|check` keeps a bit-exact CUDA
 regression golden of both shared modes (valid for one toolchain);
 `golden_evaluate.py` does the same for `evaluate()`.

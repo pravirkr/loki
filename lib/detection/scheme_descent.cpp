@@ -8,7 +8,9 @@
 #include <limits>
 #include <numbers>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -73,19 +75,51 @@ class SignalSample {
 public:
     SignalSample(const std::vector<float>& stage_major,
                  SizeType nstages,
-                 SizeType n,
-                 int nthreads)
+                 SizeType n)
         : m_nstages(nstages),
           m_n(n),
-          m_scores(nstages * n) {
-        const auto n_signed = static_cast<std::int64_t>(n);
-        // NOLINTNEXTLINE(openmp-use-default-none): members and refs captured
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-        for (std::int64_t t = 0; t < n_signed; ++t) {
-            const auto ti = static_cast<SizeType>(t);
-            float* dst    = m_scores.data() + (ti * nstages);
-            for (SizeType s = 0; s < nstages; ++s) {
-                dst[s] = stage_major[(s * n) + ti];
+          m_scores(nstages * n),
+          m_mean(nstages),
+          m_sd(nstages),
+          m_margin(n) {
+        m_active.reserve(n);
+        // Moments from contiguous stage rows (same summation order over t as a
+        // trial-major scan, so bit-identical).
+        const auto n_d = static_cast<double>(n);
+        for (SizeType s = 0; s < nstages; ++s) {
+            const float* src = stage_major.data() + (s * n);
+            double sum       = 0.0;
+            double sq        = 0.0;
+            for (SizeType t = 0; t < n; ++t) {
+                const double v = src[t];
+                sum += v;
+                sq += v * v;
+            }
+            const double mu = sum / n_d;
+            m_mean[s]       = static_cast<float>(mu);
+            m_sd[s]         = static_cast<float>(
+                std::sqrt(std::max((sq / n_d) - (mu * mu), 1e-12)));
+        }
+        // Cache-blocked stage-major -> trial-major transpose through an L1
+        // tile: avoids power-of-2 cache-set aliasing at n = 2^15.
+        constexpr SizeType kTileS = 32;
+        constexpr SizeType kTileT = 64;
+        std::array<std::array<float, kTileS + 1>, kTileT> tile{};
+        for (SizeType s0 = 0; s0 < nstages; s0 += kTileS) {
+            const SizeType ds = std::min(kTileS, nstages - s0);
+            for (SizeType t0 = 0; t0 < n; t0 += kTileT) {
+                const SizeType dt = std::min(kTileT, n - t0);
+                for (SizeType ks = 0; ks < ds; ++ks) {
+                    const float* src =
+                        stage_major.data() + ((s0 + ks) * n) + t0;
+                    for (SizeType kt = 0; kt < dt; ++kt) {
+                        tile[kt][ks] = src[kt];
+                    }
+                }
+                for (SizeType kt = 0; kt < dt; ++kt) {
+                    float* dst = m_scores.data() + ((t0 + kt) * nstages) + s0;
+                    std::copy_n(tile[kt].data(), ds, dst);
+                }
             }
         }
     }
@@ -95,24 +129,18 @@ public:
     /// Indexes the trials above @p g_ref at every stage, once per pass. Every
     /// candidate tested during the pass stays above @p g_ref, so trials at or
     /// below @p g_ref can never be revived by a single block move.
-    void prepare_pass(std::span<const float> g_ref, int nthreads) {
-        std::vector<uint8_t> keep(m_n, 0);
+    void prepare_pass(std::span<const float> g_ref) {
+        m_g_ref.assign(g_ref.begin(), g_ref.end());
+        m_active.clear();
         const SizeType nstages = m_nstages;
         const float* scores    = m_scores.data();
-        const auto n_signed    = static_cast<std::int64_t>(m_n);
-        // NOLINTNEXTLINE(openmp-use-default-none): spans are not listable
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-        for (std::int64_t t = 0; t < n_signed; ++t) {
-            const float* row = scores + (static_cast<SizeType>(t) * nstages);
+        for (SizeType t = 0; t < m_n; ++t) {
+            const float* row = scores + (t * nstages);
             bool ok          = true;
             for (SizeType s = 0; s < nstages && ok; ++s) {
                 ok = row[s] > g_ref[s];
             }
-            keep[static_cast<SizeType>(t)] = ok ? uint8_t{1} : uint8_t{0};
-        }
-        m_active.clear();
-        for (SizeType t = 0; t < m_n; ++t) {
-            if (keep[t] != 0) {
+            if (ok) {
                 m_active.push_back(t);
             }
         }
@@ -120,25 +148,7 @@ public:
 
     /// Mean and standard deviation of every stage's scores.
     std::pair<std::vector<float>, std::vector<float>> moments() const {
-        std::vector<double> sum(m_nstages, 0.0);
-        std::vector<double> sq(m_nstages, 0.0);
-        for (SizeType t = 0; t < m_n; ++t) {
-            const float* row = m_scores.data() + (t * m_nstages);
-            for (SizeType s = 0; s < m_nstages; ++s) {
-                sum[s] += row[s];
-                sq[s] += static_cast<double>(row[s]) * row[s];
-            }
-        }
-        std::vector<float> mean(m_nstages);
-        std::vector<float> sd(m_nstages);
-        const auto n = static_cast<double>(m_n);
-        for (SizeType s = 0; s < m_nstages; ++s) {
-            const double mu = sum[s] / n;
-            mean[s]         = static_cast<float>(mu);
-            sd[s]           = static_cast<float>(
-                std::sqrt(std::max((sq[s] / n) - (mu * mu), 1e-12)));
-        }
-        return {std::move(mean), std::move(sd)};
+        return {m_mean, m_sd};
     }
 
     /// Fraction of the first @p ntrials trials above every threshold.
@@ -155,6 +165,24 @@ public:
         return static_cast<double>(count) / static_cast<double>(ntrials);
     }
 
+    /// Fraction of all trials above @p g, scanning only m_active (exact when
+    /// g[s] >= g_ref[s] for every stage s).
+    double pd_active(std::span<const float> g) const {
+        if (m_active.empty()) {
+            return pd(g, m_n);
+        }
+        SizeType count = 0;
+        for (const SizeType t : m_active) {
+            const float* row = m_scores.data() + (t * m_nstages);
+            bool alive       = true;
+            for (SizeType s = 0; s < m_nstages && alive; ++s) {
+                alive = row[s] > g[s];
+            }
+            count += alive ? 1 : 0;
+        }
+        return static_cast<double>(count) / static_cast<double>(m_n);
+    }
+
     /// Fraction of the trials whose last score exceeds @p threshold.
     double ceiling(float threshold) const {
         SizeType count = 0;
@@ -167,52 +195,57 @@ public:
 
     /// The common shift (either sign) of stages [0, nfree) after which
     /// ceil(target n) trials survive; the stages beyond stay as they are.
-    float pin_shift(std::span<const float> g,
-                    double target,
-                    SizeType nfree,
-                    int nthreads) const {
-        constexpr float kFastCut = -1.0F;
-        std::vector<float> margin(m_n);
-        const SizeType nstages = m_nstages;
-        const float* scores    = m_scores.data();
-        const auto n_signed    = static_cast<std::int64_t>(m_n);
-        // NOLINTNEXTLINE(openmp-use-default-none): spans are not listable
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-        for (std::int64_t t = 0; t < n_signed; ++t) {
-            const float* row = scores + (static_cast<SizeType>(t) * nstages);
-            float m          = std::numeric_limits<float>::max();
-            for (SizeType s = nfree; s < nstages; ++s) {
-                if (row[s] <= g[s]) {
-                    m = std::numeric_limits<float>::lowest();
-                    break;
-                }
+    /// Uses m_active when the resulting shifted schedule stays strictly above
+    /// m_g_ref (exact: no inactive trial can survive such a schedule), falling
+    /// back to a full vectorized scan otherwise.
+    float
+    pin_shift(std::span<const float> g, double target, SizeType nfree) const {
+        const SizeType nstages  = m_nstages;
+        const float* scores     = m_scores.data();
+        const SizeType required = std::clamp<SizeType>(
+            static_cast<SizeType>(std::ceil(target * static_cast<double>(m_n))),
+            1, m_n);
+        if (!m_g_ref.empty() && m_active.size() >= required) {
+            bool fixed_above = true;
+            for (SizeType s = nfree; s < nstages && fixed_above; ++s) {
+                fixed_above = g[s] > m_g_ref[s];
             }
-            if (m > kFastCut) {
-                for (SizeType s = 0; s < nfree; ++s) {
-                    m = std::min(m, row[s] - g[s]);
-                    if (m <= kFastCut) {
-                        break;
+            if (fixed_above) {
+                const SizeType nact = m_active.size();
+                m_margin_act.resize(nact);
+                for (SizeType k = 0; k < nact; ++k) {
+                    const float* row = scores + (m_active[k] * nstages);
+                    float m          = std::numeric_limits<float>::max();
+                    for (SizeType s = 0; s < nfree; ++s) {
+                        m = std::min(m, row[s] - g[s]);
+                    }
+                    for (SizeType s = nfree; s < nstages; ++s) {
+                        if (row[s] <= g[s]) {
+                            m = std::numeric_limits<float>::lowest();
+                        }
+                    }
+                    m_margin_act[k] = m;
+                }
+                const auto rank = m_margin_act.begin() +
+                                  static_cast<std::ptrdiff_t>(nact - required);
+                std::ranges::nth_element(m_margin_act, rank);
+                const float r = *rank;
+                if (r > std::numeric_limits<float>::lowest() / 2.0F) {
+                    const float shift =
+                        std::nextafter(r, std::numeric_limits<float>::lowest());
+                    bool free_above = true;
+                    for (SizeType s = 0; s < nfree && free_above; ++s) {
+                        free_above = (g[s] + shift) > m_g_ref[s];
+                    }
+                    if (free_above) {
+                        return shift;
                     }
                 }
             }
-            margin[static_cast<SizeType>(t)] = m;
         }
-        const SizeType n        = margin.size();
-        const SizeType required = std::clamp<SizeType>(
-            static_cast<SizeType>(std::ceil(target * static_cast<double>(n))),
-            1, n);
-        const auto rank =
-            margin.begin() + static_cast<std::ptrdiff_t>(n - required);
-        std::ranges::nth_element(margin, rank);
-        if (*rank > kFastCut) {
-            return std::nextafter(*rank, std::numeric_limits<float>::lowest());
-        }
-        // Fallback when the shift drops at or below kFastCut: compute exact
-        // margins without the early cutoff.
-        // NOLINTNEXTLINE(openmp-use-default-none): spans are not listable
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-        for (std::int64_t t = 0; t < n_signed; ++t) {
-            const float* row = scores + (static_cast<SizeType>(t) * nstages);
+        // Full vectorized scan (no inner branch so GCC vectorizes min-diff).
+        for (SizeType t = 0; t < m_n; ++t) {
+            const float* row = scores + (t * nstages);
             float m          = std::numeric_limits<float>::max();
             for (SizeType s = 0; s < nfree; ++s) {
                 m = std::min(m, row[s] - g[s]);
@@ -222,9 +255,16 @@ public:
                     m = std::numeric_limits<float>::lowest();
                 }
             }
-            margin[static_cast<SizeType>(t)] = m;
+            m_margin[t] = m;
         }
-        return shift_of(margin, target);
+        const float shift = shift_of(m_margin, target);
+        // Fewer than ceil(target n) trials pass the fixed stages: no common
+        // shift reaches the target, so leave the schedule as it is, as the
+        // final pin does. Not reached from descend_scheme(): it fixes only a
+        // last stage at the floor, and returns kShort first when fewer than
+        // target n trials of this sample pass the floor (ceiling()).
+        return shift > std::numeric_limits<float>::lowest() / 2.0F ? shift
+                                                                   : 0.0F;
     }
 
     static float shift_of(std::vector<float>& margin, double target) {
@@ -265,7 +305,7 @@ public:
         const auto nwork =
             static_cast<std::int64_t>(use_active ? m_active.size() : m_n);
         // NOLINTNEXTLINE(openmp-use-default-none): spans are not listable
-#pragma omp parallel num_threads(nthreads)
+#pragma omp parallel if (nthreads > 1 && nwork >= 4096) num_threads(nthreads)
         {
             std::vector<SizeType> t_up(nblocks, 0);
             std::vector<SizeType> t_dn(nblocks, 0);
@@ -324,6 +364,11 @@ private:
     SizeType m_nstages;
     SizeType m_n;
     std::vector<float> m_scores;
+    std::vector<float> m_mean;
+    std::vector<float> m_sd;
+    mutable std::vector<float> m_margin;
+    mutable std::vector<float> m_margin_act;
+    std::vector<float> m_g_ref;
     std::vector<SizeType> m_active;
 };
 
@@ -352,12 +397,10 @@ public:
           m_alive_list_spare((m_nstages * m_n) + 1, 0),
           m_alive_count_spare(m_nstages, 0) {
         // Stage s owns [s n, (s + 1) n); the parent of slot t of stage s is
-        // parent[s - 1][t], a slot of stage s - 1 (m_parent is shifted so
-        // that both use the same index).
+        // parent[s - 1][t], a slot of stage s - 1 (see parents_of()).
         for (SizeType s = 0; s <= m_nstages; ++s) {
             m_offset[s] = s * m_n;
         }
-        m_parent = m_g.parent.data() - m_n;
         // Population per trial alive after stage s:
         // prod_{j <= s} B_j * prod_{j < s} pass_rate_j / n.
         double scale = 1.0 / static_cast<double>(m_n);
@@ -397,12 +440,12 @@ public:
             float* e = m_subtree.data() + m_offset[s];
             std::fill_n(e, m_offset[s + 1] - m_offset[s],
                         static_cast<float>(m_bp[s + 1] * m_unit[s]));
-            const uint32_t* list = m_alive_list.data() + m_offset[s + 1];
-            const SizeType count = m_alive_count[s + 1];
-            const SizeType base  = m_offset[s + 1];
+            const uint32_t* list   = m_alive_list.data() + m_offset[s + 1];
+            const SizeType count   = m_alive_count[s + 1];
+            const SizeType base    = m_offset[s + 1];
+            const uint32_t* parent = parents_of(s + 1);
             for (SizeType j = 0; j < count; ++j) {
-                const SizeType i = base + list[j];
-                e[m_parent[i]] += m_subtree[i];
+                e[parent[list[j]]] += m_subtree[base + list[j]];
             }
         }
     }
@@ -422,7 +465,8 @@ public:
         // The blocks are disjoint, and each writes m_alive at its own stages.
         const auto nblocks = static_cast<std::int64_t>(blocks.size());
         // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
-#pragma omp parallel for num_threads(nthreads) schedule(dynamic)
+#pragma omp parallel for if (nthreads > 1 && nblocks > 1)                      \
+    num_threads(nthreads) schedule(dynamic)
         for (std::int64_t kb = 0; kb < nblocks; ++kb) {
             const auto k    = static_cast<SizeType>(kb);
             const Block blk = blocks[k];
@@ -436,6 +480,7 @@ public:
                 const bool first  = s == blk.a;
                 const uint8_t* prv =
                     m_alive.data() + (first ? 0 : m_offset[s - 1]);
+                const uint32_t* parent = first ? nullptr : parents_of(s);
                 if (s + 1 == blk.b) {
                     double e0 = 0.0;
                     double e1 = 0.0;
@@ -443,7 +488,7 @@ public:
                     for (SizeType i = lo; i < hi; ++i) {
                         const uint8_t p =
                             first ? (m_pre[i] != 0 ? uint8_t{7} : uint8_t{0})
-                                  : prv[m_parent[i]];
+                                  : prv[parent[i - lo]];
                         const float v = m_score[i];
                         const float x = m_subtree[i];
                         e0 +=
@@ -465,7 +510,7 @@ public:
                 for (SizeType i = lo; i < hi; ++i) {
                     const uint8_t p =
                         first ? (m_pre[i] != 0 ? uint8_t{7} : uint8_t{0})
-                              : prv[m_parent[i]];
+                              : prv[parent[i - lo]];
                     const float v   = m_score[i];
                     const auto bits = static_cast<uint8_t>(
                         p & ((v > g0 ? 1U : 0U) | (v > gu ? 2U : 0U) |
@@ -486,6 +531,11 @@ public:
     }
 
 private:
+    /// Parents of the slots of stage @p s >= 1: slots of stage s - 1.
+    const uint32_t* parents_of(SizeType s) const {
+        return m_g.parent.data() + m_offset[s - 1];
+    }
+
     void swap_buffers() {
         m_pre.swap(m_pre_spare);
         m_alive.swap(m_alive_spare);
@@ -503,25 +553,40 @@ private:
             const float threshold = g[s];
             const uint8_t* prv =
                 s > 0 ? m_alive.data() + m_offset[s - 1] : nullptr;
-            SizeType count = 0;
+            const uint32_t* parent = s > 0 ? parents_of(s) : nullptr;
+            SizeType count         = 0;
             if (keep) {
                 const float low = threshold - d;
                 uint32_t* list  = m_alive_list.data() + lo;
                 SizeType k      = 0;
-                for (SizeType i = lo; i < hi; ++i) {
-                    const uint8_t p = s > 0 ? prv[m_parent[i]] : uint8_t{3};
-                    const auto above =
-                        static_cast<uint8_t>(m_score[i] > threshold);
-                    const auto a = static_cast<uint8_t>(p & above);
-                    const auto r = static_cast<uint8_t>(
-                        (p & 2U) &
-                        (static_cast<uint8_t>(m_score[i] > low) << 1U));
-                    m_pre[i]   = p & 1U;
-                    m_alive[i] = a | r;
-                    count += a;
-                    // Listed: above its threshold, ancestry above g - d
-                    list[k] = static_cast<uint32_t>(i - lo);
-                    k += (p >> 1U) & above;
+                if (s == 0) {
+                    for (SizeType i = lo; i < hi; ++i) {
+                        const auto above =
+                            static_cast<uint8_t>(m_score[i] > threshold);
+                        const auto r = static_cast<uint8_t>(m_score[i] > low)
+                                       << 1U;
+                        m_pre[i]     = 1U;
+                        m_alive[i]   = above | r;
+                        count += above;
+                        list[k] = static_cast<uint32_t>(i - lo);
+                        k += above;
+                    }
+                } else {
+                    for (SizeType i = lo; i < hi; ++i) {
+                        const uint8_t p = prv[parent[i - lo]];
+                        const auto above =
+                            static_cast<uint8_t>(m_score[i] > threshold);
+                        const auto a = static_cast<uint8_t>(p & above);
+                        const auto r = static_cast<uint8_t>(
+                            (p & 2U) &
+                            (static_cast<uint8_t>(m_score[i] > low) << 1U));
+                        m_pre[i]   = p & 1U;
+                        m_alive[i] = a | r;
+                        count += a;
+                        // Listed: above its threshold, ancestry above g - d
+                        list[k] = static_cast<uint32_t>(i - lo);
+                        k += (p >> 1U) & above;
+                    }
                 }
                 m_alive_count[s] = k;
             } else if (s == 0) {
@@ -533,7 +598,7 @@ private:
             } else {
                 for (SizeType i = lo; i < hi; ++i) {
                     const auto a = static_cast<uint8_t>(
-                        prv[m_parent[i]] &
+                        prv[parent[i - lo]] &
                         static_cast<uint8_t>(m_score[i] > threshold));
                     m_alive[i] = a;
                     count += a;
@@ -556,7 +621,6 @@ private:
     std::vector<double> m_unit;
     std::vector<SizeType> m_offset;
     const float* m_score;
-    const uint32_t* m_parent;
     std::vector<float> m_schedule;
     std::vector<uint8_t> m_pre;
     std::vector<uint8_t> m_alive;
@@ -668,6 +732,50 @@ float fap_threshold(double fap, double ntemplates) {
     return static_cast<float>(hi);
 }
 
+void validate_descent_options(const DescentOptions& options, SizeType nstages) {
+    constexpr SizeType kMaxTrials = SizeType{1} << 20U;
+    const auto fail               = [](const std::string& what) {
+        throw std::invalid_argument("descent: " + what);
+    };
+    for (SizeType i = 0; i < options.passes.size(); ++i) {
+        const auto& pass       = options.passes[i];
+        const std::string name = "descent_passes[" + std::to_string(i) + "]";
+        if (pass.ntrials == 0 || pass.ntrials > kMaxTrials) {
+            fail(name + ": ntrials must be in [1, 2^20]");
+        }
+        if (!utils::is_finite(pass.margin) || pass.margin <= 0.0F) {
+            fail(name + ": margin must be finite and > 0");
+        }
+        if (!utils::is_finite(pass.step) || pass.step <= 0.0F) {
+            fail(name + ": step must be finite and > 0");
+        }
+        if (pass.step >= pass.margin) {
+            fail(name + ": step must be below margin");
+        }
+        if (pass.min_block == 0 || pass.min_block > pass.max_block) {
+            fail(name + ": need 1 <= min_block <= max_block");
+        }
+    }
+    if (options.nsignal == 0 || options.nsignal > kMaxTrials) {
+        fail("the signal sample (descent_nsignal) must be in [1, 2^20]");
+    }
+    if (!options.start.empty()) {
+        if (options.start.size() != nstages) {
+            fail("one starting threshold per stage: got " +
+                 std::to_string(options.start.size()) + " for " +
+                 std::to_string(nstages) + " stages");
+        }
+        if (!std::ranges::all_of(options.start,
+                                 [](float v) { return utils::is_finite(v); })) {
+            fail("the start must be finite");
+        }
+    }
+    if (!utils::is_finite(options.final_threshold) ||
+        options.final_threshold < 0.0F) {
+        fail("final_threshold must be finite and >= 0 (0: no floor)");
+    }
+}
+
 std::vector<float> resample_zscores(std::span<const float> zscores,
                                     SizeType nstages) {
     if (zscores.size() == nstages) {
@@ -694,6 +802,7 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                               const DescentOptions& options) {
     error_check::check(min_pd > 0.0F && min_pd < 1.0F,
                        "descent: min_pd must be in (0, 1)");
+    validate_descent_options(options, engine.get_nstages());
     SchemeSolution out;
     out.min_pd             = min_pd;
     out.w_terminal         = static_cast<float>(w_terminal);
@@ -718,6 +827,7 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     const float floor    = has_floor ? options.final_threshold
                                      : std::numeric_limits<float>::lowest();
     const int nthreads   = std::max(options.nthreads, 1);
+    const bool free_pd   = options.pd_policy == PdPolicy::kFree;
     const auto t_start   = std::chrono::steady_clock::now();
     double t_noise       = 0.0;
     double t_moves       = 0.0;
@@ -725,16 +835,15 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     // Coarse to fine: small samples and large steps first, the later levels
     // without the coarsest blocks (measured: docs/performance.md). Without
     // given passes a level is repeated while it still gains.
-    constexpr SizeType kAll               = SizeType{1} << 20U;
-    const std::vector<DescentPass> levels = {
+    constexpr SizeType kAll         = SizeType{1} << 20U;
+    std::vector<DescentPass> levels = {
         {SizeType{1} << 12U, 0.4F, 0.2F, kAll, 1},
         {SizeType{1} << 13U, 0.3F, 0.1F, 32, 1},
         {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1}};
     const bool adaptive = options.passes.empty();
-    const auto& passes  = adaptive ? levels : options.passes;
     SignalSample signal(engine.simulate_h1_scores(
                             options.nsignal, derive_seed(seed, kSignalDescent)),
-                        nstages, options.nsignal, nthreads);
+                        nstages, options.nsignal);
     double ceiling = 1.0;
     if (has_floor) {
         ceiling = signal.ceiling(floor);
@@ -758,14 +867,13 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         if (has_floor && schedule[nstages - 1] <= floor) {
             schedule[nstages - 1] = floor;
             const float rest =
-                signal.pin_shift(schedule, target_pd, nstages - 1, nthreads);
+                signal.pin_shift(schedule, target_pd, nstages - 1);
             for (SizeType s = 0; s + 1 < nstages; ++s) {
                 schedule[s] += rest;
             }
             return;
         }
-        const float shift =
-            signal.pin_shift(schedule, target_pd, nstages, nthreads);
+        const float shift = signal.pin_shift(schedule, target_pd, nstages);
         if (schedule[nstages - 1] + shift >= floor) {
             for (SizeType s = 0; s < nstages; ++s) {
                 schedule[s] += shift;
@@ -773,8 +881,7 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
             return;
         }
         schedule[nstages - 1] = floor;
-        const float rest =
-            signal.pin_shift(schedule, target_pd, nstages - 1, nthreads);
+        const float rest = signal.pin_shift(schedule, target_pd, nstages - 1);
         for (SizeType s = 0; s + 1 < nstages; ++s) {
             schedule[s] += rest;
         }
@@ -782,12 +889,13 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     const auto pin = [&](std::vector<float>& schedule) {
         pin_to(schedule, target);
     };
+    const double se_search =
+        std::sqrt(target * (1.0 - target) / static_cast<double>(signal.size()));
+    const double interior_margin =
+        std::max(0.15 * std::min(target, 1.0 - target), 6.0 * se_search);
+    bool flat_or_interior_start = false;
     std::vector<float> g;
     if (options.start.empty()) {
-        // Candidate starts ranked by L = C / Pd on one noise sample: flat
-        // z-score and the long-pattern smooth shape at target, plus higher-Pd
-        // flat starts when L falls with Pd (short patterns). Stops probing
-        // upward as soon as L rises (long patterns stop on the first probe).
         g = zscore_start(signal, mean, sd, target);
         pin(g);
         std::vector<float> smooth = smooth_start(mean, sd);
@@ -803,40 +911,130 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         const double cost_smooth = cost_of(smooth);
         out.diagnostics.emplace_back("start_cost_ratio",
                                      cost_smooth / cost_flat);
-        double pd_g              = signal.pd(g, signal.size());
-        double best_rank         = cost_flat / std::max(pd_g, 1e-9);
-        const double pd_smooth   = signal.pd(smooth, signal.size());
-        const double rank_smooth = cost_smooth / std::max(pd_smooth, 1e-9);
-        if (rank_smooth < best_rank) {
-            g         = std::move(smooth);
-            best_rank = rank_smooth;
-        }
-        // Higher-Pd flat starts only help when fixed early-stage work (1 + B_0)
-        // is a non-negligible share of C; on deep high-cost trees L rises
-        // steeply with Pd everywhere above target.
-        if (std::min(cost_flat, cost_smooth) <=
-            500.0 * (1.0 + static_cast<double>(branching[0]))) {
-            for (const double p_try : {0.25, 0.5, 0.75, 0.9}) {
-                if (p_try <= target + 0.05 || (has_floor && p_try > ceiling)) {
-                    continue;
-                }
-                std::vector<float> high = zscore_start(signal, mean, sd, p_try);
-                pin_to(high, p_try);
-                const double pd_high = signal.pd(high, signal.size());
-                const double rank_high =
-                    cost_of(high) / std::max(pd_high, 1e-9);
-                if (rank_high < best_rank) {
-                    g         = std::move(high);
-                    best_rank = rank_high;
-                } else if (rank_high > 1.05 * best_rank) {
-                    break;
+        bool chose_smooth = false;
+        double best_rank  = cost_flat;
+        if (!free_pd) {
+            if (cost_smooth < cost_flat) {
+                g            = std::move(smooth);
+                chose_smooth = true;
+            }
+        } else {
+            const double pd_flat     = signal.pd(g, signal.size());
+            const double pd_smooth   = signal.pd(smooth, signal.size());
+            const double rank_flat   = cost_flat / std::max(pd_flat, 1e-9);
+            const double rank_smooth = cost_smooth / std::max(pd_smooth, 1e-9);
+            best_rank                = rank_flat;
+            if (rank_smooth < best_rank) {
+                g            = std::move(smooth);
+                best_rank    = rank_smooth;
+                chose_smooth = true;
+            }
+            // Flat starts at Pd above the target: a ladder of Pd values
+            // (stopped once L = C / Pd is 2 % above the best), then three
+            // bisection probes around the best point. Deep high-cost trees
+            // fail on the first upward step and stop after one evaluation.
+            const double p_max = std::min(0.995, has_floor ? ceiling : 1.0);
+            const double p_first =
+                std::min(p_max, std::max(target * 1.4, target + 0.03));
+            const auto probe_flat = [&](double p_try) {
+                std::vector<float> cand = zscore_start(signal, mean, sd, p_try);
+                pin_to(cand, p_try);
+                const double pd_c = signal.pd(cand, signal.size());
+                const double rk   = cost_of(cand) / std::max(pd_c, 1e-9);
+                return std::tuple{std::move(cand), pd_c, rk};
+            };
+            if (p_first > target + 1e-4) {
+                auto [cand1, pd1, rk1] = probe_flat(p_first);
+                if (rk1 < rank_flat) {
+                    std::vector<std::pair<double, double>> pts = {
+                        {target, rank_flat}, {p_first, rk1}};
+                    double best_p = p_first;
+                    if (rk1 < best_rank) {
+                        g            = std::move(cand1);
+                        best_rank    = rk1;
+                        best_p       = p_first;
+                        chose_smooth = false;
+                    }
+                    constexpr std::array<double, 9> kLadder = {
+                        0.14, 0.22, 0.35, 0.50, 0.65, 0.80, 0.90, 0.96, 0.995};
+                    for (double p_raw : kLadder) {
+                        const double p_try = std::min(p_raw, p_max);
+                        if (p_try <= pts.back().first + 0.01) {
+                            continue;
+                        }
+                        auto [cand, pd_c, rk] = probe_flat(p_try);
+                        pts.emplace_back(p_try, rk);
+                        if (rk < best_rank) {
+                            g            = std::move(cand);
+                            best_rank    = rk;
+                            best_p       = p_try;
+                            chose_smooth = false;
+                        } else if (rk > 1.02 * best_rank) {
+                            break;
+                        }
+                        if (p_try >= p_max - 1e-4) {
+                            break;
+                        }
+                    }
+                    // Refine around the best bracket point with 3 bisection
+                    // probes.
+                    SizeType ibest = 0;
+                    for (SizeType i = 1; i < pts.size(); ++i) {
+                        if (pts[i].second < pts[ibest].second) {
+                            ibest = i;
+                        }
+                    }
+                    double p_lo = ibest > 0 ? pts[ibest - 1].first : target;
+                    double p_hi =
+                        ibest + 1 < pts.size() ? pts[ibest + 1].first : p_max;
+                    double p_mid = pts[ibest].first;
+                    for (int iter = 0; iter < 3; ++iter) {
+                        const double p_try = (p_hi - p_mid > p_mid - p_lo)
+                                                 ? 0.5 * (p_mid + p_hi)
+                                                 : 0.5 * (p_lo + p_mid);
+                        if (std::abs(p_try - p_mid) < 0.005) {
+                            break;
+                        }
+                        auto [cand, pd_c, rk] = probe_flat(p_try);
+                        if (rk < best_rank) {
+                            if (p_try < p_mid) {
+                                p_hi = p_mid;
+                            } else {
+                                p_lo = p_mid;
+                            }
+                            p_mid        = p_try;
+                            g            = std::move(cand);
+                            best_rank    = rk;
+                            best_p       = p_try;
+                            chose_smooth = false;
+                        } else if (p_try < p_mid) {
+                            p_lo = p_try;
+                        } else {
+                            p_hi = p_try;
+                        }
+                    }
+                    // Also check the smooth profile shifted to best_p.
+                    if (best_p > target + 1e-4) {
+                        std::vector<float> smooth_hi = smooth_start(mean, sd);
+                        pin_to(smooth_hi, best_p);
+                        const double pd_sh =
+                            signal.pd(smooth_hi, signal.size());
+                        const double rk_sh =
+                            cost_of(smooth_hi) / std::max(pd_sh, 1e-9);
+                        if (rk_sh < best_rank) {
+                            g            = std::move(smooth_hi);
+                            best_rank    = rk_sh;
+                            chose_smooth = true;
+                        }
+                    }
                 }
             }
+            const double pd_start = signal.pd(g, signal.size());
+            flat_or_interior_start =
+                !chose_smooth || (pd_start > target + interior_margin);
         }
     } else {
         g = options.start;
-        error_check::check_equal(g.size(), nstages,
-                                 "descent: one starting threshold per stage");
         if (options.start_zscores) {
             for (SizeType s = 0; s < nstages; ++s) {
                 g[s] = mean[s] - (options.start[s] * sd[s]);
@@ -845,7 +1043,21 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         pin(g);
     }
 
+    // In free mode on short/flat starts, early stages often need to drop > 1
+    // S/N below the flat start; prepend one wider coarse level so they are not
+    // blocked by the 0.4 S/N margin wall.
+    if (adaptive && free_pd && flat_or_interior_start) {
+        levels.insert(levels.begin(),
+                      {SizeType{1} << 12U, 0.8F, 0.4F, kAll, 1});
+    }
+    const auto& passes = adaptive ? levels : options.passes;
+    const double repeat_drop =
+        (free_pd && flat_or_interior_start) ? 0.05 : kRepeatDrop;
+
     std::vector<SizeType> scales;
+    if (free_pd && nstages > 1) {
+        scales.push_back(nstages);
+    }
     for (SizeType size = std::bit_ceil(std::max<SizeType>(nstages, 2)) / 2;
          size >= 1; size /= 2) {
         scales.push_back(size);
@@ -859,6 +1071,8 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     std::vector<float> g_ref(nstages);
     std::vector<float> candidate(nstages);
     SizeType ipass = 0;
+    // The cost of the schedule on the last noise genealogy (in-run).
+    double search_c = -1.0;
     for (SizeType ilevel = 0; ilevel < 2 * passes.size(); ++ilevel) {
         // Every level may run twice in the default plan (odd ilevel: the
         // repeat, entered only if the first pass gained enough).
@@ -878,17 +1092,24 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
             branching, w_terminal);
         t_noise += seconds_since(t0);
         t0 = std::chrono::steady_clock::now();
-        signal.prepare_pass(g_ref, nthreads);
+        signal.prepare_pass(g_ref);
         double cost   = bank.evaluate(g, d);
-        double pd_cur = signal.pd(g, signal.size());
+        double pd_cur = free_pd ? signal.pd_active(g) : target;
         bank.accept(g);
-        const double rank_begin = cost / std::max(pd_cur, 1e-9);
+        const double rank_begin =
+            free_pd ? (cost / std::max(pd_cur, 1e-9)) : cost;
         for (const SizeType size : scales) {
-            if (size > pass.max_block || size < pass.min_block) {
+            const bool is_global_shift = free_pd && size == nstages;
+            if (!is_global_shift &&
+                (size > pass.max_block || size < pass.min_block)) {
                 continue;
             }
+            // Odd passes offset the blocks by half a block; the global shift
+            // under kFree stays one block over every stage.
             const auto blocks = make_blocks(
-                nstages, size, (ipass % 2 == 1 && size > 1) ? size / 2 : 0);
+                nstages, size,
+                (ipass % 2 == 1 && size > 1 && !is_global_shift) ? size / 2
+                                                                 : 0);
             // The last stage moves down as far as the floor lets it.
             down[nstages - 1] = std::clamp(g[nstages - 1] - floor, 0.0F, d);
             bank.block_deltas(blocks, d, down, dc_up, dc_dn, nthreads);
@@ -905,24 +1126,16 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 saved -= dc_up[k];
                 lost -= dp_up[k];
             }
-            // Dinkelbach fractional multiplier: lam >= C / Pd lowers L = C / Pd
-            // whenever Pd stays >= target; otherwise bisect lam above C / Pd to
-            // enforce Pd >= target.
-            const double lam_lo = cost / std::max(pd_cur, 1e-9);
             std::vector<int> step(blocks.size(), 0);
-            const double dp_free =
-                choose_moves(dc_up, dp_up, dc_dn, dp_dn, room, lam_lo, step);
-            const bool binds = (pd_cur + dp_free) < target;
-            if (binds) {
-                const double need = target - pd_cur;
-                double lo         = lam_lo;
-                double hi         = -1.0;
-                double lam        = std::max(
-                    {lam_lo * 2.0, saved / std::max(lost, 1e-12), lo + 1e-9});
+            bool binds = !free_pd;
+            if (!free_pd) {
+                double lo  = 0.0;
+                double hi  = -1.0;
+                double lam = std::max(saved / std::max(lost, 1e-12), 1e-9);
                 for (int i = 0; i < 60; ++i) {
                     const double dp = choose_moves(dc_up, dp_up, dc_dn, dp_dn,
                                                    room, lam, step);
-                    if (dp < need) {
+                    if (dp < 0.0) {
                         lo  = lam;
                         lam = hi < 0.0 ? lam * 2.0 : 0.5 * (lo + hi);
                     } else {
@@ -932,6 +1145,35 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 }
                 choose_moves(dc_up, dp_up, dc_dn, dp_dn, room,
                              hi < 0.0 ? lam : hi, step);
+            } else {
+                // Dinkelbach fractional multiplier: lam >= C / Pd lowers
+                // L = C / Pd whenever Pd stays >= target; otherwise bisect
+                // lam above C / Pd to enforce Pd >= target.
+                const double lam_lo  = cost / std::max(pd_cur, 1e-9);
+                const double dp_free = choose_moves(dc_up, dp_up, dc_dn, dp_dn,
+                                                    room, lam_lo, step);
+                binds                = (pd_cur + dp_free) < target;
+                if (binds) {
+                    const double need = target - pd_cur;
+                    double lo         = lam_lo;
+                    double hi         = -1.0;
+                    double lam =
+                        std::max({lam_lo * 2.0, saved / std::max(lost, 1e-12),
+                                  lo + 1e-9});
+                    for (int i = 0; i < 60; ++i) {
+                        const double dp = choose_moves(dc_up, dp_up, dc_dn,
+                                                       dp_dn, room, lam, step);
+                        if (dp < need) {
+                            lo  = lam;
+                            lam = hi < 0.0 ? lam * 2.0 : 0.5 * (lo + hi);
+                        } else {
+                            hi  = lam;
+                            lam = 0.5 * (lo + hi);
+                        }
+                    }
+                    choose_moves(dc_up, dp_up, dc_dn, dp_dn, room,
+                                 hi < 0.0 ? lam : hi, step);
+                }
             }
             if (std::ranges::all_of(step, [](int s) { return s == 0; })) {
                 continue;
@@ -944,15 +1186,23 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 }
             }
             candidate[nstages - 1] = std::max(candidate[nstages - 1], floor);
-            double pd_cand         = 0.0;
-            if (binds) {
+            double pd_cand         = target;
+            if (!free_pd) {
                 pin(candidate);
-                pd_cand = signal.pd(candidate, signal.size());
+            } else if (binds) {
+                pin(candidate);
             } else {
-                pd_cand = signal.pd(candidate, signal.size());
+                bool above_pre = true;
+                for (SizeType s = 0; s < nstages && above_pre; ++s) {
+                    above_pre = candidate[s] > g_ref[s];
+                }
+                if (!above_pre) {
+                    continue;
+                }
+                pd_cand = signal.pd_active(candidate);
                 if (pd_cand < target) {
                     pin(candidate);
-                    pd_cand = signal.pd(candidate, signal.size());
+                    binds = true;
                 }
             }
             bool above = true;
@@ -962,10 +1212,15 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
             if (!above) {
                 continue;
             }
+            if (free_pd && binds) {
+                pd_cand = signal.pd_active(candidate);
+            }
             const double cost_candidate = bank.evaluate(candidate, d);
             const double rank_candidate =
-                cost_candidate / std::max(pd_cand, 1e-9);
-            const double rank_cur = cost / std::max(pd_cur, 1e-9);
+                free_pd ? (cost_candidate / std::max(pd_cand, 1e-9))
+                        : cost_candidate;
+            const double rank_cur =
+                free_pd ? (cost / std::max(pd_cur, 1e-9)) : cost;
             if (rank_candidate < kAccept * rank_cur) {
                 bank.accept(candidate);
                 g      = candidate;
@@ -978,18 +1233,20 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
         }
         t_moves += seconds_since(t0);
         ++ipass;
-        const double rank_end = cost / std::max(pd_cur, 1e-9);
-        repeat                = adaptive && ilevel % 2 == 0 &&
-                                rank_end < (1.0 - kRepeatDrop) * rank_begin;
+        search_c = cost;
+        const double rank_end =
+            free_pd ? (cost / std::max(pd_cur, 1e-9)) : cost;
+        repeat = adaptive && ilevel % 2 == 0 &&
+                 rank_end < (1.0 - repeat_drop) * rank_begin;
     }
     out.search_thresholds = g;
     out.search_pd         = signal.pd(g, signal.size());
 
-    // Pin on a fresh bank (two-sided when the Pd constraint bound, one-sided
-    // repair when Dinkelbach chose an interior Pd > target), then report on an
-    // independent bank, as solve().
+    // Pin on a fresh bank (always two-sided under kPin; one-sided repair under
+    // kFree when search Pd clears target by more than max(15% of min(target,
+    // 1 - target), 6 SE)), then report on an independent bank, as solve().
     const SizeType n    = budget.nbank;
-    const bool interior = out.search_pd > (target + 0.015);
+    const bool interior = free_pd && (out.search_pd > target + interior_margin);
     float pin_shift     = 0.0F;
     {
         constexpr float kPinCut = -0.5F;
@@ -1073,7 +1330,7 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     out.c = total_cost(out.eval_states.back(), w_terminal);
     out.cost =
         out.pd > 0.0 ? out.c / out.pd : std::numeric_limits<double>::max();
-    out.search_c = out.c;
+    out.search_c = search_c >= 0.0 ? search_c : out.c;
     out.zscores.resize(nstages);
     for (SizeType s = 0; s < nstages; ++s) {
         out.zscores[s] = (mean[s] - g[s]) / sd[s];

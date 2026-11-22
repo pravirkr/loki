@@ -1288,8 +1288,7 @@ public:
                                 std::optional<uint64_t> seed,
                                 bool h0_only) const override {
         return evaluate_impl(thresholds, ntrials,
-                             seed.value_or(std::random_device{}()), nullptr,
-                             h0_only);
+                             seed.value_or(std::random_device{}()), h0_only);
     }
 
     uint64_t get_seed() const override { return m_seed; }
@@ -1350,7 +1349,7 @@ public:
         genealogy.scores.assign(m_nstages * ntrials, 0.0F);
         genealogy.parent.assign(m_nstages * ntrials, 0U);
         genealogy.pass_rate.assign(m_nstages, 0.0);
-        evaluate_impl(thresholds, ntrials, seed, nullptr, true, &genealogy);
+        evaluate_impl(thresholds, ntrials, seed, true, &genealogy);
         return genealogy;
     }
 
@@ -1361,11 +1360,44 @@ public:
     }
 
 private:
+    /// Initial fold for one evaluation trial (shared by evaluate_impl and
+    /// run_h1_trials so RNG stream keys and signal bias live in one place).
+    void init_eval_fold(uint64_t eval_seed,
+                        uint32_t branch,
+                        uint32_t trial,
+                        float* dst) const {
+        auto rng = math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U, branch, trial);
+        fill_standard_normals(rng, dst, m_nbins, 1.0F);
+        if (branch == 1U) {
+            for (SizeType j = 0; j < m_nbins; ++j) {
+                dst[j] += m_profile[j] * m_bias_snr;
+            }
+        }
+    }
+
+    /// One evaluation stage update for one trial (shared by evaluate_impl and
+    /// run_h1_trials).
+    void advance_eval_fold(uint64_t eval_seed,
+                           uint32_t stage,
+                           uint32_t branch,
+                           uint32_t trial,
+                           const float* in,
+                           float* noise_buf,
+                           float* out) const {
+        auto rng =
+            math::make_keyed_pcg32(eval_seed, 2U, stage, 0U, branch, trial);
+        fill_standard_normals(rng, noise_buf, m_nbins, 1.0F);
+        const float scale = (branch == 1U) ? m_bias_snr : 0.0F;
+        for (SizeType j = 0; j < m_nbins; ++j) {
+            out[j] = in[j] + noise_buf[j] + (scale * m_profile[j]);
+        }
+    }
+
     /// L2-tiled H1 trajectory evaluator: processes small tiles of trials per
-    /// OpenMP thread instead of stage-wide ntrials x nbins matrices, calling
-    /// snr_boxcar_2d_max_cpu so every float is bit-identical to evaluate_impl()
-    /// under -ffast-math. Compacts dead trials within each tile when
-    /// @p thresholds is non-empty.
+    /// OpenMP thread instead of stage-wide ntrials x nbins matrices, sharing
+    /// init_eval_fold / advance_eval_fold and snr_boxcar_2d_max_cpu with
+    /// evaluate_impl() so every float is bit-identical under -ffast-math.
+    /// Compacts dead trials within each tile when @p thresholds is non-empty.
     SizeType run_h1_trials(SizeType ntrials,
                            uint64_t eval_seed,
                            std::vector<float>* h1_scores,
@@ -1398,30 +1430,19 @@ private:
                     const auto trial_u = static_cast<uint32_t>(base + k);
                     active_trial[k]    = trial_u;
                     run_margin[k]      = std::numeric_limits<float>::max();
-                    auto rng0  = math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U,
-                                                        1U, trial_u);
-                    float* dst = folds.data() + (k * nbins);
-                    fill_standard_normals(rng0, dst, nbins, 1.0F);
-                    for (SizeType j = 0; j < nbins; ++j) {
-                        dst[j] += m_profile[j] * m_bias_snr;
-                    }
+                    init_eval_fold(eval_seed, 1U, trial_u,
+                                   folds.data() + (k * nbins));
                 }
 
-                float var_in      = 1.0F;
-                const float scale = m_bias_snr;
+                float var_in = 1.0F;
                 for (SizeType istage = 0; istage < nstages && n_act > 0;
                      ++istage) {
                     const auto stage = static_cast<uint32_t>(istage);
                     for (SizeType k = 0; k < n_act; ++k) {
-                        auto rng = math::make_keyed_pcg32(
-                            eval_seed, 2U, stage, 0U, 1U, active_trial[k]);
-                        float* nz = noise.data() + (k * nbins);
-                        fill_standard_normals(rng, nz, nbins, 1.0F);
-                        const float* in = folds.data() + (k * nbins);
-                        float* out      = generated.data() + (k * nbins);
-                        for (SizeType j = 0; j < nbins; ++j) {
-                            out[j] = in[j] + nz[j] + (scale * m_profile[j]);
-                        }
+                        advance_eval_fold(eval_seed, stage, 1U, active_trial[k],
+                                          folds.data() + (k * nbins),
+                                          noise.data() + (k * nbins),
+                                          generated.data() + (k * nbins));
                     }
                     const float stdnoise = std::sqrt(var_in + 1.0F);
                     detection::detail::snr_boxcar_2d_max_cpu(
@@ -1478,16 +1499,13 @@ private:
         return survivors;
     }
 
-    /// evaluate(); when @p h1_scores is set, also stores every stage's H1
-    /// scores (stage-major) before pruning. @p h0_only skips the H1 branch
-    /// (success_h1 = 1 in the states). With @p genealogy (and h0_only), the
-    /// noise scores of every stage and the slot each trial continues are
-    /// stored.
+    /// evaluate(); @p h0_only skips the H1 branch (success_h1 = 1 in the
+    /// states). With @p genealogy (and h0_only), the noise scores of every
+    /// stage and the slot each trial continues are stored.
     std::vector<State>
     evaluate_impl(std::span<const float> thresholds,
                   SizeType ntrials,
                   uint64_t eval_seed,
-                  std::vector<float>* h1_scores,
                   bool h0_only,
                   detail::NoiseGenealogy* genealogy = nullptr) const {
         if (thresholds.size() != m_nstages) {
@@ -1515,25 +1533,15 @@ private:
         // states are identical for any thread count.
         const int nthreads = m_nthreads;
         const auto n_items = static_cast<std::int64_t>(branch_hi * ntrials);
-        // H1 scores only: the H0 branch is not simulated
-        const std::int64_t item_lo =
-            h1_scores != nullptr ? static_cast<std::int64_t>(ntrials) : 0;
-        const uint32_t branch_lo = h1_scores != nullptr ? 1U : 0U;
 
         // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(nthreads)
-        for (std::int64_t item = item_lo; item < n_items; ++item) {
+        for (std::int64_t item = 0; item < n_items; ++item) {
             const auto branch = static_cast<uint32_t>(item / ntrials_u);
             const auto trial  = static_cast<uint32_t>(item % ntrials_u);
-            auto rng =
-                math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U, branch, trial);
-            float* dst = folds.data() + (static_cast<SizeType>(item) * nbins);
-            fill_standard_normals(rng, dst, nbins, 1.0F);
-            if (branch == 1) {
-                for (SizeType j = 0; j < nbins; ++j) {
-                    dst[j] += m_profile[j] * m_bias_snr;
-                }
-            }
+            init_eval_fold(eval_seed, branch, trial,
+                           folds.data() +
+                               (static_cast<SizeType>(item) * nbins));
         }
 
         std::vector<State> states(m_nstages);
@@ -1544,16 +1552,10 @@ private:
             const auto stage = static_cast<uint32_t>(istage);
             // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(nthreads)
-            for (std::int64_t item = item_lo; item < n_items; ++item) {
-                const auto branch = static_cast<uint32_t>(item / ntrials_u);
-                const auto trial  = static_cast<uint32_t>(item % ntrials_u);
-                auto rng = math::make_keyed_pcg32(eval_seed, 2U, stage, 0U,
-                                                  branch, trial);
-                fill_standard_normals(
-                    rng, noise.data() + (static_cast<SizeType>(item) * nbins),
-                    nbins, 1.0F);
+            for (std::int64_t item = 0; item < n_items; ++item) {
+                const auto branch    = static_cast<uint32_t>(item / ntrials_u);
+                const auto trial     = static_cast<uint32_t>(item % ntrials_u);
                 const uint32_t nsurv = n_in[branch];
-                const float scale    = (branch == 1) ? m_bias_snr : 0.0F;
                 uint32_t src         = trial;
                 if (trial >= nsurv) {
                     auto boot = math::make_keyed_pcg32(eval_seed, 3U, stage, 0U,
@@ -1567,18 +1569,14 @@ private:
                     genealogy->parent[((istage - 1) * ntrials) + trial] =
                         order[src];
                 }
-                const float* in =
-                    folds.data() + (((branch * ntrials) + src) * nbins);
-                const float* nz =
-                    noise.data() + (static_cast<SizeType>(item) * nbins);
-                float* out =
-                    generated.data() + (static_cast<SizeType>(item) * nbins);
-                for (SizeType j = 0; j < nbins; ++j) {
-                    out[j] = in[j] + nz[j] + (scale * m_profile[j]);
-                }
+                advance_eval_fold(
+                    eval_seed, stage, branch, trial,
+                    folds.data() + (((branch * ntrials) + src) * nbins),
+                    noise.data() + (static_cast<SizeType>(item) * nbins),
+                    generated.data() + (static_cast<SizeType>(item) * nbins));
             }
             const float stdnoise = std::sqrt(var_in + 1.0F);
-            for (uint32_t branch = branch_lo; branch < branch_hi; ++branch) {
+            for (uint32_t branch = 0; branch < branch_hi; ++branch) {
                 detection::detail::snr_boxcar_2d_max_cpu(
                     std::span<const float>(generated.data() +
                                                (branch * ntrials * nbins),
@@ -1588,26 +1586,12 @@ private:
                                      ntrials),
                     ntrials, nbins, stdnoise, nthreads);
             }
-            if (h1_scores != nullptr) {
-                std::copy_n(scores.data() + ntrials, ntrials,
-                            h1_scores->data() + (istage * ntrials));
-            }
             if (genealogy != nullptr) {
                 std::copy_n(scores.data(), ntrials,
                             genealogy->scores.data() + (istage * ntrials));
             }
             std::array<uint32_t, 2> counts = {0, h0_only ? ntrials_u : 0U};
-            if (h1_scores != nullptr) {
-                // Nothing is pruned: every trial survives in its own slot, so
-                // the compaction is the identity. Swap instead of copying.
-                folds.swap(generated);
-                counts[1] = ntrials_u;
-                n_in[1]   = ntrials_u;
-            }
-            for (uint32_t branch = branch_lo; branch < branch_hi; ++branch) {
-                if (h1_scores != nullptr) {
-                    break;
-                }
+            for (uint32_t branch = 0; branch < branch_hi; ++branch) {
                 const float* branch_scores = scores.data() + (branch * ntrials);
                 uint32_t n                 = 0;
                 for (uint32_t trial = 0; trial < ntrials_u; ++trial) {

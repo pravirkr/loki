@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -116,13 +118,126 @@ TEST_CASE("pruned H1 margins and survivor counts are bit-exact across nbins",
 
                 if (backend == Backend::kCPU) {
                     // Single-thread vs multi-thread CPU H1 scores are
-                    // bit-identical, and match evaluate()'s H1 survival.
+                    // bit-identical.
                     const auto single = make_engine(backend, bp, nbins, 1);
                     const auto sc1    = single->simulate_h1_scores(n, sd);
                     REQUIRE(sc1.size() == scores.size());
                     for (SizeType i = 0; i < scores.size(); ++i) {
                         REQUIRE(bits(sc1[i]) == bits(scores[i]));
                     }
+                }
+            }
+        }
+    }
+}
+
+// Production depth: 127 stages. On CUDA the pruned kernels run only above
+// 128 bins, and the H1 fold buffers hold 64 MB per chunk, so 2^17 trials at
+// 256 bins and 2^15 at 1024 bins each take four chunks (trial_offset > 0).
+TEST_CASE("pruned H1 is bit-exact at production depth (127 stages)",
+          "[thresholds]") {
+    const std::vector<float> bp(127, 1.1F);
+    std::vector<float> thresholds(bp.size());
+    for (SizeType s = 0; s < bp.size(); ++s) {
+        thresholds[s] = 1.0F + (0.045F * static_cast<float>(s));
+    }
+    constexpr uint64_t kSd = 0xCAFE5678ULL;
+    constexpr float kCut   = -0.5F;
+    struct Case {
+        Backend backend;
+        SizeType nbins;
+        SizeType ntrials;
+    };
+    const std::vector<Case> cases{
+        {Backend::kCPU, 64, SizeType{1} << 15U},
+        {Backend::kCUDA, 256, SizeType{1} << 17U},
+        {Backend::kCUDA, 1024, SizeType{1} << 15U},
+    };
+    for (const auto& c : cases) {
+        if (!loki::is_available(c.backend)) {
+            continue;
+        }
+        DYNAMIC_SECTION("backend " << loki::to_string(c.backend) << " nbins "
+                                   << c.nbins << " ntrials " << c.ntrials) {
+            const auto engine = make_engine(c.backend, bp, c.nbins, 4);
+            const auto scores = engine->simulate_h1_scores(c.ntrials, kSd);
+            const loki::detection::detail::HostSignalBank ref(scores,
+                                                              c.ntrials);
+            const auto full_margins = ref.margins(thresholds);
+            const auto pruned =
+                engine->h1_margins_above(thresholds, kCut, c.ntrials, kSd);
+            REQUIRE(pruned.size() == c.ntrials);
+            SizeType ref_surv = 0;
+            SizeType n_exact  = 0;
+            SizeType n_bad    = 0;
+            for (SizeType t = 0; t < c.ntrials; ++t) {
+                if (full_margins[t] > kCut) {
+                    ++n_exact;
+                    n_bad += bits(pruned[t]) == bits(full_margins[t]) ? 0 : 1;
+                } else {
+                    n_bad += pruned[t] <= kCut ? 0 : 1;
+                }
+                if (full_margins[t] > 0.0F) {
+                    ++ref_surv;
+                }
+            }
+            REQUIRE(n_bad == 0);
+            // The schedule keeps a real share of trials to the last stage.
+            REQUIRE(ref_surv > c.ntrials / 20);
+            REQUIRE(n_exact > ref_surv);
+            REQUIRE(engine->count_h1_survivors(thresholds, c.ntrials, kSd) ==
+                    ref_surv);
+        }
+    }
+}
+
+// simulate_h1_scores follows every H1 trial on its own; evaluate() refills
+// the H1 branch from survivors after a cut, so the two agree only while no
+// trial has been cut. With every threshold before stage k far below the
+// noise, evaluate()'s H1 survival at stage k is the share of the stage-k
+// H1 scores above its threshold, bit for bit.
+TEST_CASE("simulate_h1_scores follows evaluate()'s H1 trials", "[thresholds]") {
+    const std::vector<float> bp(20, 2.0F);
+    constexpr SizeType kN  = 1024;
+    constexpr uint64_t kSd = 0x5EEDF00DULL;
+    constexpr float kOpen  = -1.0e30F;
+    for (const auto backend : {Backend::kCPU, Backend::kCUDA}) {
+        if (!loki::is_available(backend)) {
+            continue;
+        }
+        for (const SizeType nbins : {SizeType{32}, SizeType{256}}) {
+            DYNAMIC_SECTION("backend " << loki::to_string(backend) << " nbins "
+                                       << nbins) {
+                const auto engine = make_engine(backend, bp, nbins, 4);
+                const auto scores = engine->simulate_h1_scores(kN, kSd);
+                REQUIRE(scores.size() == bp.size() * kN);
+                for (const SizeType k :
+                     {SizeType{0}, bp.size() / 2, bp.size() - 1}) {
+                    // Cut at the median H1 score of stage k.
+                    std::vector<float> stage_k(
+                        scores.begin() + static_cast<std::ptrdiff_t>(k * kN),
+                        scores.begin() +
+                            static_cast<std::ptrdiff_t>((k + 1) * kN));
+                    std::ranges::nth_element(stage_k,
+                                             stage_k.begin() + (kN / 2));
+                    const float cut = stage_k[kN / 2];
+                    std::vector<float> thresholds(bp.size(), kOpen);
+                    thresholds[k] = cut;
+                    const auto states =
+                        engine->evaluate(thresholds, kN, kSd, false);
+                    SizeType above = 0;
+                    for (SizeType t = 0; t < kN; ++t) {
+                        above += scores[(k * kN) + t] > cut ? 1 : 0;
+                    }
+                    INFO("stage " << k << ": " << above << " of " << kN);
+                    REQUIRE(above > 0);
+                    REQUIRE(above < kN);
+                    for (SizeType s = 0; s < k; ++s) {
+                        REQUIRE(states[s].success_h1 == 1.0F);
+                    }
+                    REQUIRE(bits(states[k].success_h1) ==
+                            bits(static_cast<float>(above) /
+                                 static_cast<float>(kN)));
                 }
             }
         }

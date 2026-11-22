@@ -170,8 +170,37 @@ struct DescentPass {
     SizeType min_block{1};
 };
 
+/// How mode "descent" treats Pd above min_pd:
+/// - kPin (default): minimise C subject to Pd = min_pd (two-sided pin; used
+///   by EPRegionPlanner for tight, unimodal Pd).
+/// - kFree: minimise L = C / Pd subject to Pd >= min_pd (Dinkelbach
+///   fractional programming; may settle at an interior Pd > min_pd on short
+///   or low-cost trees).
+enum class PdPolicy : uint8_t { kPin, kFree };
+
+inline PdPolicy pd_policy_from_string(std::string_view s) {
+    if (s == "pin") {
+        return PdPolicy::kPin;
+    }
+    if (s == "free") {
+        return PdPolicy::kFree;
+    }
+    throw std::invalid_argument(std::string("unknown pd_policy: ").append(s));
+}
+
+inline std::string pd_policy_to_string(PdPolicy p) {
+    switch (p) {
+    case PdPolicy::kPin:
+        return "pin";
+    case PdPolicy::kFree:
+        return "free";
+    }
+    return "unknown";
+}
+
 /// Settings of modes "shared", "robust" and "descent"; the other modes ignore
-/// them. Mode "descent" uses min_pd, w_terminal, fap and final_threshold.
+/// them. Mode "descent" uses min_pd, w_terminal, fap, final_threshold,
+/// pd_policy and the descent_* fields.
 struct SharedOptions {
     /// Target Pd. Anchors the probability grid: @p nprobs bins from min_pd to
     /// 1, plus at most 16 below it down to min_pd / 2 (the constructor's
@@ -187,26 +216,35 @@ struct SharedOptions {
     /// consecutive stages, in the same unit. The searched paths need up to
     /// 0.9; 0.5 loses cost on short patterns.
     float reach_sigma = 1.0F;
-    /// Mode "descent": false-alarm probability per final trial. When > 0 the
-    /// last threshold is held at Q^-1(fap / K), K = nbins x boxcar widths,
-    /// so Pd includes that cut. 0: the last threshold is free.
+    /// Mode "descent": false-alarm probability per final trial, in [0, 1).
+    /// When > 0 the last threshold is held at Q^-1(fap / K), K = nbins x
+    /// boxcar widths, so Pd includes that cut. 0: the last threshold is free.
     double fap = 0.0;
     /// Mode "descent": the last threshold is held at least at this S/N (the
-    /// larger of it and the fap threshold). <= 0: unused.
+    /// larger of it and the fap threshold). 0: unused; must be finite and
+    /// >= 0.
     float final_threshold = 0.0F;
     /// Mode "descent": the passes, each run once (empty: three default
     /// levels, each repeated while it still gains), and the trials of the
-    /// signal sample its moves count Pd on.
+    /// signal sample its moves count Pd on (1 to 2^20). A pass needs ntrials
+    /// in [1, 2^20], 0 < step < margin and 1 <= min_block <= max_block.
+    /// Mode "descent" checks its settings at construction and throws
+    /// std::invalid_argument; the other modes do not read them.
     std::vector<DescentPass> descent_passes{};
     SizeType descent_nsignal = SizeType{1} << 15U;
-    /// Mode "descent": the schedule the descent starts from, one threshold
-    /// per stage, e.g. the solution of a similar pattern (empty: the cheaper
-    /// of two built-in candidates, measured on one noise sample).
+    /// Mode "descent": the schedule the descent starts from, one finite
+    /// threshold per stage, e.g. the solution of a similar pattern (empty:
+    /// the cheaper of two built-in candidates, measured on one noise sample).
+    /// It must be a plausible schedule: one far below the noise scores sits
+    /// on a plateau where no move changes the cost.
     std::vector<float> descent_start{};
     /// descent_start holds signal z-scores (SchemeSolution::zscores of
     /// another solve) instead of thresholds: use it when the bin count, the
     /// S/N or the pulse differ between the two patterns.
     bool descent_start_zscores = false;
+    /// Mode "descent": kPin (default) minimises C at Pd = min_pd; kFree
+    /// minimises L = C / Pd subject to Pd >= min_pd.
+    PdPolicy pd_policy = PdPolicy::kPin;
 };
 
 /// How the Pd of a returned schedule compares with the target.
@@ -260,6 +298,9 @@ struct SchemeSolution {
     /// (mean_s - threshold_s) / sd_s per stage. Similar branching patterns
     /// have similar z-scores (see SharedOptions::descent_start_zscores).
     std::vector<float> zscores;
+    /// Mode "descent": search_pd is the Pd of search_thresholds on the
+    /// design's signal sample, search_c their cost on the last noise
+    /// genealogy of the descent (before the final pin).
     double search_pd{0.0};
     double search_c{0.0};
     /// Named counters and timings of the pipeline (shift applied, tightened

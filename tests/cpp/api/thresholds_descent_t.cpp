@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -71,7 +72,7 @@ TEST_CASE("descent: solve() delivers the target Pd", "[thresholds][descent]") {
     REQUIRE(sol.delivery != detection::Delivery::kShort);
     REQUIRE(sol.delivery != detection::Delivery::kNoPath);
     REQUIRE(sol.pd >= 0.97 * kMinPd);
-    REQUIRE(sol.pd <= 1.0);
+    REQUIRE(sol.pd <= 1.05 * kMinPd);
     REQUIRE(sol.pd_trials == (SizeType{1} << 17U));
     REQUIRE(sol.eval_states.size() == scheme.get_nstages());
     REQUIRE(sol.c > 1.0);
@@ -88,14 +89,24 @@ TEST_CASE("descent: solve() delivers the target Pd", "[thresholds][descent]") {
         REQUIRE(one_thread.solve().thresholds == sol.thresholds);
     }
 
-    // Steep branching pattern: L = C / Pd rises with Pd, so Pd pins tightly
-    // at the target without overshoot.
+    // PdPolicy::kFree minimises L = C / Pd on short low-cost trees and may
+    // settle at an interior Pd > min_pd with lower L than kPin.
+    auto free_opts      = options();
+    free_opts.pd_policy = detection::PdPolicy::kFree;
+    const auto free_sol = make(backend, 7, free_opts).solve();
+    REQUIRE(free_sol.pd >= 0.97 * kMinPd);
+    REQUIRE(free_sol.pd <= 1.0);
+    REQUIRE(free_sol.cost <= 1.05 * sol.cost);
+
+    // Steep branching pattern (24 stages of 3): kPin holds Pd at the target
+    // there too.
     const std::vector<float> steep(24, 3.0F);
     DynamicThresholdScheme steep_scheme(
         steep, 0.1F, 32, 512, 20, 0.05F, 9.0F, 40, 0.3F, 1.5F, 1.5F, 1,
         "descent", 7, 256, "window", options(),
         backend == "cuda" ? Exec::cuda() : Exec::cpu(2));
     const auto steep_sol = steep_scheme.solve();
+    REQUIRE(steep_sol.delivery != detection::Delivery::kShort);
     REQUIRE(steep_sol.pd >= 0.97 * kMinPd);
     REQUIRE(steep_sol.pd <= 1.05 * kMinPd);
 }
@@ -106,15 +117,18 @@ TEST_CASE("descent: the last threshold has a floor", "[thresholds][descent]") {
     if (skip_backend(backend)) {
         SKIP("backend not built");
     }
-    auto fixed     = make(backend, 7, options(6.5F));
-    const auto sol = fixed.solve();
-    REQUIRE(sol.thresholds.back() >= 6.5F);
+    const auto free_sol = make(backend, 7, options()).solve();
+    // An active floor above the free last threshold holds it at the floor.
+    const float active_floor = free_sol.thresholds.back() + 0.4F;
+    auto fixed               = make(backend, 7, options(active_floor));
+    const auto sol           = fixed.solve();
+    REQUIRE(sol.thresholds.back() >= active_floor - 1e-5F);
     REQUIRE(sol.pd >= 0.95 * kMinPd);
+    REQUIRE(sol.pd <= 1.05 * kMinPd);
 
     // A floor below the free last threshold changes nothing.
-    auto free_scheme = make(backend, 7, options());
-    auto low_floor   = make(backend, 7, options(1.0F));
-    REQUIRE(low_floor.solve().thresholds == free_scheme.solve().thresholds);
+    auto low_floor = make(backend, 7, options(1.0F));
+    REQUIRE(low_floor.solve().thresholds == free_sol.thresholds);
 
     // A cut above what min_pd allows: no schedule, the ceiling is reported.
     auto unreachable = make(backend, 7, options(9.0F));
@@ -122,6 +136,30 @@ TEST_CASE("descent: the last threshold has a floor", "[thresholds][descent]") {
     REQUIRE(none.thresholds.empty());
     REQUIRE(none.delivery == detection::Delivery::kShort);
     REQUIRE(none.pd < kMinPd);
+}
+
+TEST_CASE("descent: settings that describe no descent raise at construction",
+          "[thresholds][descent]") {
+    const auto bad = [](auto mutate) {
+        auto shared = options();
+        mutate(shared);
+        return shared;
+    };
+    const std::vector<SharedOptions> cases = {
+        bad([](SharedOptions& s) { s.descent_passes = {{0, 0.3F, 0.1F}}; }),
+        bad([](SharedOptions& s) { s.descent_passes = {{1024, 0.1F, 0.3F}}; }),
+        bad([](SharedOptions& s) {
+            s.descent_passes = {{1024, 0.3F, 0.1F, 1, 8}};
+        }),
+        bad([](SharedOptions& s) { s.descent_nsignal = 0; }),
+        bad([](SharedOptions& s) { s.descent_start = {1.0F, 2.0F}; }),
+        bad([](SharedOptions& s) { s.fap = -1.0; }),
+        bad([](SharedOptions& s) { s.final_threshold = -1.0F; }),
+        bad([](SharedOptions& s) { s.min_pd = 1.0F; }),
+    };
+    for (const auto& shared : cases) {
+        REQUIRE_THROWS_AS(make("cpu", 7, shared), std::invalid_argument);
+    }
 }
 
 } // namespace

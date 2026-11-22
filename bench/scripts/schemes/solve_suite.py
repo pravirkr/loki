@@ -61,7 +61,7 @@ def judge_seed(case: tuple[str, float, float], what: str) -> int:
     return int.from_bytes(hashlib.sha256(key).digest()[:8], "little") >> 1
 
 
-def make(case, seed, backend, mode, nthreads, nbins=64):
+def make(case, seed, backend, mode, nthreads, nbins=64, pd_policy="pin"):
     fam, snr, pd_min = case
     bp, kw = FAMILIES[fam]
     return lt.DynamicThresholdScheme(
@@ -80,6 +80,7 @@ def make(case, seed, backend, mode, nthreads, nbins=64):
         nthreads=nthreads,
         min_pd=pd_min,
         w_terminal=1.0,
+        pd_policy=pd_policy,
     )
 
 
@@ -102,6 +103,12 @@ def judge(case, thresholds, backend, nthreads):
     default="robust",
     type=click.Choice(["shared", "robust", "descent"]),
 )
+@click.option(
+    "--pd-policy",
+    default="pin",
+    type=click.Choice(["pin", "free"]),
+    help="Pd policy for mode 'descent': 'pin' (Pd = min_pd) or 'free' (L = C / Pd).",
+)
 @click.option("--seeds", default=8)
 @click.option("--nthreads", default=16)
 @click.option(
@@ -110,7 +117,7 @@ def judge(case, thresholds, backend, nthreads):
     help="'all' or comma-separated indices of QUICK",
 )
 @click.option("--out", type=click.Path(path_type=pathlib.Path), default=None)
-def main(backend, mode, seeds, nthreads, cases, out):
+def main(backend, mode, pd_policy, seeds, nthreads, cases, out):
     sel = QUICK if cases == "all" else [QUICK[int(i)] for i in cases.split(",")]
     rows, failures = [], 0
     for case in sel:
@@ -119,7 +126,7 @@ def main(backend, mode, seeds, nthreads, cases, out):
         ok = True
         for seed in range(1, seeds + 1):
             t0 = time.perf_counter()
-            scheme = make(case, seed, backend, mode, nthreads)
+            scheme = make(case, seed, backend, mode, nthreads, pd_policy=pd_policy)
             scheme.run(10)
             sol = scheme.solve()
             times.append(time.perf_counter() - t0)

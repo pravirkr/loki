@@ -59,7 +59,7 @@ namespace {
     return f;
 }
 
-constexpr std::string_view kCacheVersion = "1.23.0";
+constexpr std::string_view kCacheVersion = "1.24.0";
 
 /// Threshold design of the planner: mode "descent" of DynamicThresholdScheme
 /// (docs/dts.md) at the true nbins of every region. The seed is fixed: the
@@ -107,7 +107,8 @@ constexpr SizeType kDtsNoiseMin           = SizeType{1} << 11U;
 // deltas run in parallel) and the result does not depend on the count.
 constexpr int kDtsMaxThreads = 4;
 // Bumped with any change of the threshold pipeline.
-constexpr std::string_view kDtsAlgorithm = "descent-chained";
+constexpr std::string_view kDtsAlgorithm = "descent-chained-v2";
+constexpr auto kDtsPdPolicy              = detection::PdPolicy::kPin;
 
 double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
     if (cfg.get_nparams() <= 1) {
@@ -285,6 +286,12 @@ public:
             throw std::invalid_argument(
                 "EPRegionPlanner: min_pd must be in (0, 1]");
         }
+        if (m_min_pd >= 1.0F) {
+            spdlog::warn("EPRegionPlanner: min_pd=1 cannot be met; the "
+                         "thresholds are designed for Pd={:.4g} (min_pd is "
+                         "kept as configured).",
+                         kDtsMaxTarget);
+        }
         // Checked here, before any engine is built.
         if (!utils::is_finite(m_ref_ducy) || m_ref_ducy <= 0.0F ||
             m_ref_ducy >= 1.0F) {
@@ -347,6 +354,8 @@ public:
         file.createAttribute("device_arch", device_arch);
         file.createAttribute("dts_batch_size", kDtsBatchSize);
         file.createAttribute("dts_algorithm", std::string(kDtsAlgorithm));
+        file.createAttribute("dts_pd_policy",
+                             detection::pd_policy_to_string(kDtsPdPolicy));
         file.createAttribute("dts_w_terminal", kDtsWTerminal);
         file.createAttribute("dts_mode", std::string(kDtsMode));
         file.createAttribute("ring_margin_z", detail::kEPRingMarginZ);
@@ -621,6 +630,16 @@ public:
                     "EPRegionPlanner: cache mismatch for 'dts_algorithm': "
                     "expected '{}', found '{}'",
                     kDtsAlgorithm, file_algorithm));
+            }
+            const auto expected_policy =
+                detection::pd_policy_to_string(kDtsPdPolicy);
+            std::string file_policy;
+            file.getAttribute("dts_pd_policy").read(file_policy);
+            if (file_policy != expected_policy) {
+                throw std::invalid_argument(fmt::format(
+                    "EPRegionPlanner: cache mismatch for 'dts_pd_policy': "
+                    "expected '{}', found '{}'",
+                    expected_policy, file_policy));
             }
             check_attr_double("dts_w_terminal", kDtsWTerminal);
             check_attr_double("ring_margin_z", detail::kEPRingMarginZ);
@@ -1019,8 +1038,7 @@ private:
     }
 
     /// Pd the threshold design aims at. min_pd = 1 cannot be met: it aims at
-    /// 0.999, and the planner still warns that its own measured Pd is below
-    /// min_pd.
+    /// kDtsMaxTarget instead (the constructor warns).
     float scheme_target() const {
         return m_min_pd >= 1.0F ? kDtsMaxTarget : m_min_pd;
     }
@@ -1044,6 +1062,7 @@ private:
         detection::SharedOptions shared;
         shared.min_pd     = scheme_target();
         shared.w_terminal = kDtsWTerminal;
+        shared.pd_policy  = kDtsPdPolicy;
         return detection::detail::make_thresholds_engine(
             branching_pattern, m_ref_ducy, nbins, kDtsNTrials, kDtsNProbs,
             kDtsProbMin, snr, kDtsNThresholds, ducy_max, wtsp, kDtsBeamWidth,
@@ -1090,9 +1109,10 @@ private:
         const auto engine   = make_threshold_engine(bp, nbins, kDtsSeed);
         const auto budget   = sample_budget(nbins, memory_limit_gb);
         detection::detail::DescentOptions options;
-        options.nsignal = std::min(options.nsignal, budget.nbank);
-        options.nbank   = budget.nbank;
-        options.nnoise  = budget.nnoise;
+        options.nsignal   = std::min(options.nsignal, budget.nbank);
+        options.nbank     = budget.nbank;
+        options.nnoise    = budget.nnoise;
+        options.pd_policy = kDtsPdPolicy;
         options.nthreads =
             std::clamp(m_base_cfg.get_nthreads(), 1, kDtsMaxThreads);
         options.start =

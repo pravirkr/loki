@@ -75,21 +75,22 @@ invalidation.
 
 On three production configurations (2, 3 and 5 parameters, 127 stages, 16 to
 1024 bins, target 0.1) every region's thresholds, counted on 2^17 independent
-signal trials, held Pd 0.0992-0.1036 (the previous design, `shared` with a
-re-fit above 128 bins: 0.0997-0.167), and cost 18-28 % fewer evaluated leaves
-per plan (geometric mean: 0.723, 0.818 and 0.789; every single region from 46 %
-fewer to 2 % fewer). On the 5-parameter circular plan `max_sugg` fell by 23 %
-(28.8 to 23.7 GB peak chunk); on the 2- and 3-parameter plans `max_sugg` rose
-by 5 % and 36 %, with the same number of chunks.
+signal trials, held Pd 0.0995-0.1048 (the previous design, `shared` with a
+re-fit above 128 bins: 0.0997-0.166), and cost 19-28 % fewer evaluated leaves
+per plan (geometric mean: 0.721, 0.810 and 0.790; every single region from 46 %
+fewer to 3 % fewer). The peak chunk population `max_sugg` rose by 4.4 %, 34.2 %
+and 0.6 % (2, 3 and 5 parameters; peak chunk memory 1.43 to 1.44, 5.48 to 5.58
+and 28.83 to 28.97 GB), with the same number of chunks: fewer leaves over the
+whole tree, but a higher peak population.
 
 Memory and runtime of a design are bounded. It allocates no search pools,
 only samples, and their sizes follow the memory limit (a quarter of it, at
 most 4 GB: 24 B per trial and bin for a signal sample, 12 B for a noise
 evaluation; at most 2^17 signal and 2^15 noise trials, at least 2^13 and
-2^11). On CUDA a chained design takes 0.16-0.22 s up to 128 bins and 0.24 /
-0.33 / 0.52-0.60 s at 256 / 512 / 1024 bins (whole `--plan-only` plans of the
-three production searches: 3.2 / 3.0 / 13.8 s, against 30.6 / 18.1 / 29.0 s
-with the previous design). The designs run once per plan and are kept in the
+2^11). On CUDA a chained design takes 0.11-0.16 s up to 128 bins and 0.19 /
+0.28 / 0.52 s at 256 / 512 / 1024 bins (whole `--plan-only` plans of the
+three production searches, warm: 2.5-2.7 / 2.5 / 13.1-13.2 s, against
+30.6 / 18.1 / 29.0 s with the previous design). The designs run once per plan and are kept in the
 plan cache.
 
 A chunk is sized from its own design's final noise evaluation: see [Planning](#planning). A
