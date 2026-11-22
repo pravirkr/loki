@@ -84,7 +84,7 @@ raw_fraction = 0.0
 # change no search: they have their own hash and may change at any time.
 [collect]
 # radius_bins = 2.0       # one source: frequencies within this many 1/T_obs
-# harmonic_max = 8        # label harmonics p/q with p, q up to this; 0: off
+# harmonic_max = 16       # label harmonics p/q with p, q up to this; 0: off
 # dm_zero_max = 0.0       # strongest at the lowest DM, at most this: undispersed
 # Removal rules, all off by default; every removal goes to collect/ledger.jsonl.
 # snr_min = 0.0           # remove groups below this S/N

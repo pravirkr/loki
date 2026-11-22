@@ -13,9 +13,10 @@ from loki_survey.collect import (
     collect,
     dm_call,
     group_by_frequency,
+    harmonic_links,
     load_groups,
 )
-from loki_survey.config import Analysis, Collect
+from loki_survey.config import Analysis, Collect, Evaluate
 
 from .synthetic import (
     HARMONIC,
@@ -107,6 +108,17 @@ def test_a_changed_output_is_refused(tmp_path: Path) -> None:
         handle.write(b"\0")
     with pytest.raises(ValueError, match="sha256"):
         collect(run, resolved(), units)
+
+
+def test_collect_labels_every_ratio_evaluate_matches() -> None:
+    # A bright pulsar's 1/11 subharmonic: evaluate matches it, so collect's
+    # default must label it too (it stopped at 8 before).
+    assert Collect().harmonic_max == Evaluate().harmonic_max
+    f0 = np.array([400.0, 400.0 / 11.0, 400.0 / 17.0])
+    snr = np.array([100.0, 10.0, 9.0])
+    links = harmonic_links(f0, snr, np.full(3, 1e-3), Collect().harmonic_max)
+    assert (1, 0, 1, 11) in links
+    assert not any(child == 2 for child, *_ in links)  # 1/17: beyond the limit
 
 
 def test_grouping_links_neighbours_within_the_radius() -> None:

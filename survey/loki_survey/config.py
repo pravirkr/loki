@@ -127,9 +127,10 @@ class Survey:
 # Two candidates from different units are one source when their frequencies
 # differ by at most this many resolutions 1 / T_obs.
 DEFAULT_RADIUS_BINS = 2.0
-# Harmonic ratios p/q are labelled up to this numerator and denominator.
-DEFAULT_COLLECT_HARMONIC_MAX = 8
+# Harmonic ratios p/q are labelled up to this numerator and denominator, the
+# same in collect and evaluate: a ratio evaluate matches is one collect labels.
 DEFAULT_EVALUATE_HARMONIC_MAX = 16
+DEFAULT_COLLECT_HARMONIC_MAX = DEFAULT_EVALUATE_HARMONIC_MAX
 # Fractional frequency window for a catalogue match: a topocentric frequency
 # differs from a barycentric one by up to the Earth's orbital speed over c.
 DEFAULT_DOPPLER = 1.0e-4
