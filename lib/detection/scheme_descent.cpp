@@ -866,7 +866,9 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     }
     // The schedule in units of the unpruned signal score carries over to
     // other patterns and bin counts: z_s = (mean_s - g_s) / sd_s.
-    const auto [mean, sd] = signal.moments();
+    const auto moments = signal.moments();
+    const auto& mean   = moments.first;
+    const auto& sd     = moments.second;
     // Common shift of stages to @p target_pd; when the last threshold sits on
     // the active floor (or a downward shift would take it below), keep the
     // last stage at the floor and shift [0, nstages - 1) (KKT complementary
