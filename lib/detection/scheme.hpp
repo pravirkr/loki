@@ -121,6 +121,14 @@ struct SchemeInputs {
 /// std::invalid_argument naming @p who.
 void validate_scheme_inputs(const SchemeInputs& in, std::string_view who);
 
+/// Checks the inputs of the simulated signal and noise alone (branching
+/// pattern of at least @p min_stages stages, nbins, ref_ducy, ducy_max, wtsp,
+/// snr_final), for engines that only evaluate; the grid fields of @p in are
+/// not read. Throws std::invalid_argument naming @p who.
+void validate_signal_inputs(const SchemeInputs& in,
+                            SizeType min_stages,
+                            std::string_view who);
+
 /// Logs the first stage that ended with no state (nothing survived into it).
 void warn_empty_stages(std::span<const State> states,
                        SizeType nstages,

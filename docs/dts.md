@@ -3,7 +3,7 @@
 `loki::detection::DynamicThresholdScheme` (Python
 `libloki.thresholds.DynamicThresholdScheme`) designs the pruning thresholds of
 the hierarchical (EP) search: one threshold per stage. This page describes the
-problem, the five modes, the default pipeline (`shared`), the bank descent
+problem, the three modes, the default pipeline (`shared`), the bank descent
 (`descent`) and why they are built the way they are. Code comments only describe the implementation.
 
 ## Problem
@@ -37,8 +37,8 @@ often have their optimum there).
 
 Neither C nor Pd has a closed form (correlated, maximum-over-templates random
 walks over up to ~130 stages), so both are Monte Carlo estimates, and an
-exhaustive search over the schedules is intractable. Four modes are a dynamic
-programme over cells (stage, threshold, Pd bin) that keeps one candidate per
+exhaustive search over the schedules is intractable. The search modes
+(`improved`, `shared`) are a dynamic programme over cells (stage, threshold, Pd bin) that keeps one candidate per
 cell: an approximate, compressed-state search with no optimality guarantee.
 The cell is not a sufficient state (two paths into one cell leave different
 noise populations behind), its edge weights are Monte Carlo estimates, and
@@ -322,11 +322,12 @@ smallest block), `descent_nsignal` (2^15; 2^14 costs 2-7 % in C),
 and the constructor's `ntrials`, `nprobs`, `nthresholds` and beam settings are
 not used. The constructor checks these settings and throws
 `std::invalid_argument` (`ValueError` in Python) for any that describe no
-descent: `min_pd` outside (0, 1); `fap` outside [0, 1); a negative or
+descent: `min_pd` outside (0, 1); a negative or non-finite `w_terminal`;
+`fap` outside [0, 1); a negative or
 non-finite `final_threshold`; `descent_nsignal` outside [1, 2^20]; a pass
 whose `ntrials` is outside [1, 2^20], whose margin or step is not finite and
-positive, whose step is not below its margin (a down move would have no room)
-or whose block sizes are not 1 <= smallest <= largest; a `descent_start`
+positive, whose step is not below its margin or leaves no more than 0.02
+between them (a down move would have no room) or whose block sizes are not 1 <= smallest <= largest; a `descent_start`
 without exactly one finite value per stage. Other modes do not read the
 descent settings and do not check them. A given start must be a plausible
 schedule: one far below the noise sits on a plateau where no block move

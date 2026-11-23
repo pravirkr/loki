@@ -11,6 +11,7 @@
 #include <thrust/device_vector.h>
 
 #include "lib/cuda/thresholds_kernels_cuda.cuh"
+#include "lib/detail/utils.hpp"
 
 // GenericScorer<MAX_BINS>::run_warp (one warp per trial, used for padded
 // widths >= 128) must give the same bits as run (one thread per trial, the
@@ -54,7 +55,7 @@ __global__ void score_warp_kernel(const float* __restrict__ in,
                                   float* __restrict__ out,
                                   float* __restrict__ scores,
                                   TrialSimParams p) {
-    __shared__ float s_prefix[MAX_BINS];
+    __shared__ alignas(16) float s_prefix[MAX_BINS]; // float4 stores
     const uint32_t row = blockIdx.x;
     const auto off     = static_cast<uint64_t>(row) * p.nbins_padded;
     const float score  = GenericScorer<MAX_BINS>::template run_warp<true>(
@@ -152,7 +153,7 @@ template <uint32_t MAX_BINS> void compare_paths(uint32_t nbins) {
     const auto warp = run_path(true);
     for (uint32_t r = 0; r < kRows; ++r) {
         INFO("nbins " << nbins << " row " << r);
-        REQUIRE(std::isfinite(ref.scores[r]));
+        REQUIRE(loki::utils::is_finite(ref.scores[r]));
         REQUIRE(std::bit_cast<uint32_t>(warp.scores[r]) ==
                 std::bit_cast<uint32_t>(ref.scores[r]));
     }

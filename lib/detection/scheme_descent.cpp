@@ -752,6 +752,11 @@ void validate_descent_options(const DescentOptions& options, SizeType nstages) {
         if (pass.step >= pass.margin) {
             fail(name + ": step must be below margin");
         }
+        if (pass.margin - pass.step <= kMarginGuard) {
+            // A down move needs room above the reference plus the guard.
+            fail(name + ": margin - step must exceed 0.02 (no room for down "
+                        "moves otherwise)");
+        }
         if (pass.min_block == 0 || pass.min_block > pass.max_block) {
             fail(name + ": need 1 <= min_block <= max_block");
         }
@@ -803,6 +808,10 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
     error_check::check(min_pd > 0.0F && min_pd < 1.0F,
                        "descent: min_pd must be in (0, 1)");
     validate_descent_options(options, engine.get_nstages());
+    if (!utils::is_finite(w_terminal) || w_terminal < 0.0) {
+        throw std::invalid_argument(
+            "descent: w_terminal must be finite and >= 0");
+    }
     SchemeSolution out;
     out.min_pd             = min_pd;
     out.w_terminal         = static_cast<float>(w_terminal);

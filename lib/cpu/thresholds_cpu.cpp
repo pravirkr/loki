@@ -1031,6 +1031,23 @@ public:
                  .nthresholds       = nthresholds,
                  .batch_size        = 1},
                 "ThresholdsCpu");
+        } else {
+            // Evaluation only (any grid, one stage allowed): the signal and
+            // noise the engine simulates must still be well defined.
+            detail::validate_signal_inputs(
+                {.branching_pattern = m_branching_pattern,
+                 .ref_ducy          = ref_ducy,
+                 .ducy_max          = ducy_max,
+                 .wtsp              = wtsp,
+                 .beam_width        = beam_width,
+                 .prob_min          = prob_min,
+                 .snr_final         = snr_final,
+                 .nbins             = nbins,
+                 .ntrials           = ntrials,
+                 .nprobs            = nprobs,
+                 .nthresholds       = nthresholds,
+                 .batch_size        = 1},
+                1, "ThresholdsCpu");
         }
         m_profile    = simulation::generate_folded_profile(nbins, ref_ducy);
         m_thresholds = detail::compute_thresholds(0.1F, snr_final, nthresholds);

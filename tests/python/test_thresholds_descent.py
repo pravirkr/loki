@@ -194,6 +194,7 @@ def test_descent_has_no_search_states(backend: str, tmp_path) -> None:
         scheme.get_states,
         lambda: scheme.get_best_path_thresholds(MIN_PD),
         lambda: scheme.save(str(tmp_path)),
+        lambda: scheme.calibrate(MIN_PD),
     ):
         with pytest.raises(RuntimeError, match="no search states"):
             call()
@@ -343,6 +344,13 @@ BAD_SETTINGS = [
     ({"descent_passes": [(1024, 0.1, 0.3, 8, 1)]}, "below margin"),
     ({"descent_passes": [(1024, 0.3, 0.1, 1, 8)]}, "min_block"),
     ({"descent_passes": [(1024, 0.3, 0.1, 8, 0)]}, "min_block"),
+    ({"descent_passes": [(1024, 0.025, 0.0125, 8, 1)]}, "margin - step"),
+    ({"w_terminal": float("nan")}, "w_terminal"),
+    ({"w_terminal": -1.0}, "w_terminal"),
+    ({"nbins": 2000}, "nbins"),
+    ({"ref_ducy": 0.0}, "ref_ducy"),
+    ({"wtsp": 0.0}, "wtsp"),
+    ({"snr_final": float("nan")}, "finite"),
     ({"descent_start": [1.0] * (len(BRANCHING) - 1)}, "one starting threshold"),
     ({"descent_start": [float("nan")] * len(BRANCHING)}, "finite"),
 ]

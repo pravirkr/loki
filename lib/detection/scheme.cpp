@@ -254,18 +254,20 @@ std::vector<float> score_sigma(std::span<const float> h1_scores,
     return sigma;
 }
 
-void validate_scheme_inputs(const SchemeInputs& in, std::string_view who) {
+void validate_signal_inputs(const SchemeInputs& in,
+                            SizeType min_stages,
+                            std::string_view who) {
     const auto fail = [who](const std::string& msg) {
         throw std::invalid_argument(fmt::format("{}: {}", who, msg));
     };
-    for (const float x : {in.ref_ducy, in.ducy_max, in.wtsp, in.beam_width,
-                          in.prob_min, in.snr_final}) {
+    for (const float x : {in.ref_ducy, in.ducy_max, in.wtsp, in.snr_final}) {
         if (!utils::is_finite(x)) {
             fail("float parameters must be finite");
         }
     }
-    if (in.branching_pattern.size() < 2) {
-        fail("branching pattern needs at least 2 stages");
+    if (in.branching_pattern.size() < min_stages) {
+        fail(fmt::format("branching pattern needs at least {} stage{}",
+                         min_stages, min_stages == 1 ? "" : "s"));
     }
     for (SizeType i = 0; i < in.branching_pattern.size(); ++i) {
         const float b = in.branching_pattern[i];
@@ -278,20 +280,36 @@ void validate_scheme_inputs(const SchemeInputs& in, std::string_view who) {
     if (in.nbins < 4 || in.nbins > 1024) {
         fail(fmt::format("nbins={} must be in [4, 1024]", in.nbins));
     }
-    if (in.ntrials == 0 || in.nprobs == 0 || in.batch_size == 0) {
-        fail("ntrials, nprobs and batch_size must be positive");
-    }
-    if (in.nthresholds < 2 || !(in.snr_final > 0.1F)) {
-        fail("need nthresholds >= 2 and a finite snr_final > 0.1");
-    }
-    if (!(in.prob_min > 0.0F && in.prob_min < 1.0F)) {
-        fail(fmt::format("prob_min={} must be in (0, 1)", in.prob_min));
+    if (!(in.snr_final > 0.1F)) {
+        fail("need a finite snr_final > 0.1");
     }
     if (!(in.ref_ducy > 0.0F && in.ref_ducy < 1.0F) ||
         !(in.ducy_max > 0.0F && in.ducy_max < 1.0F)) {
         fail("ref_ducy and ducy_max must be in (0, 1)");
     }
-    if (!(in.wtsp > 0.0F) || !(in.beam_width > 0.0F)) {
+    if (!(in.wtsp > 0.0F)) {
+        fail("wtsp must be positive");
+    }
+}
+
+void validate_scheme_inputs(const SchemeInputs& in, std::string_view who) {
+    const auto fail = [who](const std::string& msg) {
+        throw std::invalid_argument(fmt::format("{}: {}", who, msg));
+    };
+    if (!utils::is_finite(in.beam_width) || !utils::is_finite(in.prob_min)) {
+        fail("float parameters must be finite");
+    }
+    validate_signal_inputs(in, 2, who);
+    if (in.ntrials == 0 || in.nprobs == 0 || in.batch_size == 0) {
+        fail("ntrials, nprobs and batch_size must be positive");
+    }
+    if (in.nthresholds < 2) {
+        fail("need nthresholds >= 2 and a finite snr_final > 0.1");
+    }
+    if (!(in.prob_min > 0.0F && in.prob_min < 1.0F)) {
+        fail(fmt::format("prob_min={} must be in (0, 1)", in.prob_min));
+    }
+    if (!(in.beam_width > 0.0F)) {
         fail("wtsp and beam_width must be positive");
     }
 }

@@ -142,8 +142,9 @@ void bind_thresholds(py::module_& m) {
              "optimistic Monte Carlo estimates. show_progress=False draws no "
              "progress bar; set_progress_mode() chooses how one is drawn.")
         .def("save", &DynamicThresholdScheme::save, py::arg("outdir") = "./",
-             "Writes the search (states, grids, beam) as HDF5, in every mode; "
-             "after solve() also a group 'solution'.")
+             "Writes the search (states, grids, beam) as HDF5 in modes "
+             "'improved' and 'shared' (raises in 'descent'); after solve() "
+             "also a group 'solution'.")
         .def(
             "solve",
             [](DynamicThresholdScheme& self) {

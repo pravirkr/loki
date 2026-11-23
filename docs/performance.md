@@ -1122,7 +1122,7 @@ The current default (`pd_policy = "pin"`) and `"free"` on the checks above:
   bins, bit-identical to `GenericScorer::run`), and above 128 bins evaluates the
   2^17-trial pin/report signal banks with stage-pruned kernels
   (`h1_margins_above` / `count_h1_survivors`, CUB compaction every 8 stages,
-  one H1 fold buffer instead of two). On the host, a 64 × 32 cache-blocked
+  two fold buffers instead of the (nstages + 1) × ntrials score matrix). On the host, a 64 × 32 cache-blocked
   `SignalSample` transpose eliminates power-of-2 L1 set-aliasing at 2^15
   trials, `pin_shift` runs vectorized on the active trials above `g_ref`
   (exact fallback otherwise), and OpenMP is limited to multi-block `block_deltas`

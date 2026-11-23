@@ -224,7 +224,7 @@ struct EPCudaHostMemory {
  * Subdivides a frequency search range into memory-bounded chunks.
  * generate_ffa_regions() gives the regions (nbins, eta), which are never
  * merged. Each region's thresholds are designed once with
- * DynamicThresholdScheme (mode "shared" on both backends) over its whole
+ * DynamicThresholdScheme (mode "descent" on both backends) over its whole
  * band, and every chunk of the region runs them. The region is split from its
  * top frequency down. A candidate chunk's noise population is the design's on
  * the chunk's own branching pattern (exact: a schedule's pass rates do not

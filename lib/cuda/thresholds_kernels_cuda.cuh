@@ -372,7 +372,8 @@ template <uint32_t MAX_BINS> struct GenericScorer {
 
     /// Warp-collaborative counterpart of run(), bit-identical to it: all 32
     /// lanes generate the fold coalesced in shared memory @p s_prefix
-    /// (MAX_BINS floats for this warp), lane 0 forms the sequential IEEE
+    /// (MAX_BINS floats for this warp, 16-byte aligned: it is written as
+    /// float4), lane 0 forms the sequential IEEE
     /// prefix sum in bin order, and all 32 lanes scan the boxcar windows and
     /// reduce max_diff via exact warp-shuffle fmaxf. Eliminates per-thread
     /// local-memory spilling at nbins >= 128.
@@ -641,7 +642,8 @@ __global__ __launch_bounds__(kBlock, 1) void simulate_score_parents_warp_kernel(
     uint32_t nprobs,
     uint32_t nbranches) {
     static constexpr uint32_t kWarps = kBlock / 32U;
-    __shared__ float s_prefix[kWarps * Scorer::kMaxBins];
+    // run_warp stores float4 into it: 16-byte alignment is required.
+    __shared__ alignas(16) float s_prefix[kWarps * Scorer::kMaxBins];
     const uint32_t warp_in_block = threadIdx.x / 32U;
     const uint32_t lane          = threadIdx.x & 31U;
     const uint64_t tid =
@@ -790,7 +792,8 @@ __global__ __launch_bounds__(kBlock, 1) void evaluate_stage_warp_kernel(
     uint32_t tid_limit,
     uint32_t row_offset) {
     static constexpr uint32_t kWarps = kBlock / 32U;
-    __shared__ float s_prefix[kWarps * Scorer::kMaxBins];
+    // run_warp stores float4 into it: 16-byte alignment is required.
+    __shared__ alignas(16) float s_prefix[kWarps * Scorer::kMaxBins];
     const uint32_t warp_in_block = threadIdx.x / 32U;
     const uint32_t lane          = threadIdx.x & 31U;
     const uint64_t tid64 = (static_cast<uint64_t>(blockIdx.x) * kWarps) +
@@ -880,7 +883,8 @@ __global__ __launch_bounds__(kBlock, 1) void h1_pruned_stage_warp_kernel(
     float threshold,
     float min_margin) {
     static constexpr uint32_t kWarps = kBlock / 32U;
-    __shared__ float s_prefix[kWarps * Scorer::kMaxBins];
+    // run_warp stores float4 into it: 16-byte alignment is required.
+    __shared__ alignas(16) float s_prefix[kWarps * Scorer::kMaxBins];
     const uint32_t warp_in_block = threadIdx.x / 32U;
     const uint32_t lane          = threadIdx.x & 31U;
     const uint64_t k64 =

@@ -1957,7 +1957,11 @@ public:
         thrust::device_vector<uint32_t> next_trial(chunk);
         thrust::device_vector<uint8_t> keep(chunk);
         thrust::device_vector<uint32_t> n_sel(1, 0U);
-        margins.assign(ntrials, std::numeric_limits<float>::max());
+        // The initial value is written on @p stream, in order with the
+        // stages that read it.
+        margins.resize(ntrials);
+        thrust::fill(thrust::cuda::par.on(stream), margins.begin(),
+                     margins.end(), std::numeric_limits<float>::max());
 
         size_t temp_bytes = 0;
         cuda_utils::check_cuda_call(
@@ -2044,6 +2048,10 @@ public:
                 var_in += kVarAdd;
             }
         }
+        // The local buffers are freed on return: the last stages must have
+        // finished with them.
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
     }
 
     std::vector<float> h1_margins_above(std::span<const float> thresholds,

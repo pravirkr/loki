@@ -172,8 +172,8 @@ fill the tree, and the plan prints how much host memory that would take. On
 the CPU the key is ignored with a warning: `max_process_memory_gb` already
 caps the host memory there.
 The model fits execution buffers. The threshold designs run before the sweep
-allocates, and their search pools are checked against the limit on their
-own; tail buffers and temporary peaks are covered by fixed reserves. As for `FFAFreqSweep`, the plan is fitted to
+allocates, and their samples are sized from the limit on their own (see
+above); tail buffers and temporary peaks are covered by fixed reserves. As for `FFAFreqSweep`, the plan is fitted to
 
 ```text
 limit = min(max_process_memory_gb, free device memory - kDeviceReserveGB)   (1 GB)

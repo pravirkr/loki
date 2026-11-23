@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -156,6 +157,13 @@ TEST_CASE("descent: settings that describe no descent raise at construction",
         bad([](SharedOptions& s) { s.fap = -1.0; }),
         bad([](SharedOptions& s) { s.final_threshold = -1.0F; }),
         bad([](SharedOptions& s) { s.min_pd = 1.0F; }),
+        bad([](SharedOptions& s) {
+            s.descent_passes = {{1024, 0.025F, 0.0125F}};
+        }),
+        bad([](SharedOptions& s) {
+            s.w_terminal = std::numeric_limits<float>::quiet_NaN();
+        }),
+        bad([](SharedOptions& s) { s.w_terminal = -1.0F; }),
     };
     for (const auto& shared : cases) {
         REQUIRE_THROWS_AS(make("cpu", 7, shared), std::invalid_argument);

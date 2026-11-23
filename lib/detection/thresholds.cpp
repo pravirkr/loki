@@ -124,6 +124,10 @@ void check_descent_settings(const SharedOptions& shared, SizeType nstages) {
         shared.min_pd >= 1.0F) {
         throw std::invalid_argument("descent: min_pd must be in (0, 1)");
     }
+    if (!utils::is_finite(shared.w_terminal) || shared.w_terminal < 0.0F) {
+        throw std::invalid_argument(
+            "descent: w_terminal must be finite and >= 0");
+    }
     if (!utils::is_finite(shared.fap) || shared.fap < 0.0 ||
         shared.fap >= 1.0) {
         throw std::invalid_argument(
@@ -362,6 +366,7 @@ DynamicThresholdScheme::evaluate(std::span<const float> thresholds,
 CalibratedPath
 DynamicThresholdScheme::calibrate(float min_pd,
                                   const CalibrationOptions& opts) const {
+    check_has_search_states(m_impl->m_mode, "calibrate");
     return detail::calibrate_path(*m_impl->m_engine, min_pd, opts);
 }
 std::vector<float>
