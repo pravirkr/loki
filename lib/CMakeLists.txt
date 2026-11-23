@@ -46,8 +46,9 @@ set_property(SOURCE io/candidate_results.cpp APPEND PROPERTY COMPILE_DEFINITIONS
 set_property(SOURCE search/provenance.cpp APPEND PROPERTY COMPILE_DEFINITIONS
              LOKI_PRODUCER_VERSION="${PROJECT_VERSION}")
 
-# The git commit of the build, for /run_stats: regenerated at every build
-# (written only when it changes) as "lib/generated/git_commit.hpp".
+# The git commit of the build, for loki::git_commit() (lib/common/build_info.cpp,
+# the header's one user): regenerated at every build (written only when it
+# changes) as "lib/generated/git_commit.hpp".
 set(LOKI_GIT_COMMIT_HEADER ${PROJECT_BINARY_DIR}/lib/generated/git_commit.hpp)
 execute_process(
   COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR} -DOUT=${LOKI_GIT_COMMIT_HEADER} -P

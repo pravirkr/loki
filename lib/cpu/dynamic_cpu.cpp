@@ -30,6 +30,7 @@
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
 #include "lib/detection/kadane.hpp"
+#include "lib/search/ep_support.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::core {
@@ -167,6 +168,7 @@ BasePruneDPFuncts<FoldType>::BasePruneDPFuncts(
       m_batch_size(batch_size),
       m_branch_max(branch_max),
       m_scorer(std::make_unique<detail::EPScorer<FoldType>>(m_cfg)) {
+    search::detail::check_ep_seed_grid(m_param_grid_count_init, "EP pruning");
     SizeType n_coords_init = 1;
     for (const auto count : m_param_grid_count_init) {
         n_coords_init *= count;

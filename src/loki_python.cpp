@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/backend.hpp"
+#include "loki/common/build_info.hpp"
 #include "loki/common/interrupt.hpp"
 #include "loki/common/progress.hpp"
 
@@ -21,6 +22,9 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(libloki, m) {
     m.doc() = "Python bindings for the loki library";
+    // The project version, which pip's metadata also reads: loki.__version__
+    // comes from here, so a build on PYTHONPATH needs no install.
+    m.attr("__version__") = LOKI_VERSION;
 
     py::add_ostream_redirect(m, "ostream_redirect");
     // A long call stopped by Ctrl-C (see LongCall in pybind_utils.hpp).
@@ -46,6 +50,10 @@ PYBIND11_MODULE(libloki, m) {
             return names;
         },
         "Backends compiled into this build, e.g. ['cpu'] or ['cpu', 'cuda'].");
+
+    // `git describe --always --dirty` of the source this module was built
+    // from, or "unknown" outside a git checkout.
+    m.attr("git_commit") = std::string(loki::git_commit());
 
     m.def(
         "set_log_level",
