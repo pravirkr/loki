@@ -17,7 +17,8 @@
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
-#include "lib/generated/git_commit.hpp"
+#include "loki/common/build_info.hpp"
+
 #include "lib/io/h5_layout.hpp"
 
 namespace loki::search {
@@ -230,7 +231,7 @@ std::uint64_t fnv1a64(std::string_view text) {
 /// path of the run when the file records them.
 void write_provenance_summary(HighFive::File& file, HighFive::Group& out) {
     out.createAttribute("loki_version", std::string(LOKI_PRODUCER_VERSION));
-    out.createAttribute("loki_commit", std::string(LOKI_GIT_COMMIT));
+    out.createAttribute("loki_commit", std::string(loki::git_commit()));
     if (file.hasAttribute("config_effective")) {
         const auto config =
             file.getAttribute("config_effective").read<std::string>();
