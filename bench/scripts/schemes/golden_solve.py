@@ -1,6 +1,6 @@
 """Bit-exact CUDA regression golden for DynamicThresholdScheme.solve().
 
-``record`` stores the thresholds, Pd and cost of modes "shared" and "robust"
+``record`` stores the thresholds, Pd and cost of mode "shared"
 on the cases of solve_suite.py (two seeds each) in the gitignored
 ``golden/solve_golden.json``; ``check`` reruns them and compares bit for bit.
 Use it to show that a refactor leaves the schedules unchanged. The golden is
@@ -13,7 +13,7 @@ workspace's E18/E20/E22 solvers. The guided beam changed the search, so it no
 longer applies.)
 
     python golden_solve.py record
-    python golden_solve.py check [--mode shared|robust]...
+    python golden_solve.py check
 """
 
 from __future__ import annotations
@@ -50,11 +50,11 @@ def provenance() -> dict:
 
 @click.command()
 @click.argument("cmd", type=click.Choice(["record", "check"]))
-@click.option("--mode", "modes", multiple=True, default=("shared", "robust"))
+@click.option("--mode", "modes", multiple=True, default=("shared",))
 def main(cmd: str, modes: tuple[str, ...]) -> None:
     if cmd == "record":
         cases = []
-        for mode in ("shared", "robust"):
+        for mode in ("shared",):
             for case in QUICK:
                 for seed in SEEDS:
                     sol = run_case(mode, case, seed)

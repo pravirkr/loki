@@ -38,6 +38,22 @@ struct SearchPath {
     double c{0.0};  ///< in-run total cost (with the terminal weight)
 };
 
+/** One noise evaluation of a schedule with its ancestry: per stage, every
+ * trial's score and the slot of the previous stage it continues. Mode
+ * "descent" counts the noise survival of any schedule above the simulated one
+ * along the stored ancestry.
+ */
+struct NoiseGenealogy {
+    SizeType ntrials{0};
+    /// Stage-major (nstages x ntrials): the score of slot t at stage s.
+    std::vector<float> scores;
+    /// Stage-major: parent[s][t] is the slot of stage s that slot t of stage
+    /// s + 1 continues (the last row is unused).
+    std::vector<uint32_t> parent;
+    /// Fraction of the trials above the simulated schedule, per stage.
+    std::vector<double> pass_rate;
+};
+
 /** A fresh unpruned signal sample of solve() (simulate_h1_scores), kept
  * where the engine simulated it: the steps of solve() need only per-trial
  * margins and per-stage minima, not the stage x trial matrix.
@@ -110,13 +126,7 @@ public:
     virtual std::string save(const std::string& outdir) const = 0;
     /// Seed of the search (the seed of every derived stream of solve()).
     virtual uint64_t get_seed() const = 0;
-    /// Mode "robust": the cost and Pd of the terminal path selected at the
-    /// end of the first pass (empty thresholds when none met @p min_pd).
-    virtual SearchPath first_pass_path(float /*min_pd*/) const {
-        throw std::logic_error(
-            "first_pass_path: the engine is not in mode 'robust'");
-    }
-    /// Modes "shared" and "robust": the signal trials the search counted its Pd
+    /// Mode "shared": the signal trials the search counted its Pd
     /// on, stage-major (nstages x nh1), after run().
     virtual std::vector<float> shared_h1_bank() const {
         throw std::logic_error(
@@ -131,11 +141,45 @@ public:
     /// resampled. Returns the H1 scores, stage-major (nstages x ntrials).
     virtual std::vector<float> simulate_h1_scores(SizeType ntrials,
                                                   uint64_t seed) const = 0;
+    /// evaluate()'s noise branch for @p thresholds, keeping the scores and
+    /// the ancestry of every trial (mode "descent").
+    virtual NoiseGenealogy
+    simulate_h0_genealogy(std::span<const float> /*thresholds*/,
+                          SizeType /*ntrials*/,
+                          uint64_t /*seed*/) const {
+        throw std::logic_error(
+            "simulate_h0_genealogy: not implemented on this backend");
+    }
     /// A signal bank of simulate_h1_scores(n, seed); the default keeps the
     /// matrix on the host.
     virtual std::unique_ptr<SignalBank> make_signal_bank(SizeType n,
                                                          uint64_t seed) const {
         return std::make_unique<HostSignalBank>(simulate_h1_scores(n, seed), n);
+    }
+    /// Margins of simulate_h1_scores(n, seed) against @p thresholds for every
+    /// trial whose running margin stays above @p min_margin; trials that drop
+    /// to or below @p min_margin at an earlier stage stop there and hold a
+    /// value <= @p min_margin. Exact for every trial with margin > @p
+    /// min_margin.
+    virtual std::vector<float>
+    h1_margins_above(std::span<const float> thresholds,
+                     float min_margin,
+                     SizeType n,
+                     uint64_t seed) const {
+        (void)min_margin;
+        return make_signal_bank(n, seed)->margins(thresholds);
+    }
+    /// Trials of simulate_h1_scores(n, seed) that survive every stage of
+    /// @p thresholds (margin > 0).
+    virtual SizeType count_h1_survivors(std::span<const float> thresholds,
+                                        SizeType n,
+                                        uint64_t seed) const {
+        const auto margins = h1_margins_above(thresholds, 0.0F, n, seed);
+        SizeType count     = 0;
+        for (const float m : margins) {
+            count += m > 0.0F ? 1 : 0;
+        }
+        return count;
     }
 
     ThresholdsEngine(const ThresholdsEngine&)            = delete;
@@ -170,7 +214,7 @@ make_thresholds_cpu(std::span<const float> branching_pattern,
                     float beam_sigma       = 3.0F,
                     float reach_sigma      = 1.0F);
 
-/// Modes "shared" and "robust" on the CPU (lib/cpu/thresholds_shared_cpu.cpp):
+/// Mode "shared" on the CPU (lib/cpu/thresholds_shared_cpu.cpp):
 /// @p nprobs bins from @p min_pd to 1, the guided beam.
 std::unique_ptr<ThresholdsEngine>
 make_thresholds_shared_cpu(std::span<const float> branching_pattern,

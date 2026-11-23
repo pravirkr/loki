@@ -3,24 +3,23 @@
 Runs one configuration in one or more modes and re-scores every returned
 schedule on the same fresh samples, so the modes can be compared directly.
 
-    python thresholds_check_cuda.py --mode improved,shared,robust --min-pd 0.1
+    python thresholds_check_cuda.py --mode improved,shared --min-pd 0.1
 
 Per mode:
   search     run() then get_best_path_thresholds(min_pd): what a live search
-             of legacy or improved uses. Its cost and Pd are the search's own
+             of improved uses. Its cost and Pd are the search's own
              Monte Carlo estimates and are optimistic.
-  solve      modes shared and robust: the schedule of solve() (tightening,
-             robust: also selection and refinement; repair), with the Pd and
-             cost it measured on samples that chose nothing.
+  solve      mode shared: the schedule of solve() (tightening and repair),
+             with the Pd and cost it measured on samples that chose nothing.
   re-scored  evaluate() of the schedule on one fresh seed shared by all modes
              (--report-trials, --report-seed). L0 = C / Pd with C the scored
              nodes (the historical cost); L1 adds the survivors of the last
-             stage (w = 1), which is what modes shared and robust optimise.
+             stage (w = 1), which is what mode shared optimises.
 
-The modes use different grids by design: shared and robust anchor the Pd grid
-at --min-pd (--nprobs bins from min_pd to 1) and use the guided beam
-(--beam-sigma, --reach-sigma), while legacy and improved use --nprobs bins
-from --prob-min to 1 and the --guess beam.
+The modes use different grids by design: shared anchors the Pd grid at
+--min-pd (--nprobs bins from min_pd to 1) and uses the guided beam
+(--beam-sigma, --reach-sigma), while improved uses --nprobs bins from
+--prob-min to 1 and the --guess beam.
 """
 
 from __future__ import annotations
@@ -82,7 +81,7 @@ def check(path: np.ndarray, o: dict) -> dict:
     }
 
 
-SHARED_MODES = ("shared", "robust")
+SHARED_MODES = ("shared",)
 COLUMNS = ("pd", "c", "L", "peak", "t")
 
 
@@ -177,8 +176,6 @@ def show(out: dict, o: dict) -> None:
             "initial_shift",
             "tightened_stages",
             "repair_shift",
-            "shortlist_selected",
-            "block_moves",
             "search_missed_target",
         )
         print(
@@ -250,7 +247,7 @@ def print_spread(per_mode: dict[str, list[dict]]) -> None:
     "modes",
     default="improved",
     show_default=True,
-    help="legacy, improved, shared, robust, or a comma-separated list to compare",
+    help="improved, shared, or a comma-separated list to compare",
 )
 @click.option("--backend", default="cuda", show_default=True)
 @click.option("--min-pd", default=0.1, show_default=True)
@@ -258,32 +255,30 @@ def print_spread(per_mode: dict[str, list[dict]]) -> None:
     "--beam-sigma",
     default=3.0,
     show_default=True,
-    help="shared/robust: beam half-width around the guess (signal-score std)",
+    help="shared: beam half-width around the guess (signal-score std)",
 )
 @click.option(
     "--reach-sigma",
     default=1.0,
     show_default=True,
-    help="shared/robust: largest change of the offset from the guess per stage",
+    help="shared: largest change of the offset from the guess per stage",
 )
 @click.option(
     "--w",
     default=1.0,
     show_default=True,
-    help="shared/robust: weight of the last stage's survivors",
+    help="shared: weight of the last stage's survivors",
 )
 @click.option("--seed", default=1, show_default=True)
 @click.option("--ntrials", default=1024, show_default=True)
-@click.option("--nprobs", default=0, help="0: 40 for shared/robust, 30 otherwise")
-@click.option(
-    "--prob-min", default=0.05, show_default=True, help="legacy/improved grid"
-)
+@click.option("--nprobs", default=0, help="0: 40 for shared, 30 otherwise")
+@click.option("--prob-min", default=0.05, show_default=True, help="improved grid")
 @click.option(
     "--guess",
     default="analytic",
     type=click.Choice(["analytic", "pilot", "window"]),
     show_default=True,
-    help="legacy/improved beam (shared/robust always use the guided beam)",
+    help="improved beam (shared always uses the guided beam)",
 )
 @click.option("--beam-width", default=2.5, show_default=True)
 @click.option("--thres-neigh", default=11, show_default=True)

@@ -20,26 +20,15 @@
 namespace loki::detection::detail {
 
 // Salts of the independent samples of solve(); every one is derived from the
-// search seed. Selection, confirmation, repair and report never share a
-// sample (a sample that chose something cannot measure it).
+// search seed. Selection, repair and report never share a sample (a sample
+// that chose something cannot measure it).
 namespace {
 
-constexpr uint64_t kBankSelect = 0x5A9E0001ULL; // tighten + candidate Pd
+constexpr uint64_t kBankSelect = 0x5A9E0001ULL; // relax + tighten
 constexpr uint64_t kBankRepair = 0x5A9E0002ULL; // final repair
 constexpr uint64_t kBankReport =
     0x5A9E0003ULL; // reported Pd, unused by any choice
-constexpr uint64_t kNoiseReport  = 0x5A9E0004ULL; // reported cost
-constexpr uint64_t kNoiseSelect  = 0xC1800020ULL; // candidate / proposal cost
-constexpr uint64_t kNoiseConfirm = 0xC1800021ULL; // confirmation of a move
-
-constexpr SizeType kShortlist    = 4;
-constexpr SizeType kRefineStarts = 2;
-constexpr SizeType kRefineBlocks = 4;
-// A refinement move needs this relative cost gain on the selection noise
-// sample and on the confirmation one (heuristic margins, not guarantees).
-constexpr double kMoveGain    = 0.98;
-constexpr double kConfirmGain = 0.995;
-constexpr float kMoveSteps    = 2.0F;
+constexpr uint64_t kNoiseReport = 0x5A9E0004ULL; // reported cost
 
 struct Candidate {
     std::vector<float> thresholds;
@@ -96,11 +85,12 @@ SizeType count_survivors(const SignalBank& bank,
         std::ranges::count_if(margins, [](float m) { return m > 0.0F; }));
 }
 
-float relax_schedule(std::vector<float>& thresholds,
-                     const SignalBank& bank,
-                     double target) {
-    const SizeType n        = bank.size();
-    auto margins            = bank.margins(thresholds);
+namespace {
+
+float relax_from_margins(std::vector<float>& thresholds,
+                         std::vector<float>& margins,
+                         double target) {
+    const SizeType n        = margins.size();
     const SizeType required = std::min(
         n, static_cast<SizeType>(std::ceil(target * static_cast<double>(n))));
     const auto rank =
@@ -118,6 +108,15 @@ float relax_schedule(std::vector<float>& thresholds,
         }
     }
     return shift;
+}
+
+} // namespace
+
+float relax_schedule(std::vector<float>& thresholds,
+                     const SignalBank& bank,
+                     double target) {
+    auto margins = bank.margins(thresholds);
+    return relax_from_margins(thresholds, margins, target);
 }
 
 std::pair<SizeType, SizeType> tighten_schedule(std::vector<float>& thresholds,
@@ -139,199 +138,7 @@ std::pair<SizeType, SizeType> tighten_schedule(std::vector<float>& thresholds,
     return {tightened, count};
 }
 
-std::vector<SizeType> refinement_blocks(std::span<const float> branching) {
-    const SizeType m       = branching.size();
-    const SizeType nblocks = std::min<SizeType>(kRefineBlocks, m);
-    std::vector<double> prefix(m);
-    double total = 0.0;
-    for (SizeType s = 0; s < m; ++s) {
-        total += std::log(std::max(1.0, static_cast<double>(branching[s])));
-        prefix[s] = total;
-    }
-    std::vector<SizeType> cuts{0};
-    for (SizeType k = 1; k < nblocks; ++k) {
-        const SizeType cut =
-            total > 0.0 ? static_cast<SizeType>(
-                              std::ranges::lower_bound(
-                                  prefix, total * static_cast<double>(k) /
-                                              static_cast<double>(nblocks)) -
-                              prefix.begin())
-                        : k * m / nblocks;
-        if (cut > cuts.back() && cut < m) {
-            cuts.push_back(cut);
-        }
-    }
-    cuts.push_back(m);
-    return cuts;
-}
-
-namespace {
-
-struct BlockRefinement {
-    Candidate best;
-    double rank{0.0};
-    SizeType moves{0};
-    SizeType proposals{0};
-    SizeType confirmations{0};
-};
-
-/// One sweep of +-2 grid steps over every block, each move kept only if the
-/// cost per detection drops on the selection noise sample and again on an
-/// independent confirmation sample.
-BlockRefinement refine_blocks(const ThresholdsEngine& engine,
-                              Candidate start,
-                              double initial_pd,
-                              double initial_rank,
-                              const SignalBank& bank,
-                              double target,
-                              std::span<const SizeType> cuts,
-                              double w,
-                              SizeType nnoise,
-                              uint64_t seed) {
-    BlockRefinement out{std::move(start), initial_rank};
-    const auto evaluate_rank = [&](std::span<const float> thresholds, double pd,
-                                   uint64_t salt) {
-        const auto states = engine.evaluate(
-            thresholds, nnoise, derive_seed(seed, salt), /*h0_only=*/true);
-        return rank_of(states.back(), pd, w);
-    };
-    double confirm_rank =
-        evaluate_rank(out.best.thresholds, initial_pd, kNoiseConfirm);
-    ++out.confirmations;
-    const auto grid   = engine.get_thresholds();
-    const float delta = kMoveSteps * (grid[1] - grid[0]);
-    for (SizeType b = 0; b + 1 < cuts.size(); ++b) {
-        std::vector<float> best_thresholds;
-        double best_rank    = out.rank;
-        double best_confirm = confirm_rank;
-        for (const float direction : {-1.0F, 1.0F}) {
-            auto thresholds = out.best.thresholds;
-            for (SizeType s = cuts[b]; s < cuts[b + 1]; ++s) {
-                thresholds[s] += direction * delta;
-            }
-            relax_schedule(thresholds, bank, target);
-            const auto tightened = tighten_schedule(thresholds, bank);
-            if (thresholds == out.best.thresholds || tightened.second == 0) {
-                continue;
-            }
-            const double pd   = static_cast<double>(tightened.second) /
-                                static_cast<double>(bank.size());
-            const double rank = evaluate_rank(thresholds, pd, kNoiseSelect);
-            ++out.proposals;
-            if (rank > kMoveGain * out.rank || rank >= best_rank) {
-                continue;
-            }
-            const double check = evaluate_rank(thresholds, pd, kNoiseConfirm);
-            ++out.confirmations;
-            if (check > kConfirmGain * confirm_rank) {
-                continue;
-            }
-            best_thresholds = std::move(thresholds);
-            best_rank       = rank;
-            best_confirm    = check;
-        }
-        if (!best_thresholds.empty()) {
-            out.best.thresholds = std::move(best_thresholds);
-            out.rank            = best_rank;
-            confirm_rank        = best_confirm;
-            ++out.moves;
-        }
-    }
-    return out;
-}
-
-/// Up to kShortlist distinct candidate paths: the final selection, the first
-/// pass's selection, then the cheapest terminal cells that differ from every
-/// earlier one by at least half a grid step rms. Each is replayed on the
-/// search's own signal bank: its terminal survivor count must match the
-/// search's Pd.
-std::vector<Candidate>
-shortlist_candidates(const ThresholdsEngine& engine,
-                     std::span<const State> states,
-                     const SearchPath& selected,
-                     float min_pd,
-                     double w,
-                     std::vector<std::pair<std::string, double>>& diag) {
-    const auto thresholds  = engine.get_thresholds();
-    const auto probs       = engine.get_probs();
-    const SizeType nstages = engine.get_nstages();
-    const SizeType nthr    = engine.get_nthresholds();
-    const SizeType nprobs  = engine.get_nprobs();
-    const double step      = static_cast<double>(thresholds[1] - thresholds[0]);
-    const double min_distance =
-        0.25 * step * step * static_cast<double>(nstages);
-    std::vector<Candidate> out;
-    const auto append = [&](const SearchPath& path, bool diverse) {
-        if (path.thresholds.empty()) {
-            return;
-        }
-        for (const auto& old : out) {
-            if (path.thresholds == old.thresholds) {
-                return;
-            }
-            double distance = 0.0;
-            for (SizeType s = 0; s < nstages; ++s) {
-                const double d = static_cast<double>(path.thresholds[s]) -
-                                 static_cast<double>(old.thresholds[s]);
-                distance += d * d;
-            }
-            if (diverse && distance < min_distance) {
-                return;
-            }
-        }
-        out.push_back({path.thresholds, path.pd, path.c});
-    };
-    append(selected, false);
-    append(engine.first_pass_path(min_pd), false);
-    const SizeType offset = (nstages - 1) * nthr * nprobs;
-    std::vector<std::pair<double, SizeType>> order;
-    for (SizeType cell = 0; cell < nthr * nprobs; ++cell) {
-        const auto& state = states[offset + cell];
-        if (!state.is_empty && state.success_h1_cumul >= min_pd) {
-            order.emplace_back(terminal_rank(state, w), cell);
-        }
-    }
-    std::ranges::sort(order);
-    for (const auto& entry : order) {
-        if (out.size() == kShortlist) {
-            break;
-        }
-        append(search_path(states, thresholds, probs, nstages, nthr, nprobs,
-                           entry.second, w),
-               true);
-    }
-    const auto bank     = engine.shared_h1_bank();
-    const SizeType nh1  = bank.size() / nstages;
-    SizeType mismatches = 0;
-    for (const auto& candidate : out) {
-        SizeType count = 0;
-        for (SizeType t = 0; t < nh1; ++t) {
-            bool alive = true;
-            for (SizeType s = 0; s < nstages && alive; ++s) {
-                alive = bank[(s * nh1) + t] > candidate.thresholds[s];
-            }
-            count += alive ? 1 : 0;
-        }
-        // Float products may round slightly; the survivor count must agree.
-        if (static_cast<SizeType>(std::llround(
-                candidate.pd * static_cast<double>(nh1))) != count) {
-            ++mismatches;
-        }
-    }
-    if (mismatches > 0) {
-        spdlog::warn("solve: {} shortlist path(s) do not replay the search's "
-                     "signal count",
-                     mismatches);
-    }
-    diag.emplace_back("shortlist_replay_mismatches",
-                      static_cast<double>(mismatches));
-    return out;
-}
-
-} // namespace
-
-SchemeSolution
-solve_scheme(ThresholdsEngine& engine, float min_pd, double w, bool robust) {
+SchemeSolution solve_scheme(ThresholdsEngine& engine, float min_pd, double w) {
     error_check::check(min_pd > 0.0F && min_pd < 1.0F,
                        "solve: min_pd must be in (0, 1)");
     SchemeSolution out;
@@ -347,8 +154,8 @@ solve_scheme(ThresholdsEngine& engine, float min_pd, double w, bool robust) {
     const double target = std::min(
         1.0, p + (2.0 * std::sqrt(p * (1.0 - p) / static_cast<double>(n))));
 
-    // The search's selection and (for the shortlist) its alternatives.
-    std::vector<Candidate> candidates;
+    // The search's selection.
+    Candidate best;
     {
         const auto states     = engine.get_states();
         const auto thresholds = engine.get_thresholds();
@@ -381,131 +188,60 @@ solve_scheme(ThresholdsEngine& engine, float min_pd, double w, bool robust) {
             engine.release_search_memory();
             return out;
         }
-        if (!robust) {
-            candidates.push_back(
-                {selected.thresholds, selected.pd, selected.c});
-        } else {
-            candidates = shortlist_candidates(engine, states, selected, min_pd,
-                                              w, out.diagnostics);
-        }
+        best = {selected.thresholds, selected.pd, selected.c};
     }
     engine.release_search_memory();
 
-    // Tighten (and relax if short) every candidate on a fresh signal bank and
-    // pick by C / Pd on a fresh noise sample.
+    // Tighten (and relax if short) the selection on a fresh signal bank.
     const auto bank =
         engine.make_signal_bank(n, derive_seed(seed, kBankSelect));
-    Candidate best;
     const auto evaluate_noise = [&](std::span<const float> thresholds,
                                     uint64_t salt) {
         return engine.evaluate(thresholds, budget.nnoise,
                                derive_seed(seed, salt), /*h0_only=*/true);
     };
-    if (!robust) {
-        best                 = candidates.front();
+    {
         const float shift    = relax_schedule(best.thresholds, *bank, target);
         const auto tightened = tighten_schedule(best.thresholds, *bank);
         out.diagnostics.emplace_back("initial_shift",
                                      static_cast<double>(shift));
         out.diagnostics.emplace_back("tightened_stages",
                                      static_cast<double>(tightened.first));
-    } else {
-        double best_rank    = std::numeric_limits<double>::max();
-        double base_rank    = 0.0;
-        SizeType best_index = 0;
-        std::vector<double> bank_pd(candidates.size());
-        std::vector<std::pair<double, SizeType>> order;
-        for (SizeType i = 0; i < candidates.size(); ++i) {
-            auto& candidate = candidates[i];
-            relax_schedule(candidate.thresholds, *bank, target);
-            const auto tightened =
-                tighten_schedule(candidate.thresholds, *bank);
-            const auto check =
-                evaluate_noise(candidate.thresholds, kNoiseSelect);
-            const double pd =
-                static_cast<double>(tightened.second) / static_cast<double>(n);
-            const double rank = rank_of(check.back(), pd, w);
-            bank_pd[i]        = pd;
-            order.emplace_back(rank, i);
-            if (i == 0) {
-                base_rank = rank;
-            }
-            if (rank < best_rank) {
-                best_rank  = rank;
-                best_index = i;
-            }
-        }
-        best                          = candidates[best_index];
-        const double initializer_rank = best_rank;
-        SizeType starts               = 0;
-        SizeType proposals            = 0;
-        SizeType confirmations        = 0;
-        SizeType winning_moves        = 0;
-        const auto cuts = refinement_blocks(engine.get_branching_pattern());
-        {
-            std::ranges::sort(order);
-            std::vector<std::vector<float>> used_starts;
-            for (const auto& entry : order) {
-                if (starts == kRefineStarts) {
-                    break;
-                }
-                const auto idx = entry.second;
-                if (std::ranges::find(used_starts,
-                                      candidates[idx].thresholds) !=
-                    used_starts.end()) {
-                    continue;
-                }
-                used_starts.push_back(candidates[idx].thresholds);
-                ++starts;
-                auto refined = refine_blocks(
-                    engine, candidates[idx], bank_pd[idx], entry.first, *bank,
-                    target, cuts, w, budget.nnoise, seed);
-                proposals += refined.proposals;
-                confirmations += refined.confirmations;
-                if (refined.rank < best_rank) {
-                    best_rank     = refined.rank;
-                    best_index    = idx;
-                    winning_moves = refined.moves;
-                    best          = std::move(refined.best);
-                }
-            }
-            out.diagnostics.emplace_back("block_count",
-                                         static_cast<double>(cuts.size() - 1));
-            out.diagnostics.emplace_back("block_starts",
-                                         static_cast<double>(starts));
-            out.diagnostics.emplace_back("block_proposals",
-                                         static_cast<double>(proposals));
-            out.diagnostics.emplace_back("block_confirmations",
-                                         static_cast<double>(confirmations));
-            out.diagnostics.emplace_back("block_moves",
-                                         static_cast<double>(winning_moves));
-        }
-        out.diagnostics.emplace_back("shortlist_initializer_L",
-                                     initializer_rank);
-        out.diagnostics.emplace_back("shortlist_count",
-                                     static_cast<double>(candidates.size()));
-        out.diagnostics.emplace_back("shortlist_selected",
-                                     static_cast<double>(best_index));
-        out.diagnostics.emplace_back("shortlist_bank_L", best_rank);
-        out.diagnostics.emplace_back("shortlist_base_bank_L", base_rank);
-        for (const auto& candidate : candidates) {
-            out.shortlist.push_back(candidate.thresholds);
-        }
     }
 
     // Repair on another bank: lowers every threshold, only if the Pd of the
     // chosen schedule fell short of the target there.
     float repair_shift = 0.0F;
     {
-        const auto repair =
-            engine.make_signal_bank(n, derive_seed(seed, kBankRepair));
-        repair_shift = relax_schedule(best.thresholds, *repair, target);
+        constexpr float kRepairCut = -0.5F;
+        const uint64_t repair_seed = derive_seed(seed, kBankRepair);
+        auto margins = engine.h1_margins_above(best.thresholds, kRepairCut, n,
+                                               repair_seed);
+        const SizeType required = std::min(
+            n,
+            static_cast<SizeType>(std::ceil(target * static_cast<double>(n))));
+        const auto rank =
+            margins.begin() + static_cast<std::ptrdiff_t>(n - required);
+        std::ranges::nth_element(margins, rank);
+        if (*rank > kRepairCut) {
+            const float shift = std::min(
+                0.0F,
+                std::nextafter(*rank, std::numeric_limits<float>::lowest()));
+            if (shift < 0.0F) {
+                for (auto& threshold : best.thresholds) {
+                    threshold += shift;
+                }
+            }
+            repair_shift = shift;
+        } else {
+            const auto repair = engine.make_signal_bank(n, repair_seed);
+            repair_shift = relax_schedule(best.thresholds, *repair, target);
+        }
     }
     // Report on a third bank that no choice above has seen.
     {
-        const auto report =
-            engine.make_signal_bank(n, derive_seed(seed, kBankReport));
-        const SizeType count = count_survivors(*report, best.thresholds);
+        const SizeType count = engine.count_h1_survivors(
+            best.thresholds, n, derive_seed(seed, kBankReport));
         out.pd    = static_cast<double>(count) / static_cast<double>(n);
         out.pd_se = std::sqrt(out.pd * (1.0 - out.pd) / static_cast<double>(n));
         out.pd_trials = n;
@@ -610,14 +346,34 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
     // Repair on another bank, report on a third.
     float repair_shift = 0.0F;
     {
-        const auto repair =
-            engine.make_signal_bank(n, derive_seed(seed, kRefitRepair));
-        repair_shift = relax_schedule(thresholds, *repair, target);
+        constexpr float kRepairCut = -0.5F;
+        const uint64_t repair_seed = derive_seed(seed, kRefitRepair);
+        auto margins =
+            engine.h1_margins_above(thresholds, kRepairCut, n, repair_seed);
+        const SizeType required = std::min(
+            n,
+            static_cast<SizeType>(std::ceil(target * static_cast<double>(n))));
+        const auto rank =
+            margins.begin() + static_cast<std::ptrdiff_t>(n - required);
+        std::ranges::nth_element(margins, rank);
+        if (*rank > kRepairCut) {
+            const float shift = std::min(
+                0.0F,
+                std::nextafter(*rank, std::numeric_limits<float>::lowest()));
+            if (shift < 0.0F) {
+                for (auto& threshold : thresholds) {
+                    threshold += shift;
+                }
+            }
+            repair_shift = shift;
+        } else {
+            const auto repair = engine.make_signal_bank(n, repair_seed);
+            repair_shift      = relax_schedule(thresholds, *repair, target);
+        }
     }
     {
-        const auto report =
-            engine.make_signal_bank(n, derive_seed(seed, kRefitReport));
-        const SizeType count = count_survivors(*report, thresholds);
+        const SizeType count = engine.count_h1_survivors(
+            thresholds, n, derive_seed(seed, kRefitReport));
         out.pd    = static_cast<double>(count) / static_cast<double>(n);
         out.pd_se = std::sqrt(out.pd * (1.0 - out.pd) / static_cast<double>(n));
         out.pd_trials = n;

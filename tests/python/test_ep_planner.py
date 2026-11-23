@@ -9,7 +9,7 @@ from loki import libloki
 
 
 def _search_config(
-    nthreads: int, target_snr: float | None = None
+    nthreads: int, target_snr: float | None = None, snr_min: float = 7.0
 ) -> libloki.configs.PulsarSearchConfig:
     return libloki.configs.PulsarSearchConfig(
         nsamps=1 << 16,
@@ -25,7 +25,15 @@ def _search_config(
         nsegments=8,
         prune_poly_order=2,
         target_snr=target_snr,
+        snr_min=snr_min,
     )
+
+
+def _pd_upper(min_pd: float, pd_se: float) -> float:
+    """Highest Pd a "pin" design plausibly reports: it pins at min_pd + 2 SE
+    on one bank and counts Pd on another of the same size (pd_se), so
+    2 SE + 4 sqrt(2) SE above min_pd."""
+    return min_pd + 8.0 * pd_se
 
 
 def test_ep_region_planner_accepts_workers_and_rfi_config() -> None:
@@ -157,6 +165,13 @@ def test_ep_target_snr_is_independent_and_invalidates_cache(tmp_path: Path) -> N
     changed = _search_config(nthreads=1, target_snr=12.0)
     with pytest.raises(ValueError, match="target_snr"):
         libloki.prune.EPRegionPlannerTime(changed, ref_segs=[0], plan_cache_file=cache)
+    # snr_min filters post-ascend candidates at output, not the pruning plan, so
+    # changing snr_min reuses the cached plan without invalidation.
+    lowered = _search_config(nthreads=1, snr_min=6.0)
+    reloaded = libloki.prune.EPRegionPlannerTime(
+        lowered, ref_segs=[0], plan_cache_file=cache
+    )
+    assert reloaded.nchunks > 0
 
 
 @pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
@@ -245,15 +260,37 @@ def test_ep_planner_accepts_best_available_path(tmp_path: Path, backend: str) ->
 
     with h5py.File(cache) as saved:
         assert saved.attrs["min_pd"] == 1.0
-        # The threshold pipeline is part of the plan.
-        assert saved.attrs["dts_algorithm"] == "shared-per-region"
-        assert saved.attrs["dts_mode"] == "shared"
+        # The threshold pipeline is part of the plan; snr_min is not.
+        assert saved.attrs["dts_algorithm"] == "descent-chained-v2"
+        assert saved.attrs["dts_pd_policy"] == "pin"
+        assert saved.attrs["dts_mode"] == "descent"
+        assert "dts_final_threshold" not in saved.attrs
         assert saved.attrs["dts_w_terminal"] == 1.0
     # Reloading preserves the user's requested constraint and chosen scheme.
     reloaded = libloki.prune.EPRegionPlannerTime(
         cfg, min_pd=1.0, ref_segs=[0], plan_cache_file=cache, backend=backend
     )
     assert reloaded.nchunks == planner.nchunks
+
+
+def test_ep_plan_cache_rejects_stale_dts_version_and_policy(tmp_path: Path) -> None:
+    import h5py
+
+    cfg = _search_config(nthreads=1)
+    cache = tmp_path / "stale_plan.h5"
+    libloki.prune.EPRegionPlannerTime(cfg, ref_segs=[0]).save_cache(str(cache))
+
+    for attr, bad_val, match in (
+        ("ep_plan_cache_version", "1.23.0", "has version"),
+        ("dts_algorithm", "descent-chained", "dts_algorithm"),
+        ("dts_pd_policy", "free", "dts_pd_policy"),
+    ):
+        copy = tmp_path / f"bad_{attr}.h5"
+        copy.write_bytes(cache.read_bytes())
+        with h5py.File(copy, "r+") as f:
+            f.attrs[attr] = bad_val
+        with pytest.raises((ValueError, RuntimeError), match=match):
+            libloki.prune.EPRegionPlannerTime(cfg, ref_segs=[0], plan_cache_file=copy)
 
 
 @pytest.mark.parametrize("min_pd", [0.0, -0.1, 1.1, float("nan"), float("inf")])
@@ -301,9 +338,7 @@ def test_ep_rejects_bins_above_1024(nbins: int, nbins_max: int) -> None:
 @pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
 @pytest.mark.parametrize("limit_gb", [1.0, 0.6])
 def test_cuda_threshold_design_fits_the_budget(limit_gb: float) -> None:
-    # nbins 1024 would need far more than the limit for its search pools: the
-    # search steps its budget down and runs at 64 bins, and the schedule is
-    # re-fitted at 1024 bins.
+    # The design runs at 1024 bins with samples sized to the limit.
     cfg = libloki.configs.PulsarSearchConfig(
         nsamps=1 << 16,
         tsamp=64e-6,
@@ -350,12 +385,63 @@ def test_ep_planner_runs_region_designs(backend: str) -> None:
         assert 0.0 < chunk.pd <= 1.0
         assert chunk.pd_se >= 0.0
         assert chunk.max_sugg >= chunk.predicted_live
-        assert chunk.pd >= 0.9 * 0.5 - 4.0 * chunk.pd_se
+        # The planner designs under pd_policy "pin": Pd sits at min_pd.
+        assert 0.5 - 6.0 * chunk.pd_se <= chunk.pd <= _pd_upper(0.5, chunk.pd_se)
     # One design per region (the regions here differ only in nbins).
     designs = {
         (chunk.cfg.nbins, tuple(chunk.threshold_scheme)) for chunk in planner.chunk_cfgs
     }
     assert len(designs) == len({chunk.cfg.nbins for chunk in planner.chunk_cfgs})
+
+
+def test_ep_planner_is_reproducible_and_chains_its_regions() -> None:
+    """Two plans of one configuration hold the same thresholds."""
+    cfg = libloki.configs.PulsarSearchConfig(
+        nsamps=1 << 16,
+        tsamp=64e-6,
+        nbins=32,
+        eta=1.0,
+        param_limits=np.array([[-10.0, 10.0], [50.0, 145.0]], dtype=np.float64),
+        ducy_max=0.3,
+        use_fourier=False,
+        nthreads=2,
+        max_process_memory_gb=1.0,
+        bseg_brute=1024,
+        nsegments=8,
+        prune_poly_order=2,
+    )
+    plans = [
+        libloki.prune.EPRegionPlannerTime(cfg, min_pd=0.3, ref_segs=[0])
+        for _ in range(2)
+    ]
+    schemes = [
+        [np.asarray(chunk.threshold_scheme) for chunk in plan.chunk_cfgs]
+        for plan in plans
+    ]
+    assert len({chunk.cfg.nbins for chunk in plans[0].chunk_cfgs}) >= 2
+    assert len(schemes[0]) == len(schemes[1])
+    for first, second in zip(schemes[0], schemes[1], strict=True):
+        np.testing.assert_array_equal(first, second)
+    for chunk in plans[0].chunk_cfgs:
+        assert 0.3 - 6.0 * chunk.pd_se <= chunk.pd <= _pd_upper(0.3, chunk.pd_se)
+
+
+def test_ep_planner_designs_thresholds_independently_of_snr_min() -> None:
+    """snr_min acts only on post-ascend candidates, never on pruning schedules."""
+    low = libloki.prune.EPRegionPlannerTime(
+        _search_config(nthreads=1, target_snr=6.0, snr_min=5.0),
+        min_pd=0.9,
+        ref_segs=[0],
+    )
+    high = libloki.prune.EPRegionPlannerTime(
+        _search_config(nthreads=1, target_snr=6.0, snr_min=9.0),
+        min_pd=0.9,
+        ref_segs=[0],
+    )
+    assert low.nchunks == high.nchunks > 0
+    for a, b in zip(low.chunk_cfgs, high.chunk_cfgs, strict=True):
+        np.testing.assert_array_equal(a.threshold_scheme, b.threshold_scheme)
+        assert 0.9 * 0.9 <= a.pd <= _pd_upper(0.9, a.pd_se)
 
 
 def test_ep_plan_cache_made_on_cuda_serves_cpu(tmp_path: Path) -> None:

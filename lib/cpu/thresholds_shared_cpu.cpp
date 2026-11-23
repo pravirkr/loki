@@ -137,9 +137,9 @@ public:
           m_guide_reach(reach_sigma) {
         if (!is_shared_family(mode)) {
             throw std::invalid_argument(
-                "ThresholdsSharedCpuEngine: modes 'shared' and 'robust' only");
+                "ThresholdsSharedCpuEngine: mode 'shared' only");
         }
-        // The guess applies to legacy and improved only, but must be valid.
+        // The guess applies to mode improved only, but must be valid.
         (void)detail::beam_guess_from_string(guess);
         // The checks of every backend's search (prob_min is unused here).
         detail::validate_scheme_inputs({.branching_pattern = branching_pattern,
@@ -228,7 +228,8 @@ public:
             }
             m_max_beam = std::max(m_max_beam, n);
         }
-        // Any recentred beam (mode robust's second pass) fits the pools.
+        // The pools fit any recentred guided beam (sized for the second pass
+        // of the removed mode robust; kept so the memory use is unchanged).
         m_max_beam = std::max(m_max_beam, detail::guided_beam_capacity(
                                               m_thresholds, m_window,
                                               m_score_sigma, m_guide_width));
@@ -297,14 +298,6 @@ public:
             m_thresholds, m_probs, m_nstages, m_nthresholds, m_nprobs, min_pd);
     }
 
-    detail::SearchPath first_pass_path(float min_pd) const override {
-        if (m_first_states.empty()) {
-            throw std::logic_error(
-                "first_pass_path: needs run() in mode 'robust'");
-        }
-        return selected_path(m_first_states, min_pd);
-    }
-
     std::vector<float> shared_h1_bank() const override {
         if (m_h1_bank.empty()) {
             throw std::logic_error("shared_h1_bank: run() has not been called");
@@ -346,6 +339,23 @@ public:
                                           uint64_t seed) const override {
         return m_eval->simulate_h1_scores(ntrials, seed);
     }
+    detail::NoiseGenealogy
+    simulate_h0_genealogy(std::span<const float> thresholds,
+                          SizeType ntrials,
+                          uint64_t seed) const override {
+        return m_eval->simulate_h0_genealogy(thresholds, ntrials, seed);
+    }
+    std::vector<float> h1_margins_above(std::span<const float> thresholds,
+                                        float min_margin,
+                                        SizeType n,
+                                        uint64_t seed) const override {
+        return m_eval->h1_margins_above(thresholds, min_margin, n, seed);
+    }
+    SizeType count_h1_survivors(std::span<const float> thresholds,
+                                SizeType n,
+                                uint64_t seed) const override {
+        return m_eval->count_h1_survivors(thresholds, n, seed);
+    }
 
     // ---- search ----
     void run(SizeType thres_neigh, bool show_progress) override {
@@ -359,30 +369,13 @@ public:
         timing::SimpleTimer total_timer;
         total_timer.start();
         allocate_pools();
-        // One signal bank per run(): both passes count on the same trials.
+        // One signal bank per run().
         m_h1_bank = m_eval->simulate_h1_scores(
             m_nh1, detail::derive_seed(m_seed, kSharedSalt));
-        m_cost_to_go.clear();
-        m_first_states.clear();
         m_guess_path = m_guess_pilot;
         m_beam = detail::guided_beam(m_window, m_guess_path, m_score_sigma,
                                      m_guide_width);
         run_pass(show_progress);
-        if (m_mode == DynamicThresholdMode::kRobust) {
-            // Second pass: ranked with the first pass's cost to go, around
-            // the guess recentred on its path.
-            m_first_states = m_states;
-            m_cost_to_go   = detail::cost_to_go_scheme(
-                m_states, m_thresholds, m_probs, m_nstages, m_nthresholds,
-                m_nprobs, 8.0F, 4, m_w);
-            if (!m_cost_to_go.empty()) {
-                m_guess_path = detail::recentre_guess(
-                    m_guess_pilot, get_best_path_thresholds(m_min_pd));
-                m_beam = detail::guided_beam(m_window, m_guess_path,
-                                             m_score_sigma, m_guide_width);
-                run_pass(show_progress);
-            }
-        }
         detail::store_terminal_cost(m_states, m_nstages, m_nthresholds,
                                     m_nprobs, m_w);
         detail::warn_empty_stages(m_states, m_nstages, m_nthresholds, m_nprobs,
@@ -476,7 +469,7 @@ private:
         if (istage + 1 == m_nstages) {
             return static_cast<float>(m_w);
         }
-        return m_cost_to_go.empty() ? 0.0F : m_cost_to_go[istage];
+        return 0.0F;
     }
 
     static int find_bin_index(std::span<const float> probs, float v) {
@@ -890,9 +883,7 @@ private:
     SizeType m_nh1{};
     SizeType m_h1_words{};
     SizeType m_max_beam{};
-    std::vector<float> m_cost_to_go;
     std::vector<State> m_states;
-    std::vector<State> m_first_states;
     std::vector<float> m_h1_bank;
 
     // Ping-pong pools, index (s & 1) written at stage s: simulated noise

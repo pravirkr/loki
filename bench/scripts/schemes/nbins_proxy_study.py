@@ -72,7 +72,7 @@ def solve(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, mode, seed)
 
 def rescore(bp, thresholds, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend):
     """Pd and L of a schedule at the true nbins, on fresh samples."""
-    s = make(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, "none", 1)
+    s = make(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, "improved", 1)
     pd_states = s.evaluate(thresholds, 1 << 18, 0xA11CE)
     pd = float(pd_states[-1]["success_h1_cumul"])
     cs = s.evaluate(thresholds, 1 << 17, 0xB0B)
@@ -90,7 +90,7 @@ PATTERNS = {
 
 @click.command()
 @click.option("--backend", default="cuda")
-@click.option("--mode", default="robust")
+@click.option("--mode", default="shared")
 @click.option("--patterns", default="seg8,seg32,prod")
 @click.option("--ref-ducy", "ref_ducys", default="0.05,0.1,0.2")
 @click.option("--wtsp", "wtsps", default="1.0,1.2")

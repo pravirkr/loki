@@ -58,7 +58,7 @@ def _stage0_survival_by_threshold(
     return out
 
 
-@pytest.mark.parametrize("mode", ["improved", "legacy"])
+@pytest.mark.parametrize("mode", ["improved"])
 def test_cpu_cuda_stage0_survival_parity(mode: str) -> None:
     cpu_by_seed: list[dict[int, tuple[float, float]]] = []
     cuda_by_seed: list[dict[int, tuple[float, float]]] = []

@@ -1,4 +1,4 @@
-"""Reduced acceptance suite for DynamicThresholdScheme.solve() (modes "shared", "robust").
+"""Reduced acceptance suite for DynamicThresholdScheme.solve() (modes "shared", "descent").
 
 A smaller version of the research workspace's quick tier: the production
 pattern and the issue #15 patterns at several S/N, targets and solver seeds.
@@ -10,10 +10,11 @@ Gates per case (the workspace's):
   - every seed returns a schedule;
   - every seed's judged Pd >= 0.90 pd_min and the median >= 0.98 pd_min;
   - every seed's reported Pd within 10 % of the judged one.
-The judged cost per detection L = C / Pd is printed per case (geometric mean
-over seeds); compare backends or modes with --mode and --backend.
+The judged cost C, its scatter over seeds and the cost per detection
+L = C / Pd are printed per case (geometric means over seeds); compare
+backends or modes with --mode and --backend.
 
-    PYTHONPATH=src python solve_suite.py --backend cuda --mode robust
+    PYTHONPATH=src python solve_suite.py --backend cuda --mode descent
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ def judge_seed(case: tuple[str, float, float], what: str) -> int:
     return int.from_bytes(hashlib.sha256(key).digest()[:8], "little") >> 1
 
 
-def make(case, seed, backend, mode, nthreads, nbins=64):
+def make(case, seed, backend, mode, nthreads, nbins=64, pd_policy="pin"):
     fam, snr, pd_min = case
     bp, kw = FAMILIES[fam]
     return lt.DynamicThresholdScheme(
@@ -79,6 +80,7 @@ def make(case, seed, backend, mode, nthreads, nbins=64):
         nthreads=nthreads,
         min_pd=pd_min,
         w_terminal=1.0,
+        pd_policy=pd_policy,
     )
 
 
@@ -98,8 +100,14 @@ def judge(case, thresholds, backend, nthreads):
 @click.option("--backend", default="cuda")
 @click.option(
     "--mode",
-    default="robust",
-    type=click.Choice(["shared", "robust"]),
+    default="descent",
+    type=click.Choice(["shared", "descent"]),
+)
+@click.option(
+    "--pd-policy",
+    default="pin",
+    type=click.Choice(["pin", "free"]),
+    help="Pd policy for mode 'descent': 'pin' (Pd = min_pd) or 'free' (L = C / Pd).",
 )
 @click.option("--seeds", default=8)
 @click.option("--nthreads", default=16)
@@ -109,25 +117,26 @@ def judge(case, thresholds, backend, nthreads):
     help="'all' or comma-separated indices of QUICK",
 )
 @click.option("--out", type=click.Path(path_type=pathlib.Path), default=None)
-def main(backend, mode, seeds, nthreads, cases, out):
+def main(backend, mode, pd_policy, seeds, nthreads, cases, out):
     sel = QUICK if cases == "all" else [QUICK[int(i)] for i in cases.split(",")]
     rows, failures = [], 0
     for case in sel:
         fam, snr, pd_min = case
-        pds, ls, claims, times = [], [], [], []
+        pds, ls, cs, claims, times = [], [], [], [], []
         ok = True
         for seed in range(1, seeds + 1):
             t0 = time.perf_counter()
-            scheme = make(case, seed, backend, mode, nthreads)
+            scheme = make(case, seed, backend, mode, nthreads, pd_policy=pd_policy)
             scheme.run(10)
             sol = scheme.solve()
             times.append(time.perf_counter() - t0)
             if len(sol["thresholds"]) == 0:
                 ok = False
                 continue
-            pd, _c, ell = judge(case, sol["thresholds"], backend, nthreads)
+            pd, c, ell = judge(case, sol["thresholds"], backend, nthreads)
             pds.append(pd)
             ls.append(ell)
+            cs.append(c)
             claims.append(sol["pd"])
             if pd < 0.9 * pd_min or abs(sol["pd"] - pd) > 0.1 * pd:
                 ok = False
@@ -144,6 +153,9 @@ def main(backend, mode, seeds, nthreads, cases, out):
             "pass": ok,
             "pd_min_judged": min(pds) if pds else None,
             "pd_median_judged": statistics.median(pds) if pds else None,
+            "pd_max_judged": max(pds) if pds else None,
+            "C_geomean": float(np.exp(np.mean(np.log(cs)))) if cs else None,
+            "C_cv": float(np.std(np.log(cs))) if cs else None,
             "max_claim_error": max(abs(c - p) / p for c, p in zip(claims, pds))
             if pds
             else None,
@@ -153,8 +165,10 @@ def main(backend, mode, seeds, nthreads, cases, out):
         rows.append(row)
         click.echo(
             f"{'ok  ' if ok else 'FAIL'} {fam:6s} snr={snr:<5} pd={pd_min:<5} "
-            f"pd judged min/med={row['pd_min_judged']:.3f}/{row['pd_median_judged']:.3f} "
-            f"claim err={row['max_claim_error']:.3f}  L={geo:.4g}  t={row['t_median_s']:.2f}s",
+            f"pd judged min/med/max={row['pd_min_judged']:.3f}/{row['pd_median_judged']:.3f}/"
+            f"{row['pd_max_judged']:.3f} claim err={row['max_claim_error']:.3f}  "
+            f"C={row['C_geomean']:.4g} (cv {row['C_cv']:.3f})  L={geo:.4g}  "
+            f"t={row['t_median_s']:.3f}s",
         )
     click.echo(f"{len(rows)} cases, {failures} failing")
     if out is not None:

@@ -219,8 +219,8 @@ struct Pool {
  * buffering strategy to improve cache locality.
  *
  * Manages two slot types: fold profiles (ntrials x nbins) and per-trial scores
- * (ntrials). Score pools are optional (score_slots_per_pool == 0 in legacy
- * mode).
+ * (ntrials). Score pools are optional (score_slots_per_pool == 0 when no
+ * search runs).
  */
 class DualPoolFoldManager {
 public:
@@ -900,35 +900,6 @@ simulate_and_score(const FoldsType& folds_cur,
 }
 
 std::pair<State, FoldsType>
-gen_next_using_thresh(const State& state_cur,
-                      const FoldsType& folds_cur,
-                      float threshold,
-                      float nbranches,
-                      float bias_snr,
-                      std::span<const float> profile,
-                      const StreamKey& key,
-                      DualPoolFoldManager& manager,
-                      ThreadLocalBuffers& buffers,
-                      BoxcarWidthsCache& box_cache,
-                      search::TimerStats::TimerMap& thread_timers,
-                      float var_add    = 1.0F,
-                      SizeType ntrials = 1024) {
-    auto rng_h0                        = key.stream(0);
-    auto rng_h1                        = key.stream(1);
-    auto [folds_h0_pruned, success_h0] = simulate_score_prune_fused(
-        *folds_cur.folds_h0, profile, rng_h0, manager, buffers, box_cache,
-        threshold, thread_timers, /*keep_best=*/true, 0.0F, var_add, ntrials);
-    auto [folds_h1_pruned, success_h1] = simulate_score_prune_fused(
-        *folds_cur.folds_h1, profile, rng_h1, manager, buffers, box_cache,
-        threshold, thread_timers, /*keep_best=*/false, bias_snr, var_add,
-        ntrials);
-    const auto state_next =
-        state_cur.gen_next(threshold, success_h0, success_h1, nbranches);
-    return {state_next,
-            FoldsType{std::move(folds_h0_pruned), std::move(folds_h1_pruned)}};
-}
-
-std::pair<State, FoldsType>
 gen_next_using_surv_prob(const State& state_cur,
                          const FoldsType& folds_cur,
                          float surv_prob_h0,
@@ -1035,12 +1006,10 @@ public:
           m_simulate(simulate),
           m_guess(guess) {
         const auto beam_guess = detail::beam_guess_from_string(guess);
-        if (is_shared_family(m_mode)) {
-            // make_thresholds_cpu builds modes 'shared' and 'robust' with
-            // their own engine.
-            throw std::logic_error(
-                "ThresholdsCpuEngine: modes 'shared' and 'robust' have their "
-                "own engine");
+        if (m_mode != DynamicThresholdMode::kImproved) {
+            // make_thresholds_cpu builds mode 'shared' with its own engine;
+            // 'descent' uses an evaluation-only 'improved' engine.
+            throw std::logic_error("ThresholdsCpuEngine: mode 'improved' only");
         }
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
@@ -1062,6 +1031,23 @@ public:
                  .nthresholds       = nthresholds,
                  .batch_size        = 1},
                 "ThresholdsCpu");
+        } else {
+            // Evaluation only (any grid, one stage allowed): the signal and
+            // noise the engine simulates must still be well defined.
+            detail::validate_signal_inputs(
+                {.branching_pattern = m_branching_pattern,
+                 .ref_ducy          = ref_ducy,
+                 .ducy_max          = ducy_max,
+                 .wtsp              = wtsp,
+                 .beam_width        = beam_width,
+                 .prob_min          = prob_min,
+                 .snr_final         = snr_final,
+                 .nbins             = nbins,
+                 .ntrials           = ntrials,
+                 .nprobs            = nprobs,
+                 .nthresholds       = nthresholds,
+                 .batch_size        = 1},
+                1, "ThresholdsCpu");
         }
         m_profile    = simulation::generate_folded_profile(nbins, ref_ducy);
         m_thresholds = detail::compute_thresholds(0.1F, snr_final, nthresholds);
@@ -1121,11 +1107,7 @@ public:
                 fold_slots_per_pool, score_slots_per_pool, pool_memory_size_gb);
             m_folds_current.resize(m_nthresholds * m_nprobs);
             m_folds_next.resize(m_nthresholds * m_nprobs);
-            if (m_mode == DynamicThresholdMode::kImproved) {
-                init_states_improved();
-            } else {
-                init_states_legacy();
-            }
+            init_states_improved();
         }
     }
     ~ThresholdsCpuEngine() override                                = default;
@@ -1175,7 +1157,7 @@ public:
         // to go of their noise survivors (detail::cost_to_go_scheme).
         m_cost_to_go.clear();
         run_pass(neigh, show_progress);
-        if (m_all_transitions && m_mode == DynamicThresholdMode::kImproved) {
+        if (m_all_transitions) {
             m_cost_to_go =
                 detail::cost_to_go_scheme(m_states, m_thresholds, m_probs,
                                           m_nstages, m_nthresholds, m_nprobs);
@@ -1202,31 +1184,18 @@ public:
                 folds.invalidate();
             }
             std::ranges::fill(m_states, State{});
-            if (m_mode == DynamicThresholdMode::kImproved) {
-                init_states_improved();
-            } else {
-                init_states_legacy();
-            }
+            init_states_improved();
         }
         m_has_run = true;
         progress::ProgressTracker bar("Computing scheme", m_nstages - 1,
                                       show_progress);
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             loki::check_interrupt();
-            if (m_mode == DynamicThresholdMode::kImproved) {
-                run_segment_improved(istage, neigh);
-                m_manager->swap_pools();
-                std::swap(m_folds_current, m_folds_next);
-                for (auto& fold_opt : m_folds_next) {
-                    fold_opt.invalidate();
-                }
-            } else {
-                run_segment_legacy(istage, neigh);
-                m_manager->swap_pools();
-                std::swap(m_folds_current, m_folds_next);
-                for (auto& fold_opt : m_folds_next) {
-                    fold_opt.invalidate();
-                }
+            run_segment_improved(istage, neigh);
+            m_manager->swap_pools();
+            std::swap(m_folds_current, m_folds_next);
+            for (auto& fold_opt : m_folds_next) {
+                fold_opt.invalidate();
             }
             bar.set_progress(istage);
         }
@@ -1288,19 +1257,69 @@ public:
                                 std::optional<uint64_t> seed,
                                 bool h0_only) const override {
         return evaluate_impl(thresholds, ntrials,
-                             seed.value_or(std::random_device{}()), nullptr,
-                             h0_only);
+                             seed.value_or(std::random_device{}()), h0_only);
     }
 
     uint64_t get_seed() const override { return m_seed; }
 
     std::vector<float> simulate_h1_scores(SizeType ntrials,
                                           uint64_t seed) const override {
-        const std::vector<float> open(m_nstages,
-                                      std::numeric_limits<float>::lowest());
+        if (ntrials == 0 || ntrials > (SizeType{1} << 20U)) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::simulate_h1_scores: ntrials must be "
+                "in [1, 2^20]");
+        }
         std::vector<float> h1_scores(m_nstages * ntrials, 0.0F);
-        evaluate_impl(open, ntrials, seed, &h1_scores, false);
+        run_h1_trials(ntrials, seed, &h1_scores, {}, 0.0F, nullptr);
         return h1_scores;
+    }
+
+    std::vector<float> h1_margins_above(std::span<const float> thresholds,
+                                        float min_margin,
+                                        SizeType n,
+                                        uint64_t seed) const override {
+        if (thresholds.size() != m_nstages) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::h1_margins_above: need one threshold "
+                "per stage");
+        }
+        if (n == 0 || n > (SizeType{1} << 20U)) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::h1_margins_above: ntrials must be in "
+                "[1, 2^20]");
+        }
+        std::vector<float> margins(n, std::numeric_limits<float>::max());
+        run_h1_trials(n, seed, nullptr, thresholds, min_margin, &margins);
+        return margins;
+    }
+
+    SizeType count_h1_survivors(std::span<const float> thresholds,
+                                SizeType n,
+                                uint64_t seed) const override {
+        if (thresholds.size() != m_nstages) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::count_h1_survivors: need one "
+                "threshold per stage");
+        }
+        if (n == 0 || n > (SizeType{1} << 20U)) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::count_h1_survivors: ntrials must be "
+                "in [1, 2^20]");
+        }
+        return run_h1_trials(n, seed, nullptr, thresholds, 0.0F, nullptr);
+    }
+
+    detail::NoiseGenealogy
+    simulate_h0_genealogy(std::span<const float> thresholds,
+                          SizeType ntrials,
+                          uint64_t seed) const override {
+        detail::NoiseGenealogy genealogy;
+        genealogy.ntrials = ntrials;
+        genealogy.scores.assign(m_nstages * ntrials, 0.0F);
+        genealogy.parent.assign(m_nstages * ntrials, 0U);
+        genealogy.pass_rate.assign(m_nstages, 0.0);
+        evaluate_impl(thresholds, ntrials, seed, true, &genealogy);
+        return genealogy;
     }
 
     std::vector<SizeType>
@@ -1310,14 +1329,162 @@ public:
     }
 
 private:
-    /// evaluate(); when @p h1_scores is set, also stores every stage's H1
-    /// scores (stage-major) before pruning. @p h0_only skips the H1 branch
-    /// (success_h1 = 1 in the states).
-    std::vector<State> evaluate_impl(std::span<const float> thresholds,
-                                     SizeType ntrials,
-                                     uint64_t eval_seed,
-                                     std::vector<float>* h1_scores,
-                                     bool h0_only) const {
+    /// Initial fold for one evaluation trial (shared by evaluate_impl and
+    /// run_h1_trials so RNG stream keys and signal bias live in one place).
+    void init_eval_fold(uint64_t eval_seed,
+                        uint32_t branch,
+                        uint32_t trial,
+                        float* dst) const {
+        auto rng = math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U, branch, trial);
+        fill_standard_normals(rng, dst, m_nbins, 1.0F);
+        if (branch == 1U) {
+            for (SizeType j = 0; j < m_nbins; ++j) {
+                dst[j] += m_profile[j] * m_bias_snr;
+            }
+        }
+    }
+
+    /// One evaluation stage update for one trial (shared by evaluate_impl and
+    /// run_h1_trials).
+    void advance_eval_fold(uint64_t eval_seed,
+                           uint32_t stage,
+                           uint32_t branch,
+                           uint32_t trial,
+                           const float* in,
+                           float* noise_buf,
+                           float* out) const {
+        auto rng =
+            math::make_keyed_pcg32(eval_seed, 2U, stage, 0U, branch, trial);
+        fill_standard_normals(rng, noise_buf, m_nbins, 1.0F);
+        const float scale = (branch == 1U) ? m_bias_snr : 0.0F;
+        for (SizeType j = 0; j < m_nbins; ++j) {
+            out[j] = in[j] + noise_buf[j] + (scale * m_profile[j]);
+        }
+    }
+
+    /// L2-tiled H1 trajectory evaluator: processes small tiles of trials per
+    /// OpenMP thread instead of stage-wide ntrials x nbins matrices, sharing
+    /// init_eval_fold / advance_eval_fold and snr_boxcar_2d_max_cpu with
+    /// evaluate_impl() so every float is bit-identical under -ffast-math.
+    /// Compacts dead trials within each tile when @p thresholds is non-empty.
+    SizeType run_h1_trials(SizeType ntrials,
+                           uint64_t eval_seed,
+                           std::vector<float>* h1_scores,
+                           std::span<const float> thresholds,
+                           float min_margin,
+                           std::vector<float>* margins) const {
+        loki::check_interrupt();
+        constexpr SizeType kTile = 64;
+        const SizeType nbins     = m_nbins;
+        const SizeType nstages   = m_nstages;
+        const bool prune         = !thresholds.empty();
+        SizeType survivors       = 0;
+        const SizeType ntiles    = (ntrials + kTile - 1) / kTile;
+        const auto ntiles_s      = static_cast<std::int64_t>(ntiles);
+
+        // NOLINTNEXTLINE(openmp-use-default-none): spans and members captured
+#pragma omp parallel num_threads(m_nthreads) reduction(+ : survivors)
+        {
+            std::vector<float> folds(kTile * nbins);
+            std::vector<float> generated(kTile * nbins);
+            std::vector<float> noise(kTile * nbins);
+            std::vector<float> scores(kTile);
+            std::array<uint32_t, kTile> active_trial{};
+            std::array<float, kTile> run_margin{};
+
+#pragma omp for schedule(dynamic)
+            for (std::int64_t tile_idx = 0; tile_idx < ntiles_s; ++tile_idx) {
+                if (loki::interrupt_requested()) {
+                    continue;
+                }
+                const SizeType base = static_cast<SizeType>(tile_idx) * kTile;
+                SizeType n_act      = std::min(kTile, ntrials - base);
+                for (SizeType k = 0; k < n_act; ++k) {
+                    const auto trial_u = static_cast<uint32_t>(base + k);
+                    active_trial[k]    = trial_u;
+                    run_margin[k]      = std::numeric_limits<float>::max();
+                    init_eval_fold(eval_seed, 1U, trial_u,
+                                   folds.data() + (k * nbins));
+                }
+
+                float var_in = 1.0F;
+                for (SizeType istage = 0; istage < nstages && n_act > 0;
+                     ++istage) {
+                    if (loki::interrupt_requested()) {
+                        break;
+                    }
+                    const auto stage = static_cast<uint32_t>(istage);
+                    for (SizeType k = 0; k < n_act; ++k) {
+                        advance_eval_fold(eval_seed, stage, 1U, active_trial[k],
+                                          folds.data() + (k * nbins),
+                                          noise.data() + (k * nbins),
+                                          generated.data() + (k * nbins));
+                    }
+                    const float stdnoise = std::sqrt(var_in + 1.0F);
+                    detection::detail::snr_boxcar_2d_max_cpu(
+                        std::span<const float>(generated.data(), n_act * nbins),
+                        m_box_score_widths,
+                        std::span<float>(scores.data(), n_act), n_act, nbins,
+                        stdnoise, /*nthreads=*/1);
+
+                    if (h1_scores != nullptr) {
+                        for (SizeType k = 0; k < n_act; ++k) {
+                            (*h1_scores)[(istage * ntrials) + active_trial[k]] =
+                                scores[k];
+                        }
+                    }
+                    if (!prune) {
+                        folds.swap(generated);
+                    } else {
+                        const float thr   = thresholds[istage];
+                        SizeType next_act = 0;
+                        for (SizeType k = 0; k < n_act; ++k) {
+                            const float m =
+                                std::min(run_margin[k], scores[k] - thr);
+                            if (m <= min_margin) {
+                                if (margins != nullptr) {
+                                    (*margins)[active_trial[k]] = m;
+                                }
+                            } else {
+                                active_trial[next_act] = active_trial[k];
+                                run_margin[next_act]   = m;
+                                std::copy_n(generated.data() + (k * nbins),
+                                            nbins,
+                                            folds.data() + (next_act * nbins));
+                                ++next_act;
+                            }
+                        }
+                        n_act = next_act;
+                    }
+                    var_in += 1.0F;
+                }
+                if (prune) {
+                    if (margins != nullptr) {
+                        for (SizeType k = 0; k < n_act; ++k) {
+                            (*margins)[active_trial[k]] = run_margin[k];
+                        }
+                    }
+                    for (SizeType k = 0; k < n_act; ++k) {
+                        if (run_margin[k] > 0.0F) {
+                            ++survivors;
+                        }
+                    }
+                }
+            }
+        }
+        loki::check_interrupt();
+        return survivors;
+    }
+
+    /// evaluate(); @p h0_only skips the H1 branch (success_h1 = 1 in the
+    /// states). With @p genealogy (and h0_only), the noise scores of every
+    /// stage and the slot each trial continues are stored.
+    std::vector<State>
+    evaluate_impl(std::span<const float> thresholds,
+                  SizeType ntrials,
+                  uint64_t eval_seed,
+                  bool h0_only,
+                  detail::NoiseGenealogy* genealogy = nullptr) const {
         if (thresholds.size() != m_nstages) {
             throw std::invalid_argument(
                 "DynamicThresholdScheme::evaluate: need one threshold per "
@@ -1336,30 +1503,22 @@ private:
         std::vector<float> noise(branch_hi * ntrials * nbins, 0.0F);
         std::vector<float> scores(branch_hi * ntrials, 0.0F);
         std::array<uint32_t, 2> n_in = {ntrials_u, ntrials_u};
+        // Slot (of its stage) of every compacted H0 survivor.
+        std::vector<uint32_t> order(genealogy != nullptr ? ntrials : 0);
         // Every draw comes from a stream keyed on (purpose, stage, branch,
         // trial), and the survivor compaction below stays serial, so the
         // states are identical for any thread count.
         const int nthreads = m_nthreads;
         const auto n_items = static_cast<std::int64_t>(branch_hi * ntrials);
-        // H1 scores only: the H0 branch is not simulated
-        const std::int64_t item_lo =
-            h1_scores != nullptr ? static_cast<std::int64_t>(ntrials) : 0;
-        const uint32_t branch_lo = h1_scores != nullptr ? 1U : 0U;
 
         // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(nthreads)
-        for (std::int64_t item = item_lo; item < n_items; ++item) {
+        for (std::int64_t item = 0; item < n_items; ++item) {
             const auto branch = static_cast<uint32_t>(item / ntrials_u);
             const auto trial  = static_cast<uint32_t>(item % ntrials_u);
-            auto rng =
-                math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U, branch, trial);
-            float* dst = folds.data() + (static_cast<SizeType>(item) * nbins);
-            fill_standard_normals(rng, dst, nbins, 1.0F);
-            if (branch == 1) {
-                for (SizeType j = 0; j < nbins; ++j) {
-                    dst[j] += m_profile[j] * m_bias_snr;
-                }
-            }
+            init_eval_fold(eval_seed, branch, trial,
+                           folds.data() +
+                               (static_cast<SizeType>(item) * nbins));
         }
 
         std::vector<State> states(m_nstages);
@@ -1370,16 +1529,10 @@ private:
             const auto stage = static_cast<uint32_t>(istage);
             // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(nthreads)
-            for (std::int64_t item = item_lo; item < n_items; ++item) {
-                const auto branch = static_cast<uint32_t>(item / ntrials_u);
-                const auto trial  = static_cast<uint32_t>(item % ntrials_u);
-                auto rng = math::make_keyed_pcg32(eval_seed, 2U, stage, 0U,
-                                                  branch, trial);
-                fill_standard_normals(
-                    rng, noise.data() + (static_cast<SizeType>(item) * nbins),
-                    nbins, 1.0F);
+            for (std::int64_t item = 0; item < n_items; ++item) {
+                const auto branch    = static_cast<uint32_t>(item / ntrials_u);
+                const auto trial     = static_cast<uint32_t>(item % ntrials_u);
                 const uint32_t nsurv = n_in[branch];
-                const float scale    = (branch == 1) ? m_bias_snr : 0.0F;
                 uint32_t src         = trial;
                 if (trial >= nsurv) {
                     auto boot = math::make_keyed_pcg32(eval_seed, 3U, stage, 0U,
@@ -1389,18 +1542,18 @@ private:
                         static_cast<uint32_t>(draw * static_cast<float>(nsurv)),
                         nsurv - 1U);
                 }
-                const float* in =
-                    folds.data() + (((branch * ntrials) + src) * nbins);
-                const float* nz =
-                    noise.data() + (static_cast<SizeType>(item) * nbins);
-                float* out =
-                    generated.data() + (static_cast<SizeType>(item) * nbins);
-                for (SizeType j = 0; j < nbins; ++j) {
-                    out[j] = in[j] + nz[j] + (scale * m_profile[j]);
+                if (genealogy != nullptr && istage > 0) {
+                    genealogy->parent[((istage - 1) * ntrials) + trial] =
+                        order[src];
                 }
+                advance_eval_fold(
+                    eval_seed, stage, branch, trial,
+                    folds.data() + (((branch * ntrials) + src) * nbins),
+                    noise.data() + (static_cast<SizeType>(item) * nbins),
+                    generated.data() + (static_cast<SizeType>(item) * nbins));
             }
             const float stdnoise = std::sqrt(var_in + 1.0F);
-            for (uint32_t branch = branch_lo; branch < branch_hi; ++branch) {
+            for (uint32_t branch = 0; branch < branch_hi; ++branch) {
                 detection::detail::snr_boxcar_2d_max_cpu(
                     std::span<const float>(generated.data() +
                                                (branch * ntrials * nbins),
@@ -1410,22 +1563,12 @@ private:
                                      ntrials),
                     ntrials, nbins, stdnoise, nthreads);
             }
-            if (h1_scores != nullptr) {
-                std::copy_n(scores.data() + ntrials, ntrials,
-                            h1_scores->data() + (istage * ntrials));
+            if (genealogy != nullptr) {
+                std::copy_n(scores.data(), ntrials,
+                            genealogy->scores.data() + (istage * ntrials));
             }
             std::array<uint32_t, 2> counts = {0, h0_only ? ntrials_u : 0U};
-            if (h1_scores != nullptr) {
-                // Nothing is pruned: every trial survives in its own slot, so
-                // the compaction is the identity. Swap instead of copying.
-                folds.swap(generated);
-                counts[1] = ntrials_u;
-                n_in[1]   = ntrials_u;
-            }
-            for (uint32_t branch = branch_lo; branch < branch_hi; ++branch) {
-                if (h1_scores != nullptr) {
-                    break;
-                }
+            for (uint32_t branch = 0; branch < branch_hi; ++branch) {
                 const float* branch_scores = scores.data() + (branch * ntrials);
                 uint32_t n                 = 0;
                 for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
@@ -1436,6 +1579,9 @@ private:
                         float* dst =
                             folds.data() + (((branch * ntrials) + n) * nbins);
                         std::copy_n(src, nbins, dst);
+                        if (genealogy != nullptr) {
+                            order[n] = trial;
+                        }
                         ++n;
                     }
                 }
@@ -1447,6 +1593,9 @@ private:
                         branch_scores);
                     std::copy_n(generated.data() + (best * nbins), nbins,
                                 folds.data());
+                    if (genealogy != nullptr) {
+                        order[0] = best;
+                    }
                     n = 1;
                 }
                 counts[branch] = n;
@@ -1457,6 +1606,10 @@ private:
                 thresholds[istage], static_cast<float>(counts[0]) / ntrials_f,
                 static_cast<float>(counts[1]) / ntrials_f,
                 m_branching_pattern[istage]);
+            if (genealogy != nullptr) {
+                genealogy->pass_rate[istage] = static_cast<double>(counts[0]) /
+                                               static_cast<double>(ntrials);
+            }
             states[istage] = next;
             prev           = next;
             var_in += 1.0F;
@@ -1530,13 +1683,10 @@ private:
         const auto max_persistent = max_active_per_stage * m_nprobs * 2;
         const auto max_temporary  = static_cast<SizeType>(m_nthreads) * 2;
         SizeType fold_slots       = max_persistent + max_temporary;
-        SizeType score_slots      = 0;
-        if (m_mode == DynamicThresholdMode::kImproved) {
-            // Full simulated folds (h0 + h1) per parent state in the beam;
-            // scores only live in those stage-local folds
-            fold_slots += max_active_per_stage * m_nprobs * 2;
-            score_slots = max_active_per_stage * m_nprobs * 2;
-        }
+        // Full simulated folds (h0 + h1) per parent state in the beam;
+        // scores only live in those stage-local folds
+        fold_slots += max_active_per_stage * m_nprobs * 2;
+        const SizeType score_slots = max_active_per_stage * m_nprobs * 2;
         return {fold_slots, score_slots};
     }
 
@@ -1556,25 +1706,14 @@ private:
         const auto max_temporary        = static_cast<SizeType>(m_nthreads) * 2;
         const auto [fold_slots, score_slots] = pool_slots();
 
-        if (m_mode == DynamicThresholdMode::kImproved) {
-            const auto max_sim_folds = max_active_per_stage * m_nprobs * 2;
-            spdlog::debug(
-                "Allocation analysis (improved): {} active thresholds "
-                "max, {} prob bins, {} threads",
-                max_active_per_stage, m_nprobs, m_nthreads);
-            spdlog::debug("Fold pool: {} persistent + {} sim_folds + {} "
-                          "temporary = {} slots",
-                          max_persistent, max_sim_folds, max_temporary,
-                          fold_slots);
-            spdlog::debug("Score pool: {} stage-local slots", score_slots);
-        } else {
-            spdlog::debug("Allocation analysis: {} active thresholds max, {} "
-                          "prob bins, {} threads",
-                          max_active_per_stage, m_nprobs, m_nthreads);
-            spdlog::debug(
-                "Need {} persistent + {} temporary = {} fold slots per pool",
-                max_persistent, max_temporary, fold_slots);
-        }
+        const auto max_sim_folds = max_active_per_stage * m_nprobs * 2;
+        spdlog::debug("Allocation analysis (improved): {} active thresholds "
+                      "max, {} prob bins, {} threads",
+                      max_active_per_stage, m_nprobs, m_nthreads);
+        spdlog::debug("Fold pool: {} persistent + {} sim_folds + {} "
+                      "temporary = {} slots",
+                      max_persistent, max_sim_folds, max_temporary, fold_slots);
+        spdlog::debug("Score pool: {} stage-local slots", score_slots);
         return {fold_slots, score_slots};
     }
 
@@ -1609,35 +1748,6 @@ private:
         };
     }
 
-    void init_states_legacy() {
-        auto buffers_ptr =
-            std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
-        auto boxcar_widths_cache_ptr =
-            std::make_unique<detection::BoxcarWidthsCache>(m_box_score_widths,
-                                                           m_nbins);
-
-        const auto fold_state     = create_initial_fold_state(*buffers_ptr);
-        State const initial_state = State::initial();
-        const auto thresholds_idx = get_current_thresholds_idx(0);
-        search::TimerStats::TimerMap thread_timers;
-        for (SizeType const ithres : thresholds_idx) {
-            auto [cur_state, cur_fold_state] = gen_next_using_thresh(
-                initial_state, fold_state, m_thresholds[ithres],
-                m_branching_pattern[0], m_bias_snr, m_profile,
-                step_key(0, 0, ithres), *m_manager, *buffers_ptr,
-                *boxcar_widths_cache_ptr, thread_timers, 1.0F, m_ntrials);
-
-            const auto iprob = utils::find_lower_bin_index(
-                m_probs, cur_state.success_h1_cumul);
-            if (iprob < 0 || std::cmp_greater_equal(iprob, m_nprobs)) {
-                continue;
-            }
-            const auto fold_idx       = (ithres * m_nprobs) + iprob;
-            m_states[fold_idx]        = cur_state;
-            m_folds_current[fold_idx] = std::move(cur_fold_state);
-        }
-    }
-
     void init_states_improved() {
         auto buffers_ptr =
             std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
@@ -1663,87 +1773,6 @@ private:
             m_states[fold_idx]        = cur_state;
             m_folds_current[fold_idx] = std::move(cur_fold_state);
         }
-    }
-
-    // Run a segment of the dynamic threshold scheme (legacy mode)
-    void run_segment_legacy(SizeType istage, SizeType thres_neigh = 10) {
-        const auto beam_idx_cur      = get_current_thresholds_idx(istage);
-        const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
-        const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
-        const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
-
-        // Local stats for this segment
-        search::TimerStats segment_stats(m_nthreads);
-
-        // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
-#pragma omp parallel num_threads(m_nthreads)
-        {
-            // Not thread_local: it would keep an earlier scheme's sizes
-            auto buffers_ptr =
-                std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
-            auto boxcar_widths_cache_ptr =
-                std::make_unique<detection::BoxcarWidthsCache>(
-                    m_box_score_widths, m_nbins);
-
-            auto& thread_timers = segment_stats.get_thread_local();
-#pragma omp for schedule(dynamic)
-            for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
-                const auto ithres = beam_idx_cur[i];
-                // Find nearest neighbors in the previous beam
-                const auto neighbour_beam_indices =
-                    utils::find_neighbouring_indices(beam_idx_prev, ithres,
-                                                     thres_neigh);
-                for (SizeType const jthresh : neighbour_beam_indices) {
-                    for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
-                        const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
-                        const auto prev_state =
-                            m_states[stage_offset_prev + prev_fold_idx];
-
-                        if (prev_state.is_empty) {
-                            continue;
-                        }
-                        const auto& prev_fold_state =
-                            m_folds_current[prev_fold_idx];
-                        if (!prev_fold_state.is_valid() ||
-                            prev_fold_state.is_empty()) {
-                            continue;
-                        }
-                        auto [cur_state, cur_fold_state] =
-                            gen_next_using_thresh(
-                                prev_state, prev_fold_state,
-                                m_thresholds[ithres],
-                                m_branching_pattern[istage], m_bias_snr,
-                                m_profile,
-                                step_key(istage, prev_fold_idx, ithres),
-                                *m_manager, *buffers_ptr,
-                                *boxcar_widths_cache_ptr, thread_timers, 1.0F,
-                                m_ntrials);
-
-                        const auto iprob = utils::find_lower_bin_index(
-                            m_probs, cur_state.success_h1_cumul);
-                        if (iprob < 0 ||
-                            std::cmp_greater_equal(iprob, m_nprobs)) {
-                            continue;
-                        }
-
-                        const auto cur_idx       = (ithres * m_nprobs) + iprob;
-                        const auto cur_state_idx = stage_offset_cur + cur_idx;
-
-                        State& existing_state     = m_states[cur_state_idx];
-                        FoldsType& existing_folds = m_folds_next[cur_idx];
-
-                        if (existing_state.is_empty ||
-                            cur_state.complexity_cumul <
-                                existing_state.complexity_cumul) {
-                            existing_state = cur_state;
-                            existing_folds = std::move(cur_fold_state);
-                        }
-                    }
-                }
-            }
-        }
-        // Merge this segment's stats into global
-        m_timer_stats.merge(segment_stats);
     }
 
     FoldGrid

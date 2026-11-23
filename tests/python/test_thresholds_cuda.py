@@ -50,7 +50,7 @@ def _field_bytes(states: np.ndarray) -> np.ndarray:
     )
 
 
-@pytest.mark.parametrize("mode", ["legacy", "improved"])
+@pytest.mark.parametrize("mode", ["improved"])
 def test_seeded_runs_are_bit_identical(mode: str) -> None:
     scheme_a = _scheme(mode, seed=11)
     scheme_a.run(thres_neigh=THRES_NEIGH)
@@ -69,7 +69,7 @@ def test_seeded_runs_are_bit_identical(mode: str) -> None:
     assert not np.array_equal(states_a, _field_bytes(scheme_c.get_states()))
 
 
-@pytest.mark.parametrize("mode", ["legacy", "improved"])
+@pytest.mark.parametrize("mode", ["improved"])
 def test_states_layout_matches_cpu(mode: str) -> None:
     scheme = _scheme(mode, seed=3)
     scheme.run(thres_neigh=THRES_NEIGH)
@@ -118,7 +118,7 @@ def test_rejects_invalid_input(kwargs: dict) -> None:
         _scheme(mode, seed=1, **kwargs)
 
 
-@pytest.mark.parametrize("mode", ["improved", "legacy"])
+@pytest.mark.parametrize("mode", ["improved"])
 def test_evaluate_is_reproducible_and_leaves_the_grid_alone(mode: str) -> None:
     scheme = _scheme(mode, seed=9)
     scheme.run(thres_neigh=THRES_NEIGH)

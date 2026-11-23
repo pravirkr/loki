@@ -173,4 +173,8 @@ if(CMAKE_CUDA_COMPILER)
   target_include_directories(
     ${LOKI_LIBRARY_NAME}_internal SYSTEM INTERFACE ${LOKI_CUDA_INCLUDE_DIRS}
   )
+  # lib/cuda/device_rng.cuh includes cuRANDDx (tests that launch the scorers).
+  if(LOKI_NEEDS_CURANDDX)
+    target_link_libraries(${LOKI_LIBRARY_NAME}_internal INTERFACE mathdx::curanddx)
+  endif()
 endif()

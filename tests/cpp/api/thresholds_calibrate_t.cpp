@@ -105,7 +105,7 @@ TEST_CASE("DynamicThresholdScheme keeps a noise trial when none passes",
     constexpr SizeType kNtrials = 1024;
     constexpr float kSnrFinal   = 16.0F;
     const auto* backend         = GENERATE("cpu", "cuda");
-    const auto* mode            = GENERATE("legacy", "improved");
+    const auto* mode            = GENERATE("improved");
     CAPTURE(backend, mode);
     if (skip_backend(backend)) {
         SKIP("needs a CUDA build");

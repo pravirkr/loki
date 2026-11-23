@@ -8,8 +8,8 @@ Subcommands (all CUDA by default; pass ``--backend cpu`` for a check):
     average and only the selected cell is low (selection, the winner's curse).
 ``ntrials``
     Bias and spread of the selected path against the search trial count.
-``modes``
-    Legacy against improved mode at the same trial count.
+
+(``modes``, legacy against improved, went with mode "legacy".)
 """
 
 from __future__ import annotations
@@ -317,46 +317,6 @@ def ntrials(opts: dict, mode: str, trials: str) -> None:
             f"feasible       {np.mean(re >= opts['min_pd']):.3f}   min {re.min():.4f}"
         )
         print(f"L re/in        {stats(ratio_l)}", flush=True)
-
-
-@cli.command()
-@click.pass_obj
-def modes(opts: dict) -> None:
-    """E3: legacy against improved, selected path."""
-    bp, kw, neigh = config(opts["cfg"])
-    seeds = range(opts["seed_start"], opts["seed_start"] + opts["num_seeds"])
-    for mode in ("legacy", "improved"):
-        in_pd, re_pd, re_cost, secs = [], [], [], []
-        for seed in seeds:
-            scheme, dt = search(
-                bp,
-                kw,
-                neigh,
-                seed=seed,
-                mode=mode,
-                backend=opts["backend"],
-            )
-            secs.append(dt)
-            sel = selected(scheme, opts["min_pd"])
-            if sel is None:
-                continue
-            path, pd_in, _ = sel
-            pd_re, cost_re = rescore(
-                scheme,
-                path,
-                opts["eval_trials"],
-                seed + EVAL_OFFSET,
-            )
-            in_pd.append(pd_in)
-            re_pd.append(pd_re)
-            re_cost.append(cost_re)
-        re = np.asarray(re_pd)
-        print(f"=== {mode} ({opts['backend']}), run {np.median(secs):.2f} s ===")
-        print(f"in-run P_d     {stats(in_pd)}")
-        print(f"re-scored P_d  {stats(re_pd)}")
-        print(f"bias (re-in)   {stats(re - np.asarray(in_pd))}")
-        print(f"feasible       {np.mean(re >= opts['min_pd']):.3f}")
-        print(f"re-scored L    {stats(re_cost)}", flush=True)
 
 
 @cli.command()

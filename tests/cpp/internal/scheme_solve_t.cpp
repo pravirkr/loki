@@ -169,33 +169,6 @@ TEST_CASE("tighten_schedule raises thresholds without losing a survivor",
     REQUIRE(none == untouched);
 }
 
-TEST_CASE("refinement_blocks cuts the stages into equal log-branching",
-          "[thresholds][solve]") {
-    // Uniform branching: four equal blocks
-    const std::vector<float> flat(16, 2.0F);
-    const auto cuts = detail::refinement_blocks(flat);
-    REQUIRE(cuts.size() == 5);
-    REQUIRE(cuts.front() == 0);
-    REQUIRE(cuts.back() == 16);
-    for (SizeType k = 1; k < 4; ++k) {
-        // a cut lands within one stage of the exact quarter
-        REQUIRE(cuts[k] + 1 >= 4 * k);
-        REQUIRE(cuts[k] <= 4 * k);
-    }
-    // Everything in the first stage: the other cuts collapse
-    std::vector<float> front(8, 1.0F);
-    front[0]      = 1000.0F;
-    const auto fc = detail::refinement_blocks(front);
-    REQUIRE(fc.front() == 0);
-    REQUIRE(fc.back() == 8);
-    REQUIRE(std::ranges::is_sorted(fc));
-    REQUIRE(std::ranges::adjacent_find(fc) == fc.end());
-    // Fewer stages than blocks
-    const auto two = detail::refinement_blocks(std::vector<float>{2.0F, 2.0F});
-    REQUIRE(two.front() == 0);
-    REQUIRE(two.back() == 2);
-}
-
 TEST_CASE("window_scheme order statistics equal a full sort",
           "[thresholds][solve]") {
     constexpr SizeType kN = 2048;
@@ -244,6 +217,34 @@ double cost_per_detection(const loki::detection::detail::ThresholdsEngine& eng,
 
 } // namespace
 
+TEST_CASE("resample_zscores carries z-scores to another stage count",
+          "[thresholds][descent]") {
+    const std::vector<float> z = {2.0F, 0.0F, 1.0F, 3.0F};
+    // The same count: unchanged
+    REQUIRE(detail::resample_zscores(z, 4) == z);
+    // Linear in the fractional stage position, the ends kept
+    const auto longer = detail::resample_zscores(z, 7);
+    REQUIRE(longer.size() == 7);
+    const std::vector<float> expected = {2.0F, 1.0F, 0.0F, 0.5F,
+                                         1.0F, 2.0F, 3.0F};
+    for (SizeType s = 0; s < expected.size(); ++s) {
+        CAPTURE(s);
+        REQUIRE_THAT(longer[s], WithinAbs(expected[s], 1e-6));
+    }
+    const auto shorter = detail::resample_zscores(longer, 4);
+    REQUIRE(shorter.size() == 4);
+    for (SizeType s = 0; s < z.size(); ++s) {
+        CAPTURE(s);
+        REQUIRE_THAT(shorter[s], WithinAbs(z[s], 1e-6));
+    }
+    const auto two = detail::resample_zscores(z, 2);
+    REQUIRE(two == std::vector<float>{2.0F, 3.0F});
+    // Nothing to carry over: no start
+    REQUIRE(detail::resample_zscores({}, 5).empty());
+    REQUIRE(detail::resample_zscores(std::vector<float>{1.0F}, 5).empty());
+    REQUIRE(detail::resample_zscores(z, 1).empty());
+}
+
 TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
           "[thresholds][solve][slow][bigmem]") {
     // The 8-segment pattern of issue #15. A schedule searched at 64 bins is too
@@ -254,8 +255,7 @@ TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
     constexpr float kMinPd      = 0.3F;
     auto proxy                  = shared_engine(bp, 64, kMinPd);
     proxy->run(10, /*show_progress=*/false);
-    const auto searched =
-        detail::solve_scheme(*proxy, kMinPd, 1.0, /*robust=*/false);
+    const auto searched = detail::solve_scheme(*proxy, kMinPd, 1.0);
     REQUIRE_FALSE(searched.thresholds.empty());
     proxy.reset();
 
@@ -279,8 +279,7 @@ TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
     // nbins)
     auto native = shared_engine(bp, 256, kMinPd);
     native->run(10, /*show_progress=*/false);
-    const auto sol =
-        detail::solve_scheme(*native, kMinPd, 1.0, /*robust=*/false);
+    const auto sol           = detail::solve_scheme(*native, kMinPd, 1.0);
     const double native_cost = cost_per_detection(*native, sol.thresholds);
     CAPTURE(native_cost);
     REQUIRE(refitted < 1.5 * native_cost);

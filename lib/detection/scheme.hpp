@@ -121,6 +121,14 @@ struct SchemeInputs {
 /// std::invalid_argument naming @p who.
 void validate_scheme_inputs(const SchemeInputs& in, std::string_view who);
 
+/// Checks the inputs of the simulated signal and noise alone (branching
+/// pattern of at least @p min_stages stages, nbins, ref_ducy, ducy_max, wtsp,
+/// snr_final), for engines that only evaluate; the grid fields of @p in are
+/// not read. Throws std::invalid_argument naming @p who.
+void validate_signal_inputs(const SchemeInputs& in,
+                            SizeType min_stages,
+                            std::string_view who);
+
 /// Logs the first stage that ended with no state (nothing survived into it).
 void warn_empty_stages(std::span<const State> states,
                        SizeType nstages,
@@ -184,12 +192,6 @@ inline bool within_reach(float cur,
     return std::abs(d) <= reach * sigma_cur;
 }
 
-/** Guess learnt from a searched path: g + smoothed (path - g), the offset
- * averaged over 3 consecutive stages. @p guess_path if @p path is empty.
- */
-std::vector<float> recentre_guess(std::span<const float> guess_path,
-                                  std::span<const float> path);
-
 /// Indices of @p thresholds inside [lo, hi].
 std::vector<SizeType>
 beam_indices(std::span<const float> thresholds, float lo, float hi);
@@ -249,8 +251,8 @@ SizeType best_terminal_cell(std::span<const State> states,
                             double w_terminal);
 
 /** Expected future cost per surviving noise leaf, per stage, from a finished
- * run (the second pass of modes improved with the "window" beam and robust
- * ranks cell candidates by cost so far plus h[s] * complexity). Paths: the
+ * run (the second pass of mode improved with the "window" beam ranks cell
+ * candidates by cost so far plus h[s] * complexity). Paths: the
  * cheapest terminal cell (terminal_rank) of every probability bin below
  * pd_max_factor * probs[0]. Per stage, h of a path is (C_final - C_s) / n_s;
  * the result is the median over paths, then a moving average over up to 2 *
@@ -320,17 +322,9 @@ float relax_schedule(std::vector<float>& thresholds,
 std::pair<SizeType, SizeType> tighten_schedule(std::vector<float>& thresholds,
                                                const SignalBank& bank);
 
-/** Cut points (stage indices, first 0, last nstages) of up to four blocks of
- * equal total log-branching. */
-std::vector<SizeType> refinement_blocks(std::span<const float> branching);
-
-/** DynamicThresholdScheme::solve on a mode "shared" or "robust" engine after
- * run(). @p robust adds the shortlist and the block refinement.
- */
-SchemeSolution solve_scheme(ThresholdsEngine& engine,
-                            float min_pd,
-                            double w_terminal,
-                            bool robust);
+/** DynamicThresholdScheme::solve on a mode "shared" engine after run(). */
+SchemeSolution
+solve_scheme(ThresholdsEngine& engine, float min_pd, double w_terminal);
 
 /** Re-fits a schedule found at a smaller nbins to the folds of @p engine (an
  * evaluation-only engine at the true nbins; nothing else of it is used).
@@ -353,6 +347,65 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
                             double w_terminal,
                             uint64_t seed,
                             const SolveBudget& budget);
+
+/// Settings of mode "descent" (the defaults are the validated ones).
+struct DescentOptions {
+    /// Floor of the last threshold, in S/N (<= 0: none).
+    float final_threshold{0.0F};
+    /// Trials of the signal sample the descent counts Pd on.
+    SizeType nsignal{SizeType{1} << 15U};
+    /// Passes, each run once (empty: the default levels, each repeated
+    /// while it still gains).
+    std::vector<DescentPass> passes;
+    /// Starting schedule, e.g. the solution of a similar pattern (empty: the
+    /// cheaper of the flat z-score and the smooth-shape candidates).
+    std::vector<float> start;
+    /// The start holds z-scores, (mean - threshold) / sd of the unpruned
+    /// signal score per stage, as SchemeSolution::zscores reports them.
+    bool start_zscores{false};
+    /// Trials of the pin's and the report's signal samples, and of the final
+    /// noise evaluation (0: the engine's solve_budget()).
+    SizeType nbank{0};
+    SizeType nnoise{0};
+    int nthreads{1};
+    /// kPin: minimise C at Pd = min_pd (two-sided pin); kFree: minimise
+    /// L = C / Pd subject to Pd >= min_pd (Dinkelbach).
+    PdPolicy pd_policy{PdPolicy::kPin};
+};
+
+/// The S/N a noise score exceeds with probability @p fap / @p ntemplates
+/// (one-sided Gaussian tail).
+float fap_threshold(double fap, double ntemplates);
+
+/// Throws std::invalid_argument for settings that describe no descent: a
+/// pass whose ntrials is outside [1, 2^20], whose margin or step is not
+/// finite and positive, whose step is not below its margin (no downward
+/// move would stay above the genealogy's schedule), or whose blocks are
+/// empty (min_block 0 or above max_block); a signal sample outside
+/// [1, 2^20]; a start that is not one finite value per stage of
+/// @p nstages; a non-finite floor.
+void validate_descent_options(const DescentOptions& options, SizeType nstages);
+
+/// The z-scores of a schedule (SchemeSolution::zscores) at @p nstages stages,
+/// as the start of a descent on another pattern: linear in the fractional
+/// stage position when the stage counts differ. Empty (no start) when
+/// @p zscores is empty or either count is below 2 and they differ.
+std::vector<float> resample_zscores(std::span<const float> zscores,
+                                    SizeType nstages);
+
+/** Mode "descent": moves thresholds (single stages and blocks of stages) on
+ * fixed samples: a noise genealogy counts the exact change of C of a move, an
+ * unpruned signal sample the exact change of Pd. Under PdPolicy::kPin it
+ * minimises C subject to Pd = min_pd and always pins two-sided on a fresh
+ * bank; under PdPolicy::kFree it minimises L = C / Pd subject to Pd >= min_pd
+ * via a Dinkelbach multiplier (>= C / Pd) and uses one-sided repair when an
+ * interior Pd exceeds the target by a scaled margin. Reports and evaluates on
+ * fresh samples as solve() does. See docs/dts.md.
+ */
+SchemeSolution descend_scheme(const ThresholdsEngine& engine,
+                              float min_pd,
+                              double w_terminal,
+                              const DescentOptions& options);
 
 /** DynamicThresholdScheme::calibrate on any engine (after run()). */
 CalibratedPath calibrate_path(const ThresholdsEngine& engine,

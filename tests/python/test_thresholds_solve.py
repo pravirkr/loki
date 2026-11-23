@@ -1,4 +1,4 @@
-"""Tests for DynamicThresholdScheme.solve (modes "shared" and "robust", CPU and CUDA)."""
+"""Tests for DynamicThresholdScheme.solve (mode "shared", CPU and CUDA)."""
 
 from __future__ import annotations
 
@@ -51,16 +51,15 @@ def _scheme(backend: str, seed: int = 7, mode: str = "shared", **opts):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("mode", ["shared", "robust"])
-def test_solve_reports_the_pd_of_its_thresholds(backend: str, mode: str) -> None:
-    scheme = _scheme(backend, mode=mode)
+def test_solve_reports_the_pd_of_its_thresholds(backend: str) -> None:
+    scheme = _scheme(backend)
     scheme.run(10)
     sol = scheme.solve()
     thresholds = sol["thresholds"]
     assert thresholds.shape == (scheme.nstages,)
     assert sol["delivery"] != "no_path"
-    # only robust compares a shortlist of candidates
-    assert (len(sol["shortlist"]) == 0) == (mode == "shared")
+    # the key of the removed mode robust's shortlist stays, empty
+    assert len(sol["shortlist"]) == 0
     assert sol["pd"] >= 0.9 * MIN_PD
     assert sol["pd_se"] > 0
     assert sol["pd_trials"] == 1 << 17
@@ -76,9 +75,8 @@ def test_solve_reports_the_pd_of_its_thresholds(backend: str, mode: str) -> None
     assert abs(float(check["success_h1_cumul"]) - sol["pd"]) < 5 * se
 
 
-@pytest.mark.parametrize("mode", ["legacy", "improved"])
-def test_solve_needs_a_shared_mode(mode: str) -> None:
-    scheme = _scheme("cpu", mode=mode)
+def test_solve_needs_a_shared_mode() -> None:
+    scheme = _scheme("cpu", mode="improved")
     scheme.run(6)
     with pytest.raises(ValueError, match="shared"):
         scheme.solve()
@@ -90,7 +88,7 @@ def test_the_guided_beam_needs_a_positive_width_and_reach(opts: dict) -> None:
         _scheme("cpu", **opts)
 
 
-@pytest.mark.parametrize("mode", ["legacy", "improved", "shared", "robust"])
+@pytest.mark.parametrize("mode", ["improved", "shared"])
 def test_save_in_every_mode_and_the_solution_after_solve(
     mode: str,
     tmp_path: Path,
@@ -107,7 +105,7 @@ def test_save_in_every_mode_and_the_solution_after_solve(
         )
         assert "solution" not in f
         assert f.attrs["mode"] == mode
-    if mode not in ("shared", "robust"):
+    if mode != "shared":
         return
     sol = scheme.solve()
     solved = Path(scheme.save(outdir=str(tmp_path / "solved")))
@@ -138,10 +136,9 @@ def test_shared_states_have_the_pd_grid_anchored_at_min_pd() -> None:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("mode", ["shared", "robust"])
-def test_solve_can_run_twice(backend: str, mode: str) -> None:
+def test_solve_can_run_twice(backend: str) -> None:
     # solve() frees the search's device memory; a second call must still work
-    scheme = _scheme(backend, mode=mode)
+    scheme = _scheme(backend)
     scheme.run(10)
     first = scheme.solve()
     second = scheme.solve()
@@ -203,3 +200,10 @@ def test_solve_keeps_a_bright_pulsar(backend: str) -> None:
     sol = scheme.solve()
     assert sol["delivery"] == "met"
     assert sol["pd"] > 0.98
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("mode", ["legacy", "robust"])
+def test_removed_modes_raise(backend: str, mode: str) -> None:
+    with pytest.raises(ValueError, match="was removed"):
+        _scheme(backend, mode=mode)

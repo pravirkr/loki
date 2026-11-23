@@ -342,8 +342,8 @@ TEST_CASE("CUDA threshold pools are allocated by run() only",
     if (!loki::is_available(Backend::kCUDA)) {
         SKIP("needs a CUDA build");
     }
-    const std::string mode = GENERATE(
-        std::string{"legacy"}, std::string{"improved"}, std::string{"shared"});
+    const std::string mode =
+        GENERATE(std::string{"improved"}, std::string{"shared"});
     const std::vector<float> bp{2.0F, 2.0F, 1.5F, 2.0F};
     const std::vector<float> thresholds(bp.size(), 1.5F);
     const auto make = [&] {

@@ -5,7 +5,7 @@
  * @brief Scorers, device helpers and scorer-templated kernels of the CUDA
  * DynamicThresholdScheme. Internal.
  *
- * Each scorer type instantiates four heavy, fully unrolled kernels. To keep
+ * Each scorer type instantiates heavy, fully unrolled kernels. To keep
  * compile time down they are compiled in their own translation units:
  * thresholds_reg_cuda.cu (RegScorer) and thresholds_generic_cuda.cu
  * (GenericScorer). thresholds_cuda.cu reaches them only through
@@ -157,23 +157,17 @@ struct ParentCandidate {
 // ---------------------------------------------------------------------------
 // Stage pipelines (no host syncs, no per-stage allocations).
 //
-// Both modes enumerate the transitions of stage s as (pair, kprob) items,
+// The transitions of stage s are enumerated as (pair, kprob) items,
 // item = pair * nprobs + kprob, in the order of the original batched walk,
 // so "lowest item index" is the original tie-break order.
 //
-// Modes improved, shared and robust (one simulation per parent cell, shared
-// by its children; the shared modes count H1 on bitmasks of shared trials):
+// Modes improved and shared (one simulation per parent cell, shared by its
+// children; mode shared counts H1 on bitmasks of shared trials):
 //   compact_parents_kernel -> simulate_score_parents_kernel ->
 //   decide_parents_kernel -> commit_parents_kernel.
 //   Parent folds are gathered through the (src cell, survivor index) map
 //   written by the previous commit; simulated folds ping-pong between two
 //   buffers, so survivors are never copied.
-//
-// Legacy mode (one simulation per transition):
-//   compact_items_kernel -> simulate_count_items_kernel ->
-//   decide_items_kernel -> commit_items_kernel.
-//   Transitions are only scored and counted; the winner of each cell
-//   regenerates its trials (same RNG streams) and writes its survivors.
 // ---------------------------------------------------------------------------
 
 // Device-side RNG bookkeeping: [0] = cumulative offset, [1] = this stage's
@@ -254,7 +248,9 @@ select_failed_source_trial(uint32_t failed_rank,
 //  - GenericScorer<MAX_BINS>: any nbins <= MAX_BINS (local-memory prefix).
 template <uint32_t NB, uint32_t WMAX> struct RegScorer {
     static_assert(NB % 4 == 0 && WMAX <= NB);
-    static constexpr uint32_t kMaxVec = NB / 4;
+    static constexpr uint32_t kMaxVec  = NB / 4;
+    static constexpr uint32_t kMaxBins = NB;
+    static constexpr bool kHasWarpRun  = false;
     __device__ __forceinline__ static uint32_t
     vec_count(const TrialSimParams& /*p*/) {
         return NB / 4;
@@ -324,7 +320,9 @@ template <uint32_t NB, uint32_t WMAX> struct RegScorer {
 };
 
 template <uint32_t MAX_BINS> struct GenericScorer {
-    static constexpr uint32_t kMaxVec = MAX_BINS / 4;
+    static constexpr uint32_t kMaxVec  = MAX_BINS / 4;
+    static constexpr uint32_t kMaxBins = MAX_BINS;
+    static constexpr bool kHasWarpRun  = MAX_BINS >= 128;
     __device__ __forceinline__ static uint32_t
     vec_count(const TrialSimParams& p) {
         return p.nbins_padded / 4;
@@ -370,6 +368,97 @@ template <uint32_t MAX_BINS> struct GenericScorer {
         }
         return max_boxcar_snr_from_prefix(prefix, p.nbins, p.widths, p.nwidths,
                                           inv_stdnoise_of(p.var_in, p.var_add));
+    }
+
+    /// Warp-collaborative counterpart of run(), bit-identical to it: all 32
+    /// lanes generate the fold coalesced in shared memory @p s_prefix
+    /// (MAX_BINS floats for this warp, 16-byte aligned: it is written as
+    /// float4), lane 0 forms the sequential IEEE
+    /// prefix sum in bin order, and all 32 lanes scan the boxcar windows and
+    /// reduce max_diff via exact warp-shuffle fmaxf. Eliminates per-thread
+    /// local-memory spilling at nbins >= 128.
+    template <bool kStore>
+    __device__ __forceinline__ static float
+    run_warp(const float* __restrict__ in_row,
+             float* __restrict__ out_row,
+             float* __restrict__ s_prefix,
+             float branch_scale,
+             uint64_t noise_base,
+             const TrialSimParams& p) {
+        const uint32_t lane = threadIdx.x & 31U;
+        typename RNG::NormalFloat dist_noise(0.0F, __fsqrt_rn(p.var_add));
+        const auto* in4          = reinterpret_cast<const float4*>(in_row);
+        auto* out4               = reinterpret_cast<float4*>(out_row);
+        const auto* prof4        = reinterpret_cast<const float4*>(p.profile);
+        auto* sp4                = reinterpret_cast<float4*>(s_prefix);
+        const uint32_t vec_count = p.nbins_padded / 4;
+        for (uint32_t j = lane; j < vec_count; j += 32U) {
+            auto rng_noise     = RNG::make_vec4(p.seed, noise_base, j);
+            const float4 data  = in4[j];
+            const float4 prof  = prof4[j];
+            const float4 noise = dist_noise.generate4(rng_noise);
+            const float4 out =
+                make_float4(fmaf(prof.x, branch_scale, noise.x + data.x),
+                            fmaf(prof.y, branch_scale, noise.y + data.y),
+                            fmaf(prof.z, branch_scale, noise.z + data.z),
+                            fmaf(prof.w, branch_scale, noise.w + data.w));
+            if constexpr (kStore) {
+                out4[j] = out;
+            }
+            sp4[j] = out;
+        }
+        __syncwarp();
+        if (lane == 0U) {
+            float acc = 0.0F;
+            for (uint32_t j = 0; j < vec_count; ++j) {
+                const float4 out = sp4[j];
+                float4 pref;
+                acc    = (j == 0U) ? out.x : __fadd_rn(acc, out.x);
+                pref.x = acc;
+                acc    = __fadd_rn(acc, out.y);
+                pref.y = acc;
+                acc    = __fadd_rn(acc, out.z);
+                pref.z = acc;
+                acc    = __fadd_rn(acc, out.w);
+                pref.w = acc;
+                sp4[j] = pref;
+            }
+        }
+        __syncwarp();
+
+        const float total_sum    = s_prefix[p.nbins - 1];
+        const float inv_stdnoise = inv_stdnoise_of(p.var_in, p.var_add);
+        float max_snr            = cuda::std::numeric_limits<float>::lowest();
+        for (uint32_t iw = 0; iw < p.nwidths; ++iw) {
+            const BoxWidth box = p.widths[iw];
+            const uint32_t w   = box.w;
+            float max_diff     = cuda::std::numeric_limits<float>::lowest();
+            if (lane == 0U) {
+                max_diff = s_prefix[w - 1];
+            }
+            const uint32_t loop_limit = p.nbins - w;
+            for (uint32_t j = 1U + lane; j <= loop_limit; j += 32U) {
+                const float diff =
+                    __fsub_rn(s_prefix[j + w - 1], s_prefix[j - 1]);
+                max_diff = fmaxf(max_diff, diff);
+            }
+            for (uint32_t j = loop_limit + 1U + lane; j < p.nbins; j += 32U) {
+                const float diff =
+                    __fadd_rn(__fsub_rn(total_sum, s_prefix[j - 1]),
+                              s_prefix[j + w - 1 - p.nbins]);
+                max_diff = fmaxf(max_diff, diff);
+            }
+#pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                max_diff = fmaxf(
+                    max_diff, __shfl_xor_sync(0xFFFFFFFFU, max_diff, offset));
+            }
+            const float snr = __fmul_rn(__fsub_rn(__fmul_rn(box.hb, max_diff),
+                                                  __fmul_rn(box.b, total_sum)),
+                                        inv_stdnoise);
+            max_snr         = fmaxf(max_snr, snr);
+        }
+        return max_snr;
     }
 };
 
@@ -537,6 +626,92 @@ __global__ __launch_bounds__(256, 1) void simulate_score_parents_kernel(
         noise_base, p);
 }
 
+template <typename Scorer, uint32_t kBlock = 256>
+__global__ __launch_bounds__(kBlock, 1) void simulate_score_parents_warp_kernel(
+    const ParentCandidate* __restrict__ parents,
+    const uint32_t* __restrict__ n_parents,
+    const unsigned long long* __restrict__ rng_state,
+    const float* __restrict__ sim_prev,
+    const uint32_t* __restrict__ ntrials_par,
+    const uint32_t* __restrict__ src_par,
+    const uint32_t* __restrict__ idx_par,
+    float* __restrict__ sim_cur,
+    float* __restrict__ scores_cur,
+    TrialSimParams p,
+    uint32_t ntrials,
+    uint32_t nprobs,
+    uint32_t nbranches) {
+    static constexpr uint32_t kWarps = kBlock / 32U;
+    // run_warp stores float4 into it: 16-byte alignment is required.
+    __shared__ alignas(16) float s_prefix[kWarps * Scorer::kMaxBins];
+    const uint32_t warp_in_block = threadIdx.x / 32U;
+    const uint32_t lane          = threadIdx.x & 31U;
+    const uint64_t tid =
+        (static_cast<uint64_t>(blockIdx.x) * kWarps) + warp_in_block;
+    const uint64_t trials_per_item = static_cast<uint64_t>(nbranches) * ntrials;
+    const uint64_t iparent         = tid / trials_per_item;
+    if (iparent >= *n_parents) {
+        return;
+    }
+    const auto local_idx  = static_cast<uint32_t>(tid % trials_per_item);
+    const uint32_t branch = local_idx / ntrials;
+    uint64_t src_row      = 0;
+    uint64_t out_row      = 0;
+    uint64_t noise_base   = 0;
+    if (lane == 0U) {
+        const uint32_t trial_id = local_idx % ntrials;
+        uint64_t select_base    = 0;
+        const uint64_t rng_idx  = nbranches == 1 ? local_idx : tid;
+        trial_rng_bases(rng_state[kRngStageBase] + rng_idx, p.nbins_padded,
+                        select_base, noise_base);
+        const ParentCandidate par = parents[iparent];
+        const uint32_t cell       = (par.jslot_prev * nprobs) + par.kprob;
+        uint32_t src_trial        = 0;
+        if (nbranches == 1) {
+            const uint32_t count = ntrials_par[2 * cell];
+            const uint32_t* survivors =
+                idx_par + (static_cast<uint64_t>(cell) * ntrials);
+            uint32_t lo = 0;
+            uint32_t hi = count;
+            while (lo < hi) {
+                const uint32_t mid = lo + ((hi - lo) / 2);
+                if (survivors[mid] < trial_id) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            src_trial =
+                (lo < count && survivors[lo] == trial_id)
+                    ? lo
+                    : select_failed_source_trial(trial_id - lo, ntrials - count,
+                                                 count, p.seed, select_base);
+        } else {
+            src_trial =
+                select_source_trial(trial_id, ntrials_par[(2 * cell) + branch],
+                                    p.seed, select_base);
+        }
+        const uint64_t cell_branch =
+            (static_cast<uint64_t>(nbranches) * cell) + branch;
+        src_row =
+            (((static_cast<uint64_t>(nbranches) * src_par[cell]) + branch) *
+             ntrials) +
+            idx_par[(cell_branch * ntrials) + src_trial];
+        out_row = (cell_branch * ntrials) + trial_id;
+    }
+    src_row           = __shfl_sync(0xFFFFFFFFU, src_row, 0);
+    out_row           = __shfl_sync(0xFFFFFFFFU, out_row, 0);
+    noise_base        = __shfl_sync(0xFFFFFFFFU, noise_base, 0);
+    const float score = Scorer::template run_warp<true>(
+        sim_prev + (src_row * p.nbins_padded),
+        sim_cur + (out_row * p.nbins_padded),
+        s_prefix + (warp_in_block * Scorer::kMaxBins),
+        (branch == 1) ? p.bias_snr : 0.0F, noise_base, p);
+    if (lane == 0U) {
+        scores_cur[out_row] = score;
+    }
+}
+
 // Reads and clears the winning key of output cell (islot, iprob).
 __device__ __forceinline__ unsigned long long
 take_cell_key(unsigned long long* cell_keys, uint32_t key_idx) {
@@ -569,11 +744,13 @@ __global__ void evaluate_stage_kernel(const float* __restrict__ in_folds,
                                       uint32_t stage,
                                       uint32_t tid_offset,
                                       uint32_t trial_offset,
-                                      uint32_t tid_limit) {
+                                      uint32_t tid_limit,
+                                      uint32_t row_offset) {
     // tid_offset = ntrials runs the H1 branch only; tid_limit = ntrials the
     // H0 branch only (2 * ntrials: both). trial_offset numbers the trials of
     // a chunk globally: their random streams are those of trials
-    // trial_offset + [0, ntrials).
+    // trial_offset + [0, ntrials). row_offset shifts the fold/score rows when
+    // only H1 is allocated.
     const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x + tid_offset;
     if (tid >= tid_limit) {
         return;
@@ -591,200 +768,155 @@ __global__ void evaluate_stage_kernel(const float* __restrict__ in_folds,
     }
     const uint64_t noise_subseq =
         eval_subseq(2U, stage, 0U, branch, trial_id + trial_offset);
-    const uint64_t src_row = (static_cast<uint64_t>(branch) * ntrials) + src;
+    const uint64_t src_row =
+        (static_cast<uint64_t>(branch) * ntrials) + src - row_offset;
     const uint64_t out_row =
-        (static_cast<uint64_t>(branch) * ntrials) + trial_id;
+        (static_cast<uint64_t>(branch) * ntrials) + trial_id - row_offset;
     scores[out_row] = Scorer::template run<true, true>(
         in_folds + (src_row * p.nbins_padded),
         out_folds + (out_row * p.nbins_padded),
         (branch == 1) ? p.bias_snr : 0.0F, noise_subseq, p);
 }
 
-// Simulates, scores and counts the survivors of every valid item without
-// storing folds. Threads walk items in `order` (grouped by parent cell) so
-// the items sharing a parent read its folds from L2.
-// Compute bound: capping registers at 128 (2 blocks of 256 per SM, the same
-// on every 64K-register SM) beats the uncapped ~156 registers by ~25%.
-template <typename Scorer>
-__global__ __launch_bounds__(256, 2) void simulate_count_items_kernel(
-    const uint32_t* __restrict__ order,
-    uint32_t n_items,
-    const ThresholdPairItem* __restrict__ pairs,
-    const uint32_t* __restrict__ item_rng_idx,
-    const unsigned long long* __restrict__ rng_state,
-    const float* __restrict__ folds_par,
-    const uint32_t* __restrict__ ntrials_par,
-    const float* __restrict__ thresholds,
-    uint32_t* __restrict__ counts,
-    unsigned long long* __restrict__ best_h0,
+template <typename Scorer, uint32_t kBlock = 256>
+__global__ __launch_bounds__(kBlock, 1) void evaluate_stage_warp_kernel(
+    const float* __restrict__ in_folds,
+    const uint32_t* __restrict__ n_in,
+    float* __restrict__ out_folds,
+    float* __restrict__ scores,
     TrialSimParams p,
     uint32_t ntrials,
-    uint32_t nprobs) {
-    const uint64_t tid =
-        (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
-    const uint64_t trials_per_item = 2ULL * ntrials;
-    const uint64_t slot            = tid / trials_per_item;
-    uint32_t segment               = kInvalidIndex;
-    bool survived                  = false;
-    unsigned long long key_h0      = 0; // best H0 trial, for the floor
-    if (slot < n_items) {
-        const uint32_t item    = order[slot];
-        const uint32_t rng_idx = item_rng_idx[item];
-        if (rng_idx != kInvalidIndex) {
-            const auto local_idx = static_cast<uint32_t>(tid % trials_per_item);
-            const uint32_t branch        = local_idx / ntrials;
-            const uint32_t trial_id      = local_idx % ntrials;
-            const ThresholdPairItem pair = pairs[item / nprobs];
-            const uint32_t par_cell =
-                (pair.jslot_prev * nprobs) + (item % nprobs);
-            uint64_t select_base = 0;
-            uint64_t noise_base  = 0;
-            trial_rng_bases(rng_state[kRngStageBase] +
-                                (rng_idx * trials_per_item) + local_idx,
-                            p.nbins_padded, select_base, noise_base);
-            const uint32_t src_trial = select_source_trial(
-                trial_id, ntrials_par[(2 * par_cell) + branch], p.seed,
-                select_base);
-            const uint64_t src_row =
-                (((2ULL * par_cell) + branch) * ntrials) + src_trial;
-            const float score = Scorer::template run<false>(
-                folds_par + (src_row * p.nbins_padded), nullptr,
-                (branch == 1) ? p.bias_snr : 0.0F, noise_base, p);
-            survived = score > thresholds[pair.ithres_abs];
-            segment  = (2 * item) + branch;
-            if (branch == 0) {
-                key_h0 = score_trial_key(score, trial_id);
-            }
+    uint32_t stage,
+    uint32_t tid_offset,
+    uint32_t trial_offset,
+    uint32_t tid_limit,
+    uint32_t row_offset) {
+    static constexpr uint32_t kWarps = kBlock / 32U;
+    // run_warp stores float4 into it: 16-byte alignment is required.
+    __shared__ alignas(16) float s_prefix[kWarps * Scorer::kMaxBins];
+    const uint32_t warp_in_block = threadIdx.x / 32U;
+    const uint32_t lane          = threadIdx.x & 31U;
+    const uint64_t tid64 = (static_cast<uint64_t>(blockIdx.x) * kWarps) +
+                           warp_in_block + tid_offset;
+    if (tid64 >= tid_limit) {
+        return;
+    }
+    const auto tid          = static_cast<uint32_t>(tid64);
+    const uint32_t branch   = tid / ntrials;
+    const uint32_t trial_id = tid % ntrials;
+    uint32_t src            = trial_id;
+    if (lane == 0U) {
+        const uint32_t nsurv = n_in[branch];
+        if (trial_id >= nsurv) {
+            const float u =
+                eval_uniform(p.seed, eval_subseq(3U, stage, 0U, branch,
+                                                 trial_id + trial_offset));
+            src = min(static_cast<uint32_t>(u * static_cast<float>(nsurv)),
+                      nsurv - 1U);
         }
     }
-    // Warp-aggregated count per (item, branch) segment.
-    const unsigned peers = loki::utils::warp_match_any(segment);
-    const unsigned votes = __ballot_sync(0xFFFFFFFFU, survived) & peers;
-    const auto lane      = threadIdx.x % 32;
-    const bool leader    = segment != kInvalidIndex &&
-                           lane == static_cast<uint32_t>(__ffs(peers) - 1);
-    if (leader && votes != 0) {
-        atomicAdd(&counts[segment], static_cast<uint32_t>(__popc(votes)));
-    }
-    // Best H0 trial of each segment, kept only while none survives: the
-    // floor of a stage that prunes every noise trial.
-    unsigned long long key_max = 0;
-#pragma unroll
-    for (int src = 0; src < 32; ++src) {
-        const unsigned long long other = __shfl_sync(0xFFFFFFFFU, key_h0, src);
-        if (((peers >> static_cast<unsigned>(src)) & 1U) != 0U) {
-            key_max = max(key_max, other);
-        }
-    }
-    if (leader && (segment & 1U) == 0U && votes == 0 && key_max != 0) {
-        atomicMax(&best_h0[segment / 2], key_max);
+    src = __shfl_sync(0xFFFFFFFFU, src, 0);
+    const uint64_t noise_subseq =
+        eval_subseq(2U, stage, 0U, branch, trial_id + trial_offset);
+    const uint64_t src_row =
+        (static_cast<uint64_t>(branch) * ntrials) + src - row_offset;
+    const uint64_t out_row =
+        (static_cast<uint64_t>(branch) * ntrials) + trial_id - row_offset;
+    const float score = Scorer::template run_warp<true>(
+        in_folds + (src_row * p.nbins_padded),
+        out_folds + (out_row * p.nbins_padded),
+        s_prefix + (warp_in_block * Scorer::kMaxBins),
+        (branch == 1) ? p.bias_snr : 0.0F, noise_subseq, p);
+    if (lane == 0U) {
+        scores[out_row] = score;
     }
 }
 
-// The winner of each output cell regenerates its trials (same RNG streams
-// as simulate_count_items_kernel), compacts the survivors in trial order and
-// writes their folds (kept in registers across the scan, so every trial is
-// generated once). A survivor count that disagrees with the counting pass
-// raises *error_flag.
-template <typename Scorer, uint32_t kBlock>
-__global__ __launch_bounds__(kBlock) void commit_items_kernel(
-    const uint32_t* __restrict__ beam_cur,
-    const ThresholdPairItem* __restrict__ pairs,
-    const uint32_t* __restrict__ item_rng_idx,
-    const unsigned long long* __restrict__ rng_state,
-    const uint2* __restrict__ counts,
-    const State* __restrict__ cand_states,
-    State* __restrict__ states_cur,
-    unsigned long long* __restrict__ cell_keys,
-    const float* __restrict__ folds_par,
-    const uint32_t* __restrict__ ntrials_par,
-    const float* __restrict__ thresholds,
-    const unsigned long long* __restrict__ best_h0,
-    float* __restrict__ folds_next,
-    uint32_t* __restrict__ ntrials_next,
-    uint32_t* __restrict__ error_flag,
+template <typename Scorer>
+__global__ void
+h1_pruned_stage_kernel(const float* __restrict__ in_folds,
+                       float* __restrict__ out_folds,
+                       const uint32_t* __restrict__ active_slot,
+                       const uint32_t* __restrict__ active_trial,
+                       float* __restrict__ margins,
+                       uint8_t* __restrict__ keep,
+                       TrialSimParams p,
+                       uint32_t n_active,
+                       uint32_t stage,
+                       uint32_t trial_offset,
+                       float threshold,
+                       float min_margin) {
+    const uint32_t k = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (k >= n_active) {
+        return;
+    }
+    const uint32_t trial_id = active_trial[k];
+    const float prev_m      = margins[trial_offset + trial_id];
+    if (prev_m <= min_margin) {
+        keep[k] = 0U;
+        return;
+    }
+    const uint32_t slot_in = active_slot != nullptr ? active_slot[k] : k;
+    const uint64_t noise_subseq =
+        eval_subseq(2U, stage, 0U, 1U, trial_id + trial_offset);
+    const float score = Scorer::template run<true, true>(
+        in_folds + (static_cast<uint64_t>(slot_in) * p.nbins_padded),
+        out_folds + (static_cast<uint64_t>(k) * p.nbins_padded), p.bias_snr,
+        noise_subseq, p);
+    const float m                    = fminf(prev_m, score - threshold);
+    margins[trial_offset + trial_id] = m;
+    keep[k] = (m > min_margin) ? uint8_t{1} : uint8_t{0};
+}
+
+template <typename Scorer, uint32_t kBlock = 256>
+__global__ __launch_bounds__(kBlock, 1) void h1_pruned_stage_warp_kernel(
+    const float* __restrict__ in_folds,
+    float* __restrict__ out_folds,
+    const uint32_t* __restrict__ active_slot,
+    const uint32_t* __restrict__ active_trial,
+    float* __restrict__ margins,
+    uint8_t* __restrict__ keep,
     TrialSimParams p,
-    uint32_t ntrials,
-    uint32_t nprobs) {
-    const uint32_t out_cell      = blockIdx.x; // islot * nprobs + iprob
-    const uint32_t ithres        = beam_cur[out_cell / nprobs];
-    const uint32_t key_idx       = (ithres * nprobs) + (out_cell % nprobs);
-    const unsigned long long key = take_cell_key(cell_keys, key_idx);
-    if (key == kEmptyKey) {
-        if (threadIdx.x == 0) {
-            ntrials_next[2 * out_cell]       = 0;
-            ntrials_next[(2 * out_cell) + 1] = 0;
+    uint32_t n_active,
+    uint32_t stage,
+    uint32_t trial_offset,
+    float threshold,
+    float min_margin) {
+    static constexpr uint32_t kWarps = kBlock / 32U;
+    // run_warp stores float4 into it: 16-byte alignment is required.
+    __shared__ alignas(16) float s_prefix[kWarps * Scorer::kMaxBins];
+    const uint32_t warp_in_block = threadIdx.x / 32U;
+    const uint32_t lane          = threadIdx.x & 31U;
+    const uint64_t k64 =
+        (static_cast<uint64_t>(blockIdx.x) * kWarps) + warp_in_block;
+    if (k64 >= n_active) {
+        return;
+    }
+    const auto k            = static_cast<uint32_t>(k64);
+    const uint32_t trial_id = active_trial[k];
+    float prev_m            = 0.0F;
+    if (lane == 0U) {
+        prev_m = margins[trial_offset + trial_id];
+    }
+    prev_m = __shfl_sync(0xFFFFFFFFU, prev_m, 0);
+    if (prev_m <= min_margin) {
+        if (lane == 0U) {
+            keep[k] = 0U;
         }
         return;
     }
-    const auto item              = static_cast<uint32_t>(key & 0xFFFFFFFFULL);
-    const ThresholdPairItem pair = pairs[item / nprobs];
-    const uint32_t par_cell      = (pair.jslot_prev * nprobs) + (item % nprobs);
-    const float threshold        = thresholds[ithres];
-    const uint2 cnt              = counts[item];
-    // No H0 survivor: the best H0 trial stands in, counted as one.
-    const bool floor_h0    = cnt.x == 0;
-    const uint32_t best_t  = floor_h0 ? trial_of_key(best_h0[item]) : 0U;
-    const uint32_t want_h0 = floor_h0 ? 1U : cnt.x;
-    if (threadIdx.x == 0) {
-        states_cur[key_idx]              = cand_states[item];
-        ntrials_next[2 * out_cell]       = want_h0;
-        ntrials_next[(2 * out_cell) + 1] = cnt.y;
-    }
-    const uint64_t trials_per_item = 2ULL * ntrials;
-    const uint64_t rng_item_base =
-        rng_state[kRngStageBase] + (item_rng_idx[item] * trials_per_item);
-    const uint32_t vec_count = Scorer::vec_count(p);
-
-    using BlockScan = cub::BlockScan<uint32_t, kBlock>;
-    __shared__ typename BlockScan::TempStorage temp_storage;
-    for (uint32_t branch = 0; branch < 2; ++branch) {
-        const float branch_scale  = (branch == 1) ? p.bias_snr : 0.0F;
-        const uint32_t ntrials_in = ntrials_par[(2 * par_cell) + branch];
-        uint32_t running          = 0;
-        for (uint32_t base = 0; base < ntrials; base += kBlock) {
-            const uint32_t t = base + threadIdx.x;
-            uint32_t flag    = 0;
-            float4 fold[Scorer::kMaxVec];
-            if (t < ntrials) {
-                uint64_t select_base = 0;
-                uint64_t noise_base  = 0;
-                trial_rng_bases(rng_item_base + (branch * ntrials) + t,
-                                p.nbins_padded, select_base, noise_base);
-                const uint32_t src_trial =
-                    select_source_trial(t, ntrials_in, p.seed, select_base);
-                const float* in_row =
-                    folds_par +
-                    ((((2ULL * par_cell) + branch) * ntrials) + src_trial) *
-                        p.nbins_padded;
-                const float score = Scorer::template run<true>(
-                    in_row, reinterpret_cast<float*>(fold), branch_scale,
-                    noise_base, p);
-                flag = (branch == 0 && floor_h0)
-                           ? (t == best_t ? 1U : 0U)
-                           : (score > threshold ? 1U : 0U);
-            }
-            uint32_t pos   = 0;
-            uint32_t total = 0;
-            BlockScan(temp_storage).ExclusiveSum(flag, pos, total);
-            if (flag != 0) {
-                auto* dst4 = reinterpret_cast<float4*>(
-                    folds_next +
-                    ((((2ULL * out_cell) + branch) * ntrials) + running + pos) *
-                        p.nbins_padded);
-#pragma unroll
-                for (uint32_t j = 0; j < Scorer::kMaxVec; ++j) {
-                    if (j < vec_count) {
-                        dst4[j] = fold[j];
-                    }
-                }
-            }
-            running += total;
-            __syncthreads(); // temp_storage reuse
-        }
-        if (threadIdx.x == 0 && running != (branch == 0 ? want_h0 : cnt.y)) {
-            atomicOr(error_flag, 1U);
-        }
+    const uint32_t slot_in = active_slot != nullptr ? active_slot[k] : k;
+    const uint64_t noise_subseq =
+        eval_subseq(2U, stage, 0U, 1U, trial_id + trial_offset);
+    const float score = Scorer::template run_warp<true>(
+        in_folds + (static_cast<uint64_t>(slot_in) * p.nbins_padded),
+        out_folds + (static_cast<uint64_t>(k) * p.nbins_padded),
+        s_prefix + (warp_in_block * Scorer::kMaxBins), p.bias_snr, noise_subseq,
+        p);
+    if (lane == 0U) {
+        const float m                    = fminf(prev_m, score - threshold);
+        margins[trial_offset + trial_id] = m;
+        keep[k] = (m > min_margin) ? uint8_t{1} : uint8_t{0};
     }
 }
 
@@ -796,8 +928,6 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
 // ---------------------------------------------------------------------------
 
 template <typename Scorer> struct ScorerLaunch {
-    static constexpr uint32_t kCommitItemsBlock = 256;
-
     static void simulate_score_parents(dim3 grid,
                                        dim3 block,
                                        cudaStream_t stream,
@@ -827,46 +957,22 @@ template <typename Scorer> struct ScorerLaunch {
                                uint32_t stage,
                                uint32_t tid_offset,
                                uint32_t trial_offset,
-                               uint32_t tid_limit);
+                               uint32_t tid_limit,
+                               uint32_t row_offset = 0U);
 
-    static void simulate_count_items(dim3 grid,
-                                     dim3 block,
-                                     cudaStream_t stream,
-                                     const uint32_t* order,
-                                     uint32_t n_items,
-                                     const ThresholdPairItem* pairs,
-                                     const uint32_t* item_rng_idx,
-                                     const unsigned long long* rng_state,
-                                     const float* folds_par,
-                                     const uint32_t* ntrials_par,
-                                     const float* thresholds,
-                                     uint32_t* counts,
-                                     unsigned long long* best_h0,
-                                     TrialSimParams p,
-                                     uint32_t ntrials,
-                                     uint32_t nprobs);
-
-    static void commit_items(dim3 grid,
-                             dim3 block,
-                             cudaStream_t stream,
-                             const uint32_t* beam_cur,
-                             const ThresholdPairItem* pairs,
-                             const uint32_t* item_rng_idx,
-                             const unsigned long long* rng_state,
-                             const uint2* counts,
-                             const State* cand_states,
-                             State* states_cur,
-                             unsigned long long* cell_keys,
-                             const float* folds_par,
-                             const uint32_t* ntrials_par,
-                             const float* thresholds,
-                             const unsigned long long* best_h0,
-                             float* folds_next,
-                             uint32_t* ntrials_next,
-                             uint32_t* error_flag,
-                             TrialSimParams p,
-                             uint32_t ntrials,
-                             uint32_t nprobs);
+    static void h1_pruned_stage(cudaStream_t stream,
+                                const float* in_folds,
+                                float* out_folds,
+                                const uint32_t* active_slot,
+                                const uint32_t* active_trial,
+                                float* margins,
+                                uint8_t* keep,
+                                TrialSimParams p,
+                                uint32_t n_active,
+                                uint32_t stage,
+                                uint32_t trial_offset,
+                                float threshold,
+                                float min_margin);
 };
 
 template <typename Scorer>
@@ -887,9 +993,22 @@ void ScorerLaunch<Scorer>::simulate_score_parents(
     uint32_t ntrials,
     uint32_t nprobs,
     uint32_t nbranches) {
-    simulate_score_parents_kernel<Scorer><<<grid, block, 0, stream>>>(
-        parents, n_parents, rng_state, sim_prev, ntrials_par, src_par, idx_par,
-        sim_cur, scores_cur, p, ntrials, nprobs, nbranches);
+    if constexpr (Scorer::kHasWarpRun) {
+        constexpr uint32_t kBlock = 256;
+        constexpr uint32_t kWarps = kBlock / 32U;
+        const uint64_t total_trials =
+            static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(block.x);
+        const dim3 warp_grid(
+            static_cast<uint32_t>((total_trials + kWarps - 1ULL) / kWarps));
+        simulate_score_parents_warp_kernel<Scorer, kBlock>
+            <<<warp_grid, kBlock, 0, stream>>>(
+                parents, n_parents, rng_state, sim_prev, ntrials_par, src_par,
+                idx_par, sim_cur, scores_cur, p, ntrials, nprobs, nbranches);
+    } else {
+        simulate_score_parents_kernel<Scorer><<<grid, block, 0, stream>>>(
+            parents, n_parents, rng_state, sim_prev, ntrials_par, src_par,
+            idx_par, sim_cur, scores_cur, p, ntrials, nprobs, nbranches);
+    }
 }
 
 template <typename Scorer>
@@ -905,61 +1024,61 @@ void ScorerLaunch<Scorer>::evaluate_stage(dim3 grid,
                                           uint32_t stage,
                                           uint32_t tid_offset,
                                           uint32_t trial_offset,
-                                          uint32_t tid_limit) {
-    evaluate_stage_kernel<Scorer><<<grid, block, 0, stream>>>(
-        in_folds, n_in, out_folds, scores, p, ntrials, stage, tid_offset,
-        trial_offset, tid_limit);
+                                          uint32_t tid_limit,
+                                          uint32_t row_offset) {
+    if constexpr (Scorer::kHasWarpRun) {
+        (void)grid;
+        (void)block;
+        constexpr uint32_t kBlock = 256;
+        constexpr uint32_t kWarps = kBlock / 32U;
+        const uint32_t n_active =
+            tid_limit > tid_offset ? (tid_limit - tid_offset) : 0U;
+        if (n_active == 0U) {
+            return;
+        }
+        const dim3 warp_grid((n_active + kWarps - 1U) / kWarps);
+        evaluate_stage_warp_kernel<Scorer, kBlock>
+            <<<warp_grid, kBlock, 0, stream>>>(
+                in_folds, n_in, out_folds, scores, p, ntrials, stage,
+                tid_offset, trial_offset, tid_limit, row_offset);
+    } else {
+        evaluate_stage_kernel<Scorer><<<grid, block, 0, stream>>>(
+            in_folds, n_in, out_folds, scores, p, ntrials, stage, tid_offset,
+            trial_offset, tid_limit, row_offset);
+    }
 }
 
 template <typename Scorer>
-void ScorerLaunch<Scorer>::simulate_count_items(
-    dim3 grid,
-    dim3 block,
-    cudaStream_t stream,
-    const uint32_t* order,
-    uint32_t n_items,
-    const ThresholdPairItem* pairs,
-    const uint32_t* item_rng_idx,
-    const unsigned long long* rng_state,
-    const float* folds_par,
-    const uint32_t* ntrials_par,
-    const float* thresholds,
-    uint32_t* counts,
-    unsigned long long* best_h0,
-    TrialSimParams p,
-    uint32_t ntrials,
-    uint32_t nprobs) {
-    simulate_count_items_kernel<Scorer><<<grid, block, 0, stream>>>(
-        order, n_items, pairs, item_rng_idx, rng_state, folds_par, ntrials_par,
-        thresholds, counts, best_h0, p, ntrials, nprobs);
-}
-
-template <typename Scorer>
-void ScorerLaunch<Scorer>::commit_items(dim3 grid,
-                                        dim3 block,
-                                        cudaStream_t stream,
-                                        const uint32_t* beam_cur,
-                                        const ThresholdPairItem* pairs,
-                                        const uint32_t* item_rng_idx,
-                                        const unsigned long long* rng_state,
-                                        const uint2* counts,
-                                        const State* cand_states,
-                                        State* states_cur,
-                                        unsigned long long* cell_keys,
-                                        const float* folds_par,
-                                        const uint32_t* ntrials_par,
-                                        const float* thresholds,
-                                        const unsigned long long* best_h0,
-                                        float* folds_next,
-                                        uint32_t* ntrials_next,
-                                        uint32_t* error_flag,
-                                        TrialSimParams p,
-                                        uint32_t ntrials,
-                                        uint32_t nprobs) {
-    commit_items_kernel<Scorer, kCommitItemsBlock><<<grid, block, 0, stream>>>(
-        beam_cur, pairs, item_rng_idx, rng_state, counts, cand_states,
-        states_cur, cell_keys, folds_par, ntrials_par, thresholds, best_h0,
-        folds_next, ntrials_next, error_flag, p, ntrials, nprobs);
+void ScorerLaunch<Scorer>::h1_pruned_stage(cudaStream_t stream,
+                                           const float* in_folds,
+                                           float* out_folds,
+                                           const uint32_t* active_slot,
+                                           const uint32_t* active_trial,
+                                           float* margins,
+                                           uint8_t* keep,
+                                           TrialSimParams p,
+                                           uint32_t n_active,
+                                           uint32_t stage,
+                                           uint32_t trial_offset,
+                                           float threshold,
+                                           float min_margin) {
+    if (n_active == 0U) {
+        return;
+    }
+    constexpr uint32_t kBlock = 256;
+    if constexpr (Scorer::kHasWarpRun) {
+        constexpr uint32_t kWarps = kBlock / 32U;
+        const dim3 grid((n_active + kWarps - 1U) / kWarps);
+        h1_pruned_stage_warp_kernel<Scorer, kBlock>
+            <<<grid, kBlock, 0, stream>>>(
+                in_folds, out_folds, active_slot, active_trial, margins, keep,
+                p, n_active, stage, trial_offset, threshold, min_margin);
+    } else {
+        const dim3 grid((n_active + kBlock - 1U) / kBlock);
+        h1_pruned_stage_kernel<Scorer><<<grid, kBlock, 0, stream>>>(
+            in_folds, out_folds, active_slot, active_trial, margins, keep, p,
+            n_active, stage, trial_offset, threshold, min_margin);
+    }
 }
 
 // Every scorer type dispatch_scorer can select. Instantiated in

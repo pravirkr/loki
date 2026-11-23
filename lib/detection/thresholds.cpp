@@ -1,5 +1,6 @@
 #include "loki/detection/thresholds.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -17,6 +18,7 @@
 #include "loki/common/types.hpp"
 
 #include "lib/common/dispatch.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/detection/scheme.hpp"
 #include "lib/detection/thresholds_engine.hpp"
 
@@ -104,18 +106,60 @@ void append_solution(const std::string& path, const SchemeSolution& sol) {
 
 } // namespace
 
+namespace {
+/// Mode "descent" searches no cells: it has no states, grid path or file.
+void check_has_search_states(DynamicThresholdMode mode, std::string_view what) {
+    if (mode == DynamicThresholdMode::kDescent) {
+        throw std::runtime_error(
+            "DynamicThresholdScheme::" + std::string(what) +
+            ": mode 'descent' has no search states; solve() returns its "
+            "schedule");
+    }
+}
+
+/// Mode "descent": settings that describe no descent raise at construction,
+/// on every backend (the other modes do not read them).
+void check_descent_settings(const SharedOptions& shared, SizeType nstages) {
+    if (!utils::is_finite(shared.min_pd) || shared.min_pd <= 0.0F ||
+        shared.min_pd >= 1.0F) {
+        throw std::invalid_argument("descent: min_pd must be in (0, 1)");
+    }
+    if (!utils::is_finite(shared.w_terminal) || shared.w_terminal < 0.0F) {
+        throw std::invalid_argument(
+            "descent: w_terminal must be finite and >= 0");
+    }
+    if (!utils::is_finite(shared.fap) || shared.fap < 0.0 ||
+        shared.fap >= 1.0) {
+        throw std::invalid_argument(
+            "descent: fap must be in [0, 1) (0: no floor)");
+    }
+    detail::DescentOptions options;
+    options.final_threshold = shared.final_threshold;
+    options.passes          = shared.descent_passes;
+    options.nsignal         = shared.descent_nsignal;
+    options.start           = shared.descent_start;
+    detail::validate_descent_options(options, nstages);
+}
+} // namespace
+
 class DynamicThresholdScheme::Impl {
 public:
     Impl(std::unique_ptr<detail::ThresholdsEngine> engine,
          DynamicThresholdMode mode,
-         const SharedOptions& shared)
+         const SharedOptions& shared,
+         int nthreads,
+         SizeType nbins)
         : m_engine(std::move(engine)),
           m_mode(mode),
-          m_shared(shared) {}
+          m_shared(shared),
+          m_nthreads(nthreads),
+          m_nbins(nbins) {}
 
     std::unique_ptr<detail::ThresholdsEngine> m_engine;
     DynamicThresholdMode m_mode;
     SharedOptions m_shared;
+    int m_nthreads;   ///< host threads of mode "descent"'s bookkeeping
+    SizeType m_nbins; ///< profile bins (the CUDA profile is padded)
     std::optional<SchemeSolution> m_solution;
 };
 
@@ -212,26 +256,55 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     const SharedOptions& shared,
     Exec exec)
     : m_impl(std::make_unique<Impl>(
-          detail::make_thresholds_engine(branching_pattern,
-                                         ref_ducy,
-                                         nbins,
-                                         ntrials,
-                                         nprobs,
-                                         prob_min,
-                                         snr_final,
-                                         nthresholds,
-                                         ducy_max,
-                                         wtsp,
-                                         beam_width,
-                                         trials_start,
-                                         mode,
-                                         seed,
-                                         batch_size,
-                                         guess,
-                                         shared,
-                                         exec),
+          mode == "descent" && exec.backend == Backend::kCPU
+              // Mode "descent" only simulates samples: on the CPU an
+              // evaluation-only engine, without the pools of a search.
+              ? detail::make_thresholds_cpu(branching_pattern,
+                                            ref_ducy,
+                                            nbins,
+                                            ntrials,
+                                            nprobs,
+                                            prob_min,
+                                            snr_final,
+                                            nthresholds,
+                                            ducy_max,
+                                            wtsp,
+                                            beam_width,
+                                            trials_start,
+                                            "improved",
+                                            exec.nthreads,
+                                            seed,
+                                            /*simulate=*/false)
+              : detail::make_thresholds_engine(
+                    branching_pattern,
+                    ref_ducy,
+                    nbins,
+                    ntrials,
+                    nprobs,
+                    prob_min,
+                    snr_final,
+                    nthresholds,
+                    ducy_max,
+                    wtsp,
+                    beam_width,
+                    trials_start,
+                    // On a GPU, mode "descent" uses an engine without the
+                    // pilot simulation of the data-driven beams (its
+                    // pools are only allocated by run()).
+                    mode == "descent" ? "improved" : mode,
+                    seed,
+                    batch_size,
+                    mode == "descent" ? "analytic" : guess,
+                    shared,
+                    exec),
           dynamic_threshold_mode_from_string(mode),
-          shared)) {}
+          shared,
+          exec.nthreads,
+          nbins)) {
+    if (m_impl->m_mode == DynamicThresholdMode::kDescent) {
+        check_descent_settings(shared, branching_pattern.size());
+    }
+}
 
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(
@@ -268,15 +341,20 @@ std::vector<SizeType> DynamicThresholdScheme::get_box_score_widths() const {
     return m_impl->m_engine->get_box_score_widths();
 }
 std::vector<State> DynamicThresholdScheme::get_states() const {
+    check_has_search_states(m_impl->m_mode, "get_states");
     return m_impl->m_engine->get_states();
 }
 
 std::vector<float>
 DynamicThresholdScheme::get_best_path_thresholds(float min_pd) const {
+    check_has_search_states(m_impl->m_mode, "get_best_path_thresholds");
     return m_impl->m_engine->get_best_path_thresholds(min_pd);
 }
 
 void DynamicThresholdScheme::run(SizeType thres_neigh, bool show_progress) {
+    if (m_impl->m_mode == DynamicThresholdMode::kDescent) {
+        return; // nothing to search: solve() designs the schedule
+    }
     m_impl->m_engine->run(thres_neigh, show_progress);
 }
 std::vector<State>
@@ -288,6 +366,7 @@ DynamicThresholdScheme::evaluate(std::span<const float> thresholds,
 CalibratedPath
 DynamicThresholdScheme::calibrate(float min_pd,
                                   const CalibrationOptions& opts) const {
+    check_has_search_states(m_impl->m_mode, "calibrate");
     return detail::calibrate_path(*m_impl->m_engine, min_pd, opts);
 }
 std::vector<float>
@@ -301,19 +380,44 @@ DynamicThresholdScheme::simulate_h1_scores(SizeType ntrials,
     return m_impl->m_engine->simulate_h1_scores(ntrials, seed);
 }
 SchemeSolution DynamicThresholdScheme::solve() {
+    if (m_impl->m_mode == DynamicThresholdMode::kDescent) {
+        const auto& shared = m_impl->m_shared;
+        detail::DescentOptions options;
+        options.final_threshold = shared.final_threshold;
+        options.passes          = shared.descent_passes;
+        options.nsignal         = shared.descent_nsignal;
+        options.start           = shared.descent_start;
+        options.start_zscores   = shared.descent_start_zscores;
+        options.nthreads        = m_impl->m_nthreads;
+        options.pd_policy       = shared.pd_policy;
+        if (shared.fap > 0.0) {
+            // Templates: every start bin of every box width.
+            const auto ntemplates = static_cast<double>(
+                m_impl->m_nbins *
+                m_impl->m_engine->get_box_score_widths().size());
+            options.final_threshold =
+                std::max(options.final_threshold,
+                         detail::fap_threshold(shared.fap, ntemplates));
+        }
+        m_impl->m_solution = detail::descend_scheme(
+            *m_impl->m_engine, shared.min_pd, shared.w_terminal, options);
+        return *m_impl->m_solution;
+    }
     if (!is_shared_family(m_impl->m_mode)) {
         throw std::invalid_argument(
-            "DynamicThresholdScheme::solve: only modes 'shared' and 'robust'");
+            "DynamicThresholdScheme::solve: only modes 'shared' and "
+            "'descent'");
     }
-    m_impl->m_solution = detail::solve_scheme(
-        *m_impl->m_engine, m_impl->m_shared.min_pd, m_impl->m_shared.w_terminal,
-        /*robust=*/m_impl->m_mode == DynamicThresholdMode::kRobust);
+    m_impl->m_solution =
+        detail::solve_scheme(*m_impl->m_engine, m_impl->m_shared.min_pd,
+                             m_impl->m_shared.w_terminal);
     return *m_impl->m_solution;
 }
 const SchemeSolution* DynamicThresholdScheme::solution() const {
     return m_impl->m_solution ? &*m_impl->m_solution : nullptr;
 }
 std::string DynamicThresholdScheme::save(const std::string& outdir) const {
+    check_has_search_states(m_impl->m_mode, "save");
     const auto path = m_impl->m_engine->save(outdir);
     if (m_impl->m_solution) {
         append_solution(path, *m_impl->m_solution);

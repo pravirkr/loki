@@ -15,7 +15,7 @@
 
 #include "temp_dir.hpp"
 
-// DynamicThresholdScheme::solve() of modes "shared" and "robust": the schedule
+// DynamicThresholdScheme::solve() of mode "shared": the schedule
 // to use, with the Pd and cost of exactly those thresholds measured on fresh
 // samples.
 
@@ -75,20 +75,19 @@ bool same_bits(const std::vector<float>& a, const std::vector<float>& b) {
 TEST_CASE("solve: the Pd it reports is that of the returned thresholds",
           "[thresholds][solve]") {
     const auto* backend = GENERATE("cpu", "cuda");
-    const auto* mode    = GENERATE("shared", "robust");
-    CAPTURE(backend, mode);
+    CAPTURE(backend);
     if (skip_backend(backend)) {
         SKIP("needs a CUDA build");
     }
-    auto scheme = make(backend, mode, 7);
+    auto scheme = make(backend, "shared", 7);
     REQUIRE(scheme.solution() == nullptr);
     scheme.run(10);
     const auto sol = scheme.solve();
     REQUIRE(scheme.solution() != nullptr);
     REQUIRE(sol.thresholds.size() == scheme.get_nstages());
     REQUIRE(sol.delivery != detection::Delivery::kNoPath);
-    // Only robust compares a shortlist of candidates
-    REQUIRE(sol.shortlist.empty() == (std::string_view(mode) == "shared"));
+    // The field of the removed mode robust's shortlist stays, empty
+    REQUIRE(sol.shortlist.empty());
     REQUIRE(sol.min_pd == kMinPd);
     REQUIRE(sol.w_terminal == 1.0F);
     REQUIRE(sol.pd_trials == (SizeType{1} << 17U));
@@ -117,13 +116,12 @@ TEST_CASE("solve: the Pd it reports is that of the returned thresholds",
 TEST_CASE("solve is reproducible and does not depend on the thread count",
           "[thresholds][solve][slow]") {
     const auto* backend = GENERATE("cpu", "cuda");
-    const auto* mode    = GENERATE("shared", "robust");
-    CAPTURE(backend, mode);
+    CAPTURE(backend);
     if (skip_backend(backend)) {
         SKIP("needs a CUDA build");
     }
-    auto a = make(backend, mode, 11, 1);
-    auto b = make(backend, mode, 11, 3);
+    auto a = make(backend, "shared", 11, 1);
+    auto b = make(backend, "shared", 11, 3);
     a.run(10);
     b.run(10);
     const auto sa = a.solve();
@@ -136,11 +134,23 @@ TEST_CASE("solve is reproducible and does not depend on the thread count",
     REQUIRE(same_bits(a.solve().thresholds, sa.thresholds));
 }
 
-TEST_CASE("solve needs mode shared or robust", "[thresholds][solve]") {
+TEST_CASE("solve needs mode shared", "[thresholds][solve]") {
     auto improved = make("cpu", "improved", 3);
     improved.run(6);
     REQUIRE_THROWS_AS(improved.solve(), std::invalid_argument);
     REQUIRE(improved.solution() == nullptr);
+}
+
+TEST_CASE("the removed modes legacy and robust raise", "[thresholds]") {
+    const auto* backend = GENERATE("cpu", "cuda");
+    CAPTURE(backend);
+    if (skip_backend(backend)) {
+        SKIP("needs a CUDA build");
+    }
+    for (const std::string_view mode : {"legacy", "robust"}) {
+        CAPTURE(mode);
+        REQUIRE_THROWS_AS(make(backend, mode, 7), std::invalid_argument);
+    }
 }
 
 TEST_CASE("The guided beam needs a positive width and reach", "[thresholds]") {
@@ -160,14 +170,13 @@ TEST_CASE("The guided beam needs a positive width and reach", "[thresholds]") {
 TEST_CASE("save works in every mode, with the solution after solve()",
           "[thresholds][solve][slow]") {
     const test::TempDir dir("loki-solve-save");
-    for (const std::string_view mode :
-         {"legacy", "improved", "shared", "robust"}) {
+    for (const std::string_view mode : {"improved", "shared"}) {
         CAPTURE(mode);
         auto scheme = make("cpu", mode, 5);
         scheme.run(6);
         const auto before = scheme.save((dir / mode).string());
         REQUIRE(std::filesystem::exists(before));
-        if (mode == "shared" || mode == "robust") {
+        if (mode == "shared") {
             const auto sol = scheme.solve();
             const auto after =
                 scheme.save((dir / fmt::format("solved_{}", mode)).string());

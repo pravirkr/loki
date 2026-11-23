@@ -49,41 +49,51 @@ Chunking is automatic. The sweep first forms regions for the required bin
 counts (never merged), then subdivides each region in frequency until every
 chunk and its shared workspace group fit the effective memory budget. Each
 region's thresholds are designed once, over its whole band, by
-`DynamicThresholdScheme` in mode `shared` on both backends (signal trials
-common to every path, probability bins anchored at `min_pd`, the survivors of
-the last stage weighted into the cost): the search, then `solve()`, which
-selects, tightens and repairs the schedule on fresh samples so that its
-measured Pd is `min_pd` (see `include/loki/detection/thresholds.hpp`). Every
-chunk of the region runs that schedule. The chunk's `pd` and `pd_se` are the
-design's measurement at the true `nbins`: the branching only multiplies the
-leaves of each stage (`State::gen_next`), so neither a schedule's Pd nor its
-pass rates depend on it. A design below 0.9 `min_pd` is kept with a warning.
-One design per region bounds planning time: a design at 1024 bins costs
-about 20 s on CUDA, mostly the refit's evaluations. Chunks below the top of a
-region run a schedule designed for the region's larger branching, which is
-valid (same Pd) but not the cheapest for them.
+`DynamicThresholdScheme` in mode `descent` on both backends, at the region's
+true `nbins`: the cost (leaves evaluated, the survivors of the last stage
+weighted in) is minimised at Pd = `min_pd`, and the schedule is pinned and
+reported on fresh samples (see [dts.md](dts.md)). Every chunk of the region
+runs that schedule. The chunk's `pd` and `pd_se` are the design's measurement:
+the branching only multiplies the leaves of each stage (`State::gen_next`), so
+neither a schedule's Pd nor its pass rates depend on it. A design below 0.9
+`min_pd` is kept with a warning. Chunks below the top of a region run a
+schedule designed for the region's larger branching, which is valid (same Pd)
+but not the cheapest for them.
 
-Memory and runtime of a design are bounded. Up to 128 bins the search runs at
-the true `nbins` when its pools fit. Above that, or when they do not fit, it
-runs at 64 bins (`kDtsNbinsSim`, raised so that the reference pulse spans at
-least four bins) and `refit_scheme` re-fits the schedule at the true `nbins`:
-a common upward threshold shift, scanned on fresh samples, then tightening,
-repair and an independent report. The reason is that a maximum over more
-boxcar templates has a heavier noise tail (about `nbins` times more
-independent phase positions), so a schedule found at 64 bins is too
-permissive at 256 to 1024 bins (cost per detection 1.1 to 3.3 times a native
-search's; `bench/scripts/schemes/nbins_proxy_study.py`); the shift brings that
-to about 1.0 to 1.05 in the same tests and the refit always reports the Pd at
-the true `nbins`. The refit's sample sizes follow the memory limit (a quarter
-of it, at most 4 GB: 24 B per trial and bin for a signal bank, 12 B for a noise
-evaluation), and the search budget steps down (1024 trials / 40 probability
-bins, 512/40, 512/20, 256/20, 128/16) until its pools fit; only a limit below
-the last step fails, with a message. The search pools are checked against the
-limit on their own, because they are freed before the EP search. The designs
-run once per plan and are kept in the plan cache.
+The regions are designed upfront in strict region order, and every design after
+the first starts from the previous region's schedule, expressed in signal
+z-scores (the form in which a schedule carries over to another branching
+pattern and bin count), and runs two descent passes from there. The seeds and
+order are fixed, so two plans of one configuration hold bit-identical
+thresholds. The last pruning threshold is chosen freely by cost (`w_terminal =
+1`, weighing the leaves that go on to `ascend`): `snr_min` is applied strictly
+to the reintegrated post-`ascend` scores when writing candidates, so marginal
+leaves whose reintegrated score clears `snr_min` are not lost before `ascend`,
+diagnostic `--no-candidates` spools keep all surviving leaves, and changing
+`snr_min` (`loki publish` or re-running) reuses the cached plan without
+invalidation.
 
-A chunk is sized from its own design's final noise evaluation (2^15 trials
-natively, the refit's noise sample otherwise): see [Planning](#planning). A
+On three production configurations (2, 3 and 5 parameters, 127 stages, 16 to
+1024 bins, target 0.1) every region's thresholds, counted on 2^17 independent
+signal trials, held Pd 0.0995-0.1048 (the previous design, `shared` with a
+re-fit above 128 bins: 0.0997-0.166), and cost 19-28 % fewer evaluated leaves
+per plan (geometric mean: 0.721, 0.810 and 0.790; every single region from 46 %
+fewer to 3 % fewer). The peak chunk population `max_sugg` rose by 4.4 %, 34.2 %
+and 0.6 % (2, 3 and 5 parameters; peak chunk memory 1.43 to 1.44, 5.48 to 5.58
+and 28.83 to 28.97 GB), with the same number of chunks: fewer leaves over the
+whole tree, but a higher peak population.
+
+Memory and runtime of a design are bounded. It allocates no search pools,
+only samples, and their sizes follow the memory limit (a quarter of it, at
+most 4 GB: 24 B per trial and bin for a signal sample, 12 B for a noise
+evaluation; at most 2^17 signal and 2^15 noise trials, at least 2^13 and
+2^11). On CUDA a chained design takes 0.11-0.16 s up to 128 bins and 0.19 /
+0.28 / 0.52 s at 256 / 512 / 1024 bins (whole `--plan-only` plans of the
+three production searches, warm: 2.5-2.7 / 2.5 / 13.1-13.2 s, against
+30.6 / 18.1 / 29.0 s with the previous design). The designs run once per plan and are kept in the
+plan cache.
+
+A chunk is sized from its own design's final noise evaluation: see [Planning](#planning). A
 chunk that does not fit first prunes its seeds in slices, then narrows; on
 CUDA the planner also lowers the parent batch where that forecasts a faster
 search, or when the minimum chunk cannot fit at all (see
@@ -162,8 +172,8 @@ fill the tree, and the plan prints how much host memory that would take. On
 the CPU the key is ignored with a warning: `max_process_memory_gb` already
 caps the host memory there.
 The model fits execution buffers. The threshold designs run before the sweep
-allocates, and their search pools are checked against the limit on their
-own; tail buffers and temporary peaks are covered by fixed reserves. As for `FFAFreqSweep`, the plan is fitted to
+allocates, and their samples are sized from the limit on their own (see
+above); tail buffers and temporary peaks are covered by fixed reserves. As for `FFAFreqSweep`, the plan is fitted to
 
 ```text
 limit = min(max_process_memory_gb, free device memory - kDeviceReserveGB)   (1 GB)
@@ -199,7 +209,7 @@ Differences from the CPU policy:
 - A workspace group is allocated once and its shape must equal every chunk's
   (`validate` uses `check_equal`), so the engine builds the workspace from the
   group maxima and checks each chunk fits within it.
-- The threshold scheme is `DynamicThresholdScheme` in mode `shared` on both
+- The threshold scheme is `DynamicThresholdScheme` in mode `descent` on both
   backends. The CUDA and CPU engines differ statistically. A cache can be
   reused on the other backend, like FFT wisdom: its batch is adapted and its
   capacity and peak are rechecked under that run's own memory limit, worker

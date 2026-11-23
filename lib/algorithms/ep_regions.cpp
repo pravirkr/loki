@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <span>
@@ -57,64 +59,56 @@ namespace {
     return f;
 }
 
-constexpr std::string_view kCacheVersion = "1.22.0";
+constexpr std::string_view kCacheVersion = "1.24.0";
 
-/// Threshold-scheme simulation of the planner. The seeds are fixed: the
+/// Threshold design of the planner: mode "descent" of DynamicThresholdScheme
+/// (docs/dts.md) at the true nbins of every region. The seed is fixed: the
 /// scheme sets the chunking, so plans of one configuration must not change
 /// from run to run. CUDA results are reproducible per (seed, batch_size), so
 /// the batch size is part of the cache key.
-constexpr SizeType kDtsNTrials = 1024;
-// Bins from min_pd to 1: the resolution of the Pd-cost trade-off (see
-// DynamicThresholdScheme's constructor).
-constexpr SizeType kDtsNProbs = 40;
-// Mode "shared" uses the guided beam (SharedOptions defaults): kDtsGuess,
-// kDtsBeamWidth and kDtsThresNeigh only fill the engine's signature.
-constexpr std::string_view kDtsMode  = "shared";
-constexpr std::string_view kDtsGuess = "window";
-// Grid of the evaluation-only engines, which never search.
-constexpr float kDtsProbMin        = 0.05F;
-constexpr SizeType kDtsNThresholds = 100;
-constexpr float kDtsBeamWidth      = 0.7F;
-constexpr SizeType kDtsTrialsStart = 1;
-constexpr SizeType kDtsThresNeigh  = 10;
-constexpr uint64_t kDtsSeed        = 0x10C1;
+constexpr std::string_view kDtsMode = "descent";
+constexpr uint64_t kDtsSeed         = 0x10C1;
+constexpr SizeType kDtsBatchSize    = 256;
+// The descent searches no grid: these only fill the engine's signature.
+constexpr SizeType kDtsNTrials       = 1024;
+constexpr SizeType kDtsNProbs        = 40;
+constexpr float kDtsProbMin          = 0.05F;
+constexpr SizeType kDtsNThresholds   = 100;
+constexpr float kDtsBeamWidth        = 0.7F;
+constexpr SizeType kDtsTrialsStart   = 1;
+constexpr std::string_view kDtsGuess = "analytic";
 // A schedule whose measured Pd is below this fraction of min_pd is warned
 // about.
 constexpr float kDtsPdTolerance = 0.9F;
-// Largest Pd the threshold search can aim at.
+// Largest Pd the threshold design can aim at.
 constexpr float kDtsMaxTarget = 0.999F;
 // Weight of the survivors of the last stage in the cost: they go on to the
 // next processing step.
 constexpr float kDtsWTerminal = 1.0F;
-// Memory and runtime control of the threshold design. The search pools grow
-// with cells x trials x nbins, so beyond kDtsNativeMaxBins bins (and whenever
-// the native pools do not fit the limit) the search runs at a small nbins
-// (kDtsNbinsSim) and its schedule is re-fitted at the true nbins with samples
-// whose size is bounded by the memory limit (DynamicThresholdScheme's
-// refit_scheme). The maximum over boxcar templates has a heavier noise tail at
-// a larger nbins (about nbins times more independent phase positions), so a
-// schedule searched at 64 bins is too permissive at 256-1024 bins: its cost
-// per detection is 1.1-3.3 times a native search's there (measured with
-// bench/scripts/schemes/nbins_proxy_study.py). The refit removes most of it
-// (common upward shift, 1.0-1.05 times in the same tests) and always delivers
-// the target Pd at the true nbins. The design is run once per plan (the plan
-// cache keeps it), so runtime matters less than never running out of memory.
-constexpr SizeType kDtsNativeMaxBins = 128;
-constexpr SizeType kDtsNbinsSim      = 64;
-// Fraction of the memory limit the refit's samples may use, and their range.
-constexpr double kDtsRefitMemoryFraction = 0.25;
-constexpr double kDtsRefitMemoryMaxGB    = 4.0;
-constexpr SizeType kDtsRefitBankMin      = SizeType{1} << 13U;
-constexpr SizeType kDtsRefitNoiseMin     = SizeType{1} << 11U;
-// Search budgets tried in order until the pools fit: {trials, bins above the
-// target}. The first is the validated default.
-constexpr std::array<std::pair<SizeType, SizeType>, 5> kDtsSearchLadder = {
-    {{1024, 40}, {512, 40}, {512, 20}, {256, 20}, {128, 16}}};
-// A reference pulse must span at least this many simulated bins.
-constexpr double kDtsMinPulseBins = 4.0;
+// The regions are designed in order, and every design but the first starts
+// from the previous region's schedule in signal z-scores (it carries over to
+// another branching pattern and bin count) and runs these two passes only:
+// {noise trials, margin, step, largest block, smallest block}. Along the
+// regions of real plans this costs 1-2 % less than the default solve from its
+// own start and takes 0.10-0.17 s up to 128 bins (docs/performance.md).
+constexpr std::array<detection::DescentPass, 2> kDtsWarmPasses = {
+    {{SizeType{1} << 13U, 0.3F, 0.1F, 32, 1},
+     {SizeType{1} << 13U, 0.2F, 0.05F, 8, 1}}};
+// Memory of a design: its samples (signal samples of the pin and the report,
+// the final noise evaluation) may use this fraction of the memory limit, at
+// most kDtsSampleMemoryMaxGB, and are never smaller than the minima. The
+// descent's own samples are smaller than these. The design is run once per
+// plan (the plan cache keeps it).
+constexpr double kDtsSampleMemoryFraction = 0.25;
+constexpr double kDtsSampleMemoryMaxGB    = 4.0;
+constexpr SizeType kDtsBankMin            = SizeType{1} << 13U;
+constexpr SizeType kDtsNoiseMin           = SizeType{1} << 11U;
+// Threads of the descent's host passes: more do not help (only the block
+// deltas run in parallel) and the result does not depend on the count.
+constexpr int kDtsMaxThreads = 4;
 // Bumped with any change of the threshold pipeline.
-constexpr std::string_view kDtsAlgorithm = "shared-per-region";
-constexpr SizeType kDtsBatchSize         = 256;
+constexpr std::string_view kDtsAlgorithm = "descent-chained-v2";
+constexpr auto kDtsPdPolicy              = detection::PdPolicy::kPin;
 
 double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
     if (cfg.get_nparams() <= 1) {
@@ -292,7 +286,13 @@ public:
             throw std::invalid_argument(
                 "EPRegionPlanner: min_pd must be in (0, 1]");
         }
-        // Checked here: scheme_nbins divides by it before any engine does.
+        if (m_min_pd >= 1.0F) {
+            spdlog::warn("EPRegionPlanner: min_pd=1 cannot be met; the "
+                         "thresholds are designed for Pd={:.4g} (min_pd is "
+                         "kept as configured).",
+                         kDtsMaxTarget);
+        }
+        // Checked here, before any engine is built.
         if (!utils::is_finite(m_ref_ducy) || m_ref_ducy <= 0.0F ||
             m_ref_ducy >= 1.0F) {
             throw std::invalid_argument(
@@ -354,12 +354,11 @@ public:
         file.createAttribute("device_arch", device_arch);
         file.createAttribute("dts_batch_size", kDtsBatchSize);
         file.createAttribute("dts_algorithm", std::string(kDtsAlgorithm));
+        file.createAttribute("dts_pd_policy",
+                             detection::pd_policy_to_string(kDtsPdPolicy));
         file.createAttribute("dts_w_terminal", kDtsWTerminal);
         file.createAttribute("dts_mode", std::string(kDtsMode));
         file.createAttribute("ring_margin_z", detail::kEPRingMarginZ);
-        file.createAttribute("dts_nbins_fallback", kDtsNbinsSim);
-        file.createAttribute("dts_native_max_bins", kDtsNativeMaxBins);
-        file.createAttribute("dts_min_pulse_bins", kDtsMinPulseBins);
         const plans::FFAPlan<FoldType> run_plan(m_base_cfg);
         file.createDataSet(
             "ref_segs",
@@ -632,10 +631,17 @@ public:
                     "expected '{}', found '{}'",
                     kDtsAlgorithm, file_algorithm));
             }
+            const auto expected_policy =
+                detection::pd_policy_to_string(kDtsPdPolicy);
+            std::string file_policy;
+            file.getAttribute("dts_pd_policy").read(file_policy);
+            if (file_policy != expected_policy) {
+                throw std::invalid_argument(fmt::format(
+                    "EPRegionPlanner: cache mismatch for 'dts_pd_policy': "
+                    "expected '{}', found '{}'",
+                    expected_policy, file_policy));
+            }
             check_attr_double("dts_w_terminal", kDtsWTerminal);
-            check_attr_double("dts_min_pulse_bins", kDtsMinPulseBins);
-            check_attr_size("dts_nbins_fallback", kDtsNbinsSim);
-            check_attr_size("dts_native_max_bins", kDtsNativeMaxBins);
             check_attr_double("ring_margin_z", detail::kEPRingMarginZ);
             std::string file_mode;
             file.getAttribute("dts_mode").read(file_mode);
@@ -961,17 +967,20 @@ private:
                 max_memory_gb, reserve_gb));
         }
 
-        // A design's simulation pools live only while it runs, so none is
-        // left when the EP search allocates.
+        // Design every region upfront in strict region order, chaining signal
+        // z-scores from one region to the next without mutable callback state.
+        // Simulation pools live only inside each design call, so none remains
+        // when the EP search allocates.
         std::vector<detail::RegionDesign> designs;
         designs.reserve(ffa_regions.size());
+        std::vector<float> chain_zscores;
         for (const auto& region : ffa_regions) {
             if (region.f_end <= region.f_start) {
                 continue;
             }
-            designs.push_back(make_region_designer(region.f_start, region.f_end,
-                                                   region.nbins, region.eta,
-                                                   max_drift, effective_limit));
+            designs.push_back(make_region_designer(
+                region.f_start, region.f_end, region.nbins, region.eta,
+                max_drift, effective_limit, chain_zscores));
         }
 
         auto plan =
@@ -1028,179 +1037,118 @@ private:
         }
     }
 
-    /// Pd the threshold search aims at. min_pd = 1 cannot be met (the grid is
-    /// anchored at the target): it searches for 0.999, and the planner still
-    /// warns that its own measured Pd is below min_pd.
+    /// Pd the threshold design aims at. min_pd = 1 cannot be met: it aims at
+    /// kDtsMaxTarget instead (the constructor warns).
     float scheme_target() const {
         return m_min_pd >= 1.0F ? kDtsMaxTarget : m_min_pd;
     }
 
-    /// Fallback nbins of the threshold simulation when the pools of the true
-    /// nbins do not fit (the chunk populations are still evaluated at the true
-    /// nbins). The reference pulse must span at least kDtsMinPulseBins of them.
-    SizeType scheme_nbins(SizeType nbins) const {
-        const auto resolved =
-            static_cast<SizeType>(std::ceil(kDtsMinPulseBins / m_ref_ducy));
-        const SizeType sim = ((std::max(kDtsNbinsSim, resolved) + 3) / 4) * 4;
-        return std::min(nbins, sim);
-    }
-
+    /// The engine of a design: it only simulates samples (the descent
+    /// searches no grid), so it allocates no search pools on either backend.
     std::unique_ptr<detection::detail::ThresholdsEngine>
     make_threshold_engine(std::span<const float> branching_pattern,
                           SizeType nbins,
-                          uint64_t seed,
-                          SizeType ntrials = kDtsNTrials,
-                          SizeType nprobs  = kDtsNProbs) const {
-        // Shared mode builds its grid from min_pd: nprobs = bins above it.
-        return detection::detail::make_thresholds_engine(
-            branching_pattern, m_ref_ducy, nbins, ntrials, nprobs, kDtsProbMin,
-            static_cast<float>(m_base_cfg.get_target_snr()), kDtsNThresholds,
-            static_cast<float>(m_base_cfg.get_ducy_max()),
-            static_cast<float>(m_base_cfg.get_wtsp()), kDtsBeamWidth,
-            kDtsTrialsStart, kDtsMode, seed, kDtsBatchSize, kDtsGuess,
-            detection::SharedOptions{.min_pd     = scheme_target(),
-                                     .w_terminal = kDtsWTerminal},
-            m_exec.backend == Backend::kCPU
-                ? Exec::cpu(m_base_cfg.get_nthreads())
-                : m_exec);
-    }
-
-    /// An engine for evaluate() only. The CPU engine then allocates no
-    /// simulation pools (the GPU engine never does before run()).
-    std::unique_ptr<detection::detail::ThresholdsEngine>
-    make_evaluation_engine(std::span<const float> branching_pattern,
-                           SizeType nbins,
-                           uint64_t seed) const {
-        if (m_exec.backend != Backend::kCPU) {
-            return make_threshold_engine(branching_pattern, nbins, seed);
+                          uint64_t seed) const {
+        const auto snr      = static_cast<float>(m_base_cfg.get_target_snr());
+        const auto ducy_max = static_cast<float>(m_base_cfg.get_ducy_max());
+        const auto wtsp     = static_cast<float>(m_base_cfg.get_wtsp());
+        if (m_exec.backend == Backend::kCPU) {
+            return detection::detail::make_thresholds_cpu(
+                branching_pattern, m_ref_ducy, nbins, kDtsNTrials, kDtsNProbs,
+                kDtsProbMin, snr, kDtsNThresholds, ducy_max, wtsp,
+                kDtsBeamWidth, kDtsTrialsStart, "improved",
+                m_base_cfg.get_nthreads(), seed, /*simulate=*/false);
         }
-        return detection::detail::make_thresholds_cpu(
+        detection::SharedOptions shared;
+        shared.min_pd     = scheme_target();
+        shared.w_terminal = kDtsWTerminal;
+        shared.pd_policy  = kDtsPdPolicy;
+        return detection::detail::make_thresholds_engine(
             branching_pattern, m_ref_ducy, nbins, kDtsNTrials, kDtsNProbs,
-            kDtsProbMin, static_cast<float>(m_base_cfg.get_target_snr()),
-            kDtsNThresholds, static_cast<float>(m_base_cfg.get_ducy_max()),
-            static_cast<float>(m_base_cfg.get_wtsp()), kDtsBeamWidth,
-            kDtsTrialsStart, "improved", m_base_cfg.get_nthreads(), seed,
-            /*simulate=*/false);
+            kDtsProbMin, snr, kDtsNThresholds, ducy_max, wtsp, kDtsBeamWidth,
+            kDtsTrialsStart, "improved", seed, kDtsBatchSize, kDtsGuess, shared,
+            m_exec);
     }
 
-    /// Samples of the refit at the true nbins, sized to the memory budget:
-    /// the host or device buffers of a simulation are about 24 B per trial and
-    /// bin (a signal bank) and 12 B (a noise evaluation).
-    detection::detail::SolveBudget refit_budget(SizeType nbins,
-                                                double memory_limit_gb) const {
-        const double bytes = std::min(kDtsRefitMemoryFraction * memory_limit_gb,
-                                      kDtsRefitMemoryMaxGB) *
-                             utils::kBytesPerGB;
+    /// Samples of a design, sized to the memory budget: the host or device
+    /// buffers of a simulation are about 24 B per trial and bin (a signal
+    /// sample) and 12 B (a noise evaluation).
+    static detection::detail::SolveBudget
+    sample_budget(SizeType nbins, double memory_limit_gb) {
+        const double bytes =
+            std::min(kDtsSampleMemoryFraction * memory_limit_gb,
+                     kDtsSampleMemoryMaxGB) *
+            utils::kBytesPerGB;
         const auto floor_pow2 = [](double x, SizeType lo, SizeType hi) {
             const auto v = static_cast<SizeType>(std::max(x, 1.0));
             return std::clamp(std::bit_floor(v), lo, hi);
         };
         const double per_bin = static_cast<double>(nbins);
-        return {.nbank  = floor_pow2(bytes / (24.0 * per_bin), kDtsRefitBankMin,
+        return {.nbank  = floor_pow2(bytes / (24.0 * per_bin), kDtsBankMin,
                                      SizeType{1} << 17U),
-                .nnoise = floor_pow2(bytes / (12.0 * per_bin),
-                                     kDtsRefitNoiseMin, SizeType{1} << 15U)};
+                .nnoise = floor_pow2(bytes / (12.0 * per_bin), kDtsNoiseMin,
+                                     SizeType{1} << 15U)};
     }
 
-    /// The thresholds of a chunk's branching pattern @p bp, in two cases:
-    ///  - native (nbins <= kDtsNativeMaxBins and the search pools fit): the
-    ///    search and DynamicThresholdScheme's solve() at the true nbins;
-    ///  - otherwise the search runs at kDtsNbinsSim bins and its schedule is
-    ///    re-fitted at the true nbins on samples bounded by the memory limit.
-    /// The search budget steps down (kDtsSearchLadder) until its pools fit;
-    /// only a limit below the smallest rung fails, with a message. The
-    /// design carries the Pd measured at the true nbins and the noise
-    /// population of the final evaluation (and its trial count), which sizes
-    /// the chunk. [f_start, f_end] is the chunk's band, for the logs.
-    detail::ChunkDesign design_thresholds(std::span<const float> bp,
-                                          double f_start,
-                                          double f_end,
-                                          SizeType nbins,
-                                          double memory_limit_gb) const {
-        const auto gb = [](const auto& engine) {
-            return static_cast<double>(engine->run_memory_bytes()) /
-                   utils::kBytesPerGB;
-        };
-        // The pools of the search are freed before the EP search, so they are
-        // checked against the limit on their own. Returns the first rung that
-        // fits, or nullptr.
-        const auto fit_search = [&](SizeType nbins_search)
-            -> std::pair<std::unique_ptr<detection::detail::ThresholdsEngine>,
-                         std::pair<SizeType, SizeType>> {
-            for (const auto& rung : kDtsSearchLadder) {
-                auto engine = make_threshold_engine(bp, nbins_search, kDtsSeed,
-                                                    rung.first, rung.second);
-                if (gb(engine) <= memory_limit_gb) {
-                    return {std::move(engine), rung};
-                }
-            }
-            return {nullptr, kDtsSearchLadder.back()};
-        };
-        const SizeType nbins_proxy = scheme_nbins(nbins);
-        bool refit                 = nbins > nbins_proxy;
-        SizeType nbins_search      = nbins;
-        if (refit && nbins <= kDtsNativeMaxBins) {
-            // Native when the default budget fits, else the proxy
-            const auto probe = make_threshold_engine(bp, nbins, kDtsSeed);
-            refit            = gb(probe) > memory_limit_gb;
+    /// The thresholds of a branching pattern @p bp at the true @p nbins.
+    /// Starts from @p prior_zscores when non-empty and writes its own solved
+    /// z-scores to @p out_zscores when provided. The last threshold is chosen
+    /// freely by cost (w_terminal = 1): snr_min is applied strictly to the
+    /// post-ascend scores when writing candidates, so marginal leaves whose
+    /// reintegrated score clears snr_min are kept and cached plans do not
+    /// depend on snr_min.
+    detail::ChunkDesign
+    design_thresholds(std::span<const float> bp,
+                      double f_start,
+                      double f_end,
+                      SizeType nbins,
+                      double memory_limit_gb,
+                      std::span<const float> prior_zscores,
+                      std::vector<float>* out_zscores = nullptr) const {
+        const auto t_design = std::chrono::steady_clock::now();
+        const auto engine   = make_threshold_engine(bp, nbins, kDtsSeed);
+        const auto budget   = sample_budget(nbins, memory_limit_gb);
+        detection::detail::DescentOptions options;
+        options.nsignal   = std::min(options.nsignal, budget.nbank);
+        options.nbank     = budget.nbank;
+        options.nnoise    = budget.nnoise;
+        options.pd_policy = kDtsPdPolicy;
+        options.nthreads =
+            std::clamp(m_base_cfg.get_nthreads(), 1, kDtsMaxThreads);
+        options.start =
+            detection::detail::resample_zscores(prior_zscores, bp.size());
+        const bool warm = !options.start.empty();
+        if (warm) {
+            options.start_zscores = true;
+            options.passes.assign(kDtsWarmPasses.begin(), kDtsWarmPasses.end());
         }
-        if (refit) {
-            nbins_search = nbins_proxy;
-        }
-        auto [dyn, rung] = fit_search(nbins_search);
-        if (!dyn) {
-            const auto smallest = make_threshold_engine(
-                bp, nbins_search, kDtsSeed, kDtsSearchLadder.back().first,
-                kDtsSearchLadder.back().second);
-            throw std::runtime_error(fmt::format(
-                "EPRegionPlanner: the threshold search for nbins={} needs "
-                "{:.2f} GB at its smallest budget ({} trials, {} probability "
-                "bins), more than the {:.2f} GB limit",
-                nbins_search, gb(smallest), kDtsSearchLadder.back().first,
-                kDtsSearchLadder.back().second, memory_limit_gb));
-        }
-        if (rung != kDtsSearchLadder.front()) {
-            spdlog::debug(
-                "EPRegionPlanner: the threshold search for f=[{:.6g}, "
-                "{:.6g}] Hz needs a reduced budget to fit {:.2f} GB: "
-                "{} trials, {} probability bins",
-                f_start, f_end, memory_limit_gb, rung.first, rung.second);
-        }
-        dyn->run(kDtsThresNeigh, /*show_progress=*/false);
-        auto sol        = detection::detail::solve_scheme(*dyn, scheme_target(),
-                                                          kDtsWTerminal,
-                                                          /*robust=*/false);
-        SizeType nnoise = dyn->solve_budget().nnoise;
+        auto sol = detection::detail::descend_scheme(*engine, scheme_target(),
+                                                     kDtsWTerminal, options);
         if (sol.thresholds.empty()) {
             throw std::runtime_error(fmt::format(
-                "EPRegionPlanner: simulation has no surviving terminal path "
-                "in f=[{:.6g}, {:.6g}] Hz (nbins={}, target_snr={:.6g})",
-                f_start, f_end, nbins_search, m_base_cfg.get_target_snr()));
+                "EPRegionPlanner: the threshold design has no schedule in "
+                "f=[{:.6g}, {:.6g}] Hz (nbins={}, target_snr={:.6g})",
+                f_start, f_end, nbins, m_base_cfg.get_target_snr()));
         }
-        dyn.reset(); // free the search before the refit's samples
-        if (refit) {
-            const auto budget = refit_budget(nbins, memory_limit_gb);
-            const auto engine = make_evaluation_engine(bp, nbins, kDtsSeed);
-            const double searched_cost = sol.cost;
-            sol                        = detection::detail::refit_scheme(
-                *engine, sol, scheme_target(), kDtsWTerminal, kDtsSeed, budget);
-            nnoise = budget.nnoise;
-            spdlog::debug(
-                "EPRegionPlanner: f=[{:.6g}, {:.6g}] Hz: searched at "
-                "nbins={}, re-fitted at nbins={} ({} signal / {} noise "
-                "trials): cost per detection {:.4g} (searched {:.4g})",
-                f_start, f_end, nbins_search, nbins, budget.nbank,
-                budget.nnoise, sol.cost, searched_cost);
+        if (out_zscores != nullptr) {
+            *out_zscores = sol.zscores;
         }
-        spdlog::debug("EPRegionPlanner: f=[{:.6g}, {:.6g}] Hz, thresholds: Pd "
-                      "{:.4f} +/- {:.4f} (min_pd {:.4g}), cost per detection "
-                      "{:.4g}",
-                      f_start, f_end, sol.pd, sol.pd_se, m_min_pd, sol.cost);
+        spdlog::debug(
+            "EPRegionPlanner: f=[{:.6g}, {:.6g}] Hz (nbins={}), thresholds "
+            "({} start, {} signal / {} noise trials): Pd {:.4f} +/- {:.4f} "
+            "(min_pd {:.4g}), last threshold {:.3f}, cost per detection "
+            "{:.4g}, designed in {:.3f} s",
+            f_start, f_end, nbins, warm ? "chained" : "own", budget.nbank,
+            budget.nnoise, sol.pd, sol.pd_se, m_min_pd, sol.thresholds.back(),
+            sol.cost,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          t_design)
+                .count());
         return detail::ChunkDesign{
             .thresholds = std::move(sol.thresholds),
             .pd         = sol.pd,
             .pd_se      = sol.pd_se,
-            .forecast   = population_forecast(sol.eval_states, nnoise)};
+            .forecast   = population_forecast(sol.eval_states, budget.nnoise)};
     }
 
     /// The noise population of an evaluation of @p ntrials trials.
@@ -1219,30 +1167,48 @@ private:
         return forecast;
     }
 
-    /// The designer of one coarse region: the full threshold design of a
-    /// branching pattern, memoised (it is deterministic: fixed seeds).
-    detail::RegionDesign make_region_designer(double f_start,
-                                              double f_end,
-                                              SizeType nbins,
-                                              double eta,
-                                              double max_drift,
-                                              double memory_limit_gb) const {
+    /// Builds and pre-solves one coarse region's threshold design in region
+    /// order, updating @p chain_zscores for the next region. Any subsequent
+    /// lookup for the region's branching pattern hits the pre-populated cache
+    /// directly; any other pattern warm-starts immutably from this region's
+    /// solved z-scores.
+    detail::RegionDesign
+    make_region_designer(double f_start,
+                         double f_end,
+                         SizeType nbins,
+                         double eta,
+                         double max_drift,
+                         double memory_limit_gb,
+                         std::vector<float>& chain_zscores) const {
         // Every chunk of a region has the FFA segmentation of the region.
         const auto rep_cfg = m_base_cfg.get_updated_ep_config(
             nbins, eta, f_start * (1.0 - max_drift), f_end * (1.0 + max_drift));
         const plans::FFAPlan<FoldType> rep_plan(rep_cfg);
         search::detail::check_ep_seed_grid(rep_plan.get_param_counts().back(),
                                            "EPRegionPlanner");
+        const auto forecast = rep_plan.forecast_branching(m_poly_basis);
+        std::vector<float> region_bp(forecast.mean.begin(),
+                                     forecast.mean.end());
+
+        std::vector<float> region_zscores;
+        auto region_design_val =
+            design_thresholds(region_bp, f_start, f_end, nbins, memory_limit_gb,
+                              chain_zscores, &region_zscores);
+        chain_zscores = region_zscores;
 
         using DesignCache = std::map<std::vector<float>, detail::ChunkDesign>;
-        auto design = [this, nbins, memory_limit_gb,
-                       cache = std::make_shared<DesignCache>()](
+        auto cache        = std::make_shared<DesignCache>();
+        cache->emplace(std::move(region_bp), std::move(region_design_val));
+
+        auto design = [this, nbins, memory_limit_gb, cache,
+                       region_zscores = std::move(region_zscores)](
                           std::span<const float> bp, double start, double end) {
             std::vector<float> key(bp.begin(), bp.end());
             if (const auto it = cache->find(key); it != cache->end()) {
                 return it->second;
             }
-            auto d = design_thresholds(bp, start, end, nbins, memory_limit_gb);
+            auto d = design_thresholds(bp, start, end, nbins, memory_limit_gb,
+                                       region_zscores);
             cache->emplace(std::move(key), d);
             return d;
         };

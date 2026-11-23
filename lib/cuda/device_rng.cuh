@@ -51,6 +51,12 @@ struct DeviceRNGConfig {
 
     using NormalFloat  = curanddx::normal<float, curanddx::box_muller>;
     using UniformFloat = curanddx::uniform<float>;
+
+    /// Opens the stream at 128-bit generate4() step @p vec4_offset.
+    __device__ __forceinline__ static Generator
+    make_vec4(uint64_t seed, uint64_t subsequence, uint64_t vec4_offset) {
+        return Generator(seed, subsequence, vec4_offset);
+    }
 };
 
 } // namespace loki::device_rng
@@ -126,6 +132,13 @@ template <uint32_t Rounds = 10, uint32_t SM = 700> struct DeviceRNGConfig {
     using Generator    = detail::CurandPhiloxGenerator;
     using NormalFloat  = detail::CurandNormalFloat;
     using UniformFloat = detail::CurandUniformFloat;
+
+    /// Opens the stream at 128-bit generate4() step @p vec4_offset (stock
+    /// cuRAND counts scalar outputs, four per Philox block).
+    __device__ __forceinline__ static Generator
+    make_vec4(uint64_t seed, uint64_t subsequence, uint64_t vec4_offset) {
+        return Generator(seed, subsequence, 4ULL * vec4_offset);
+    }
 };
 
 } // namespace loki::device_rng
