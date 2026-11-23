@@ -9,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
@@ -19,6 +20,7 @@
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/dynamic_cuda.cuh"
 
+using Catch::Matchers::ContainsSubstring;
 using loki::Backend;
 using loki::ParamLimit;
 using loki::SizeType;
@@ -81,7 +83,11 @@ TEST_CASE("CUDA prune transform treats an empty mask as all valid",
                  std::pair<std::string, SizeType>{"chebyshev", 4});
     CAPTURE(basis, nparams);
 
-    const std::vector<SizeType> grid(nparams, 4U);
+    // Four points of acceleration and frequency, one above: EP seeds
+    // pruning on an acceleration x frequency FFA grid.
+    std::vector<SizeType> grid(nparams, 1U);
+    grid[nparams - 1] = 4U;
+    grid[nparams - 2] = 4U;
     const std::vector<double> dparams(nparams, 0.1);
     const auto functs = loki::core::create_prune_dp_functs_cuda<float>(
         basis, grid, dparams, /*nseg_ffa=*/8, /*tseg_ffa=*/1.0,
@@ -128,6 +134,23 @@ TEST_CASE("CUDA prune transform treats an empty mask as all valid",
     // The transform moved the leaves: the comparison is not of two no-ops.
     CHECK(std::memcmp(masked.data(), leaves.data(),
                       leaves.size() * sizeof(double)) != 0);
+}
+
+TEST_CASE("CUDA pruning refuses an FFA seed grid over jerk", "[prune][cuda]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    const loki::cuda_utils::CudaSetDeviceGuard guard(0);
+    // Three jerk points: the CUDA seed and resolves index acceleration x
+    // frequency only, so the grid must be refused, not searched.
+    const std::vector<SizeType> grid{3U, 4U, 4U};
+    const std::vector<double> dparams(grid.size(), 0.1);
+    CHECK_THROWS_WITH(loki::core::create_prune_dp_functs_cuda<float>(
+                          "taylor", grid, dparams, /*nseg_ffa=*/8,
+                          /*tseg_ffa=*/1.0, make_cfg(grid.size()),
+                          /*batch_size=*/kLeaves, /*branch_max=*/4,
+                          /*device_id=*/0),
+                      ContainsSubstring("use more segments"));
 }
 
 #endif // LOKI_ENABLE_CUDA

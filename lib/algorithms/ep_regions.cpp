@@ -1231,6 +1231,8 @@ private:
         const auto rep_cfg = m_base_cfg.get_updated_ep_config(
             nbins, eta, f_start * (1.0 - max_drift), f_end * (1.0 + max_drift));
         const plans::FFAPlan<FoldType> rep_plan(rep_cfg);
+        search::detail::check_ep_seed_grid(rep_plan.get_param_counts().back(),
+                                           "EPRegionPlanner");
 
         using DesignCache = std::map<std::vector<float>, detail::ChunkDesign>;
         auto design = [this, nbins, memory_limit_gb,

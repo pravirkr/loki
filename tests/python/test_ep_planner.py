@@ -488,3 +488,34 @@ def test_ep_toml_and_plan_active_segments_bindings() -> None:
     ep_toml_py = libloki.configs.EPTomlConfig()
     ep_toml_py.overflow_keep_fraction = 0.25
     assert ep_toml_py.overflow_keep_fraction == pytest.approx(0.25)
+
+
+def _jerk_config(nsegments: int) -> libloki.configs.PulsarSearchConfig:
+    return libloki.configs.PulsarSearchConfig(
+        nsamps=1 << 18,
+        tsamp=64e-6,
+        nbins=32,
+        eta=1.0,
+        param_limits=np.array(
+            [[-1e5, 1e5], [-10.0, 10.0], [140.0, 145.0]], dtype=np.float64
+        ),
+        ducy_max=0.3,
+        use_fourier=False,
+        nthreads=1,
+        max_process_memory_gb=4.0,
+        bseg_brute=1024,
+        nsegments=nsegments,
+        prune_poly_order=3,
+    )
+
+
+def test_ep_planner_refuses_an_ffa_seed_grid_over_jerk() -> None:
+    # EP seeds pruning on the FFA's acceleration x frequency grid. A jerk range
+    # wider than one segment-level step gives the FFA several jerk points, so
+    # the planner refuses it; more segments shorten the step until one fits.
+    few, more = _jerk_config(nsegments=4), _jerk_config(nsegments=8)
+    assert libloki.plans.FFAPlanBase(few).param_counts[-1][0] > 1
+    with pytest.raises(ValueError, match="use more segments"):
+        libloki.prune.EPRegionPlannerTime(few, n_workers=1)
+    assert libloki.plans.FFAPlanBase(more).param_counts[-1][0] == 1
+    assert libloki.prune.EPRegionPlannerTime(more, n_workers=1).nchunks >= 1
