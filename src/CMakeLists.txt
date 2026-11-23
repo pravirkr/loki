@@ -28,6 +28,9 @@ set(LOKI_PYMODULE_NAME lib${LOKI_LIBRARY_NAME})
 # in bindings/bind_<submodule>.cpp, using the public headers only.
 file(GLOB LOKI_PYBIND_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bindings/*.cpp)
 pybind11_add_module(${LOKI_PYMODULE_NAME} loki_python.cpp ${LOKI_PYBIND_SOURCES})
+# libloki.__version__, and so loki.__version__: the project version.
+set_property(SOURCE loki_python.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+             LOKI_VERSION="${PROJECT_VERSION}")
 target_include_directories(${LOKI_PYMODULE_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # set_log_level: the module uses the spdlog compiled into loki (one registry).
 target_link_libraries(${LOKI_PYMODULE_NAME} PRIVATE $<BUILD_INTERFACE:loki_spdlog>)
