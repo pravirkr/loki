@@ -1120,7 +1120,9 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 (ipass % 2 == 1 && size > 1 && !is_global_shift) ? size / 2
                                                                  : 0);
             // The last stage moves down as far as the floor lets it.
-            down[nstages - 1] = std::clamp(g[nstages - 1] - floor, 0.0F, d);
+            if (has_floor) {
+                down[nstages - 1] = std::clamp(g[nstages - 1] - floor, 0.0F, d);
+            }
             bank.block_deltas(blocks, d, down, dc_up, dc_dn, nthreads);
             signal.block_deltas(g, blocks, d, down, dp_up, dp_dn, nthreads);
             std::vector<uint8_t> room(blocks.size());

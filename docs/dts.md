@@ -413,8 +413,7 @@ regression golden of mode `shared` (valid for one toolchain);
 
 ## History
 
-Two modes were removed in 2026-11, after `descent` became the production
-mode; commit `caf17c0` is the last that has them.
+Two modes were removed in 2026-11, after `descent` became the production mode.
 
 - **`legacy`** was the published algorithm transcribed literally: the same
   threshold × Pd grid search with the analytic beam as `improved`, but with
@@ -439,8 +438,9 @@ mode; commit `caf17c0` is the last that has them.
 - No optimality guarantee: the search is approximate and the constants above
   are heuristics. The descent stops at a schedule no block move improves,
   which need not be the global minimum.
-- `descent` has no search states: `save()`, `get_states()` and
-  `get_best_path_thresholds()` raise in this mode, and there is no shortlist.
+- `descent` has no search states: `save()`, `get_states()`,
+  `get_best_path_thresholds()` and `calibrate()` raise in this mode, and there
+  is no shortlist.
 - `fap` and `final_threshold` are available from `DynamicThresholdScheme`'s API
   (`SharedOptions`); the EP planner leaves the last pruning threshold free and
   applies `snr_min` strictly to the post-`ascend` candidate scores.

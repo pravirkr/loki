@@ -1,5 +1,5 @@
+#include <bit>
 #include <cstdint>
-#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -161,7 +161,8 @@ TEST_CASE("descent: settings that describe no descent raise at construction",
             s.descent_passes = {{1024, 0.025F, 0.0125F}};
         }),
         bad([](SharedOptions& s) {
-            s.w_terminal = std::numeric_limits<float>::quiet_NaN();
+            // A NaN from its bits: quiet_NaN() folds under -ffast-math.
+            s.w_terminal = std::bit_cast<float>(0x7FC00000U);
         }),
         bad([](SharedOptions& s) { s.w_terminal = -1.0F; }),
     };
