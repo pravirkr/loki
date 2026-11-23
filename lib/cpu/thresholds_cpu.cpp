@@ -1373,6 +1373,7 @@ private:
                            std::span<const float> thresholds,
                            float min_margin,
                            std::vector<float>* margins) const {
+        loki::check_interrupt();
         constexpr SizeType kTile = 64;
         const SizeType nbins     = m_nbins;
         const SizeType nstages   = m_nstages;
@@ -1393,6 +1394,9 @@ private:
 
 #pragma omp for schedule(dynamic)
             for (std::int64_t tile_idx = 0; tile_idx < ntiles_s; ++tile_idx) {
+                if (loki::interrupt_requested()) {
+                    continue;
+                }
                 const SizeType base = static_cast<SizeType>(tile_idx) * kTile;
                 SizeType n_act      = std::min(kTile, ntrials - base);
                 for (SizeType k = 0; k < n_act; ++k) {
@@ -1406,6 +1410,9 @@ private:
                 float var_in = 1.0F;
                 for (SizeType istage = 0; istage < nstages && n_act > 0;
                      ++istage) {
+                    if (loki::interrupt_requested()) {
+                        break;
+                    }
                     const auto stage = static_cast<uint32_t>(istage);
                     for (SizeType k = 0; k < n_act; ++k) {
                         advance_eval_fold(eval_seed, stage, 1U, active_trial[k],
@@ -1465,6 +1472,7 @@ private:
                 }
             }
         }
+        loki::check_interrupt();
         return survivors;
     }
 
