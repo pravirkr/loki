@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -172,6 +173,95 @@ def test_ep_target_snr_is_independent_and_invalidates_cache(tmp_path: Path) -> N
         lowered, ref_segs=[0], plan_cache_file=cache
     )
     assert reloaded.nchunks > 0
+
+
+def _capacity(live: int, factor: float, batch: int, branch_max: int) -> int:
+    """docs/memory.md, Ring capacity: round_up(ceil(f live) + batch branch_max + 1, 1024)."""
+    need = math.ceil(factor * live) + batch * branch_max + 1
+    return -(-need // 1024) * 1024
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+def test_ep_tree_capacity_factor_sizes_the_tree_and_keys_the_cache(
+    tmp_path: Path, backend: str
+) -> None:
+    import h5py
+
+    if backend == "cuda" and not _cuda_built():
+        pytest.skip("CUDA backend not built")
+
+    # A band wide enough that the forecast, not the batch allowance, sets the
+    # capacity of a chunk, and a limit the plan does not reach.
+    base = libloki.configs.PulsarSearchConfig(
+        nsamps=1 << 16,
+        tsamp=64e-6,
+        nbins=32,
+        eta=1.0,
+        param_limits=np.array([[-200.0, 200.0], [100.0, 200.0]], dtype=np.float64),
+        ducy_max=0.3,
+        use_fourier=False,
+        nthreads=1,
+        max_process_memory_gb=4.0,
+        bseg_brute=1024,
+        nsegments=8,
+        prune_poly_order=2,
+    )
+    assert base.tree_capacity_factor == 1.0
+    doubled = base.with_tree_capacity_factor(2.0)
+    assert doubled.tree_capacity_factor == 2.0
+    assert base.tree_capacity_factor == 1.0
+    with pytest.raises(ValueError, match="tree_capacity_factor"):
+        base.with_tree_capacity_factor(0.5)
+    plans = {}
+    for factor, cfg in ((1.0, base), (2.0, doubled)):
+        planner = libloki.prune.EPRegionPlannerTime(
+            cfg, min_pd=0.5, ref_segs=[0], backend=backend
+        )
+        assert planner.stats.max_memory_gb <= planner.stats.memory_limit_gb
+        for chunk in planner.chunk_cfgs:
+            assert chunk.max_sugg == _capacity(
+                chunk.predicted_live, factor, chunk.batch_size, chunk.branch_max
+            )
+        plans[factor] = planner
+    # The factor scales the capacity, not the forecast; the larger tree costs
+    # memory, which is what narrows chunks under a binding limit.
+    pairs = list(zip(plans[1.0].chunk_cfgs, plans[2.0].chunk_cfgs, strict=True))
+    for one, two in pairs:
+        assert two.predicted_live == one.predicted_live
+        assert two.predicted_peak == one.predicted_peak
+        assert two.max_sugg >= one.max_sugg
+        assert two.chunk_memory_gb >= one.chunk_memory_gb
+    grown = [(one, two) for one, two in pairs if two.max_sugg > one.max_sugg]
+    assert grown
+    assert all(two.chunk_memory_gb > one.chunk_memory_gb for one, two in grown)
+
+    cache = tmp_path / "doubled.h5"
+    plans[2.0].save_cache(str(cache))
+    with pytest.raises(ValueError, match="tree_capacity_factor"):
+        libloki.prune.EPRegionPlannerTime(
+            base, min_pd=0.5, ref_segs=[0], backend=backend, plan_cache_file=cache
+        )
+    again = libloki.prune.EPRegionPlannerTime(
+        doubled, min_pd=0.5, ref_segs=[0], backend=backend, plan_cache_file=cache
+    )
+    assert [c.max_sugg for c in again.chunk_cfgs] == [
+        c.max_sugg for c in plans[2.0].chunk_cfgs
+    ]
+    # A cache written before the setting existed was planned at 1.
+    old = tmp_path / "before.h5"
+    plans[1.0].save_cache(str(old))
+    with h5py.File(old, "r+") as f:
+        del f.attrs["tree_capacity_factor"]
+    reloaded = libloki.prune.EPRegionPlannerTime(
+        base, min_pd=0.5, ref_segs=[0], backend=backend, plan_cache_file=old
+    )
+    assert [c.max_sugg for c in reloaded.chunk_cfgs] == [
+        c.max_sugg for c in plans[1.0].chunk_cfgs
+    ]
+    with pytest.raises(ValueError, match="tree_capacity_factor 1"):
+        libloki.prune.EPRegionPlannerTime(
+            doubled, min_pd=0.5, ref_segs=[0], backend=backend, plan_cache_file=old
+        )
 
 
 @pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
@@ -574,6 +664,9 @@ def test_ep_toml_and_plan_active_segments_bindings() -> None:
     ep_toml_py = libloki.configs.EPTomlConfig()
     ep_toml_py.overflow_keep_fraction = 0.25
     assert ep_toml_py.overflow_keep_fraction == pytest.approx(0.25)
+    assert ep_toml_py.tree_capacity_factor == 1.0
+    ep_toml_py.tree_capacity_factor = 2.0
+    assert ep_toml_py.tree_capacity_factor == 2.0
 
 
 def _jerk_config(nsegments: int) -> libloki.configs.PulsarSearchConfig:

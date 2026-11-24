@@ -699,8 +699,11 @@ private:
         c.predicted_peak = static_cast<SizeType>(std::min(ring.peak, bound));
         c.predicted_live = static_cast<SizeType>(std::min(ring.live, bound));
         try {
-            c.max_sugg = ep_tree_capacity(c.predicted_live, c.batch_size,
-                                          c.branch_max, m_memory.kind);
+            c.max_sugg = ep_tree_capacity(
+                ep_capacity_live(c.predicted_live,
+                                 m_base_cfg.get_tree_capacity_factor(),
+                                 m_memory.kind),
+                c.batch_size, c.branch_max, m_memory.kind);
         } catch (const std::overflow_error&) {
             // No tree is counted, so the memory below is a lower bound.
             c.indexable = false;
@@ -857,8 +860,11 @@ private:
         c.predicted_live = static_cast<SizeType>(std::min(live, bound));
         c.predicted_peak = static_cast<SizeType>(std::min(peak, bound));
         try {
-            c.max_sugg = ep_tree_capacity(c.predicted_live, c.batch_size,
-                                          c.branch_max, m_memory.kind);
+            c.max_sugg = ep_tree_capacity(
+                ep_capacity_live(c.predicted_live,
+                                 m_base_cfg.get_tree_capacity_factor(),
+                                 m_memory.kind),
+                c.batch_size, c.branch_max, m_memory.kind);
         } catch (const std::overflow_error&) {
             c.indexable = false;
             c.max_sugg  = 0;

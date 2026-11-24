@@ -454,6 +454,8 @@ const toml_utils::Schema<EPTomlConfig>& ep_schema() {
                      [](auto& c) -> auto& { return c.use_conservative_tile; }),
             field<E>("ep", "overflow_keep_fraction",
                      [](auto& c) -> auto& { return c.overflow_keep_fraction; }),
+            field<E>("ep", "tree_capacity_factor",
+                     [](auto& c) -> auto& { return c.tree_capacity_factor; }),
             toml_utils::sub_table<E>(
                 "ep", "rfi", [](auto& c) -> auto& { return c.rfi; },
                 rfi_schema()),
@@ -1973,6 +1975,7 @@ public:
     std::optional<double> m_target_snr_override;
     double m_target_snr;
     double m_overflow_keep_fraction;
+    double m_tree_capacity_factor{1.0};
 
     double get_x_mass_const() const noexcept {
         constexpr double kSafety = 1.1;
@@ -2111,6 +2114,9 @@ double EPSearchConfig::get_x_mass_const() const noexcept {
 double EPSearchConfig::get_overflow_keep_fraction() const noexcept {
     return m_ep_impl->m_overflow_keep_fraction;
 }
+double EPSearchConfig::get_tree_capacity_factor() const noexcept {
+    return m_ep_impl->m_tree_capacity_factor;
+}
 
 EPSearchConfig EPSearchConfig::get_updated_ep_config(
     SizeType nbins,
@@ -2124,7 +2130,8 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
-    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    out.m_ep_impl->m_p_orb_max            = m_ep_impl->m_p_orb_max;
+    out.m_ep_impl->m_tree_capacity_factor = m_ep_impl->m_tree_capacity_factor;
     return out;
 }
 
@@ -2140,7 +2147,8 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
-    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    out.m_ep_impl->m_p_orb_max            = m_ep_impl->m_p_orb_max;
+    out.m_ep_impl->m_tree_capacity_factor = m_ep_impl->m_tree_capacity_factor;
     return out;
 }
 
@@ -2154,7 +2162,8 @@ EPSearchConfig::with_ep_default_nsegments(SizeType target_n_segs) const {
         m_ep_impl->m_validation_significance,
         m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override,
         m_ep_impl->m_overflow_keep_fraction);
-    out.m_ep_impl->m_p_orb_max = m_ep_impl->m_p_orb_max;
+    out.m_ep_impl->m_p_orb_max            = m_ep_impl->m_p_orb_max;
+    out.m_ep_impl->m_tree_capacity_factor = m_ep_impl->m_tree_capacity_factor;
     return out;
 }
 
@@ -2176,6 +2185,17 @@ EPSearchConfig::with_p_orb_max(std::optional<double> p_orb_max) const {
     }
     auto out                   = *this;
     out.m_ep_impl->m_p_orb_max = p_orb_max;
+    return out;
+}
+
+EPSearchConfig EPSearchConfig::with_tree_capacity_factor(double factor) const {
+    if (!utils::is_finite(factor) || factor < 1.0) {
+        throw std::invalid_argument(fmt::format(
+            "tree_capacity_factor must be finite and at least 1 (got {})",
+            factor));
+    }
+    auto out                              = *this;
+    out.m_ep_impl->m_tree_capacity_factor = factor;
     return out;
 }
 
@@ -2272,6 +2292,12 @@ void validate_ep_config(const EPTomlConfig& cfg) {
         throw std::invalid_argument(
             fmt::format("ep.overflow_keep_fraction must be in (0, 1] (got {})",
                         cfg.overflow_keep_fraction));
+    }
+    if (!utils::is_finite(cfg.tree_capacity_factor) ||
+        cfg.tree_capacity_factor < 1.0) {
+        throw std::invalid_argument(fmt::format(
+            "ep.tree_capacity_factor must be finite and at least 1 (got {})",
+            cfg.tree_capacity_factor));
     }
     if (cfg.rfi.has_value()) {
         cfg.rfi->validate();
@@ -2452,6 +2478,12 @@ use_conservative_tile = false
 # stage's survivors and the batch, in (0, 1]. 0.5 keeps the upper half; a
 # larger value keeps more of the best leaves but trims more often.
 overflow_keep_fraction = 0.5
+
+# Factor, at least 1, on the forecast population the world tree is sized for.
+# 1 sizes it for the noise forecast and its margin; a larger factor leaves room
+# for RFI or a bright source, and the planner narrows the chunks to keep the
+# memory limit (docs/memory.md, "Ring capacity").
+tree_capacity_factor = 1.0
 
 # RFI control of the pruning (impulsive_veto: CPU only). Omit the table for
 # none.
@@ -2677,7 +2709,8 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
                           orbit_m_c, orbit_m_p, propagator_significance,
                           validation_significance, use_conservative_tile,
                           target_snr, overflow_keep_fraction)
-        .with_p_orb_max(p_orb_max);
+        .with_p_orb_max(p_orb_max)
+        .with_tree_capacity_factor(tree_capacity_factor);
 }
 
 void EPRFIOptions::validate() const {

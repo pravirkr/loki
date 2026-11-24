@@ -3388,6 +3388,11 @@ int main(int argc, char** argv) {
         "--overflow-keep-fraction", ep_cfg.overflow_keep_fraction,
         "Fraction of the stage's survivors and batch a full world tree keeps "
         "when a batch overflows it, in (0, 1] (default: 0.5)");
+    ep_grp_pruning->add_option(
+        "--tree-capacity-factor", ep_cfg.tree_capacity_factor,
+        "Factor (>= 1) on the forecast population the world tree is sized "
+        "for; the planner narrows chunks to keep the memory limit (default: "
+        "1)");
 
     auto* ep_grp_rfi = ep->add_option_group(
         "RFI control (sets [ep.rfi], see the config template; the "

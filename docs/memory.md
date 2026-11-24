@@ -574,8 +574,10 @@ leaves (`kEPRingGranularity`; neither ring needs a power of two):
 
 ```text
 live     = max_s (L_{s-1} + L_s)
-max_sugg = round_up(live + batch_size * branch_max + 1, 1024)
+max_sugg = round_up(ceil(f * live) + batch_size * branch_max + 1, 1024)
 ```
+
+where `f` is `tree_capacity_factor` (below), 1 by default.
 
 The margin covers simulation error only. Data that departs from the noise
 model (RFI, a bright source) can exceed it; the world tree then trims
@@ -594,6 +596,17 @@ batches of each stage. Logs and the CLI print
 cache and the Python stats keep the exact counts.
 `max_passing_candidates` is an FFA output-buffer setting and does not control
 EP.
+
+`tree_capacity_factor` (`ep.tree_capacity_factor`, `--tree-capacity-factor`,
+at least 1) sizes the tree for `f` times the forecast. The forecasts
+(`predicted_live`, `predicted_peak`) are unchanged; the capacity grows, and
+with it each chunk's memory, so the width search narrows the chunks (or slices
+their seeds) to keep the limit. This is how to give a search more room per
+coordinate, for example to rerun one whose trees overflowed. Raising
+`max_process_memory_gb` does not do it: the limit does not enter the capacity,
+so a larger limit widens the chunks and leaves the room per coordinate about
+where it was. The plan cache records the factor, and a cache written before the
+setting existed counts as 1.
 
 ### Width search
 

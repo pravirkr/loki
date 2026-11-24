@@ -330,6 +330,46 @@ TEST_CASE("EP overflow keep fraction defaults to the median and is kept",
     }
 }
 
+TEST_CASE("EP tree capacity factor is read, validated and kept",
+          "[config][ep]") {
+    const auto defaults = loki::search::EPTomlConfig::from_string(make_doc())
+                              .to_ep_search_config();
+    REQUIRE(defaults.get_tree_capacity_factor() == 1.0);
+    const auto custom = loki::search::EPTomlConfig::from_string(
+                            make_doc("tree_capacity_factor = 2.0\n"))
+                            .to_ep_search_config();
+    REQUIRE(custom.get_tree_capacity_factor() == 2.0);
+    // Every copy the planner and the sweep make keeps it.
+    REQUIRE(custom.get_updated_ep_config(64, 1.0, 140.0, 141.0)
+                .get_tree_capacity_factor() == 2.0);
+    const std::vector<loki::ParamLimit> limits{{.min = -10.0, .max = 10.0},
+                                               {.min = 140.0, .max = 141.0}};
+    REQUIRE(custom.get_updated_ep_config(64, 1.0, limits)
+                .get_tree_capacity_factor() == 2.0);
+    REQUIRE(custom.with_ep_default_nsegments().get_tree_capacity_factor() ==
+            2.0);
+    const auto copied = custom;
+    REQUIRE(copied.get_tree_capacity_factor() == 2.0);
+    REQUIRE(
+        defaults.with_tree_capacity_factor(1.5).get_tree_capacity_factor() ==
+        1.5);
+    REQUIRE(defaults.get_tree_capacity_factor() == 1.0);
+    REQUIRE_NOTHROW(loki::search::EPTomlConfig::from_string(
+        make_doc("tree_capacity_factor = 1\n")));
+    for (const auto value : {"0.0", "-1.0", "0.99", "nan", "inf"}) {
+        CAPTURE(value);
+        REQUIRE_THROWS_AS(
+            loki::search::EPTomlConfig::from_string(make_doc(
+                std::string("tree_capacity_factor = ") + value + "\n")),
+            std::invalid_argument);
+    }
+    for (const auto value : {0.0, 0.5, 0.999}) {
+        CAPTURE(value);
+        REQUIRE_THROWS_AS(defaults.with_tree_capacity_factor(value),
+                          std::invalid_argument);
+    }
+}
+
 TEST_CASE("EP target SNR defaults follow the search parameter count",
           "[config][ep]") {
     const std::vector<double> expected{8.5, 8.5, 9.2, 9.8, 10.0};

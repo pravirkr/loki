@@ -404,6 +404,8 @@ public:
         file.createAttribute("poly_basis", std::string(m_poly_basis));
         file.createAttribute("ref_ducy", m_ref_ducy);
         file.createAttribute("target_snr", m_base_cfg.get_target_snr());
+        file.createAttribute("tree_capacity_factor",
+                             m_base_cfg.get_tree_capacity_factor());
         file.createAttribute("nthreads", m_base_cfg.get_nthreads());
         file.createAttribute("ep_memory_model_version",
                              detail::kEPMemoryModelVersion);
@@ -588,6 +590,17 @@ public:
         check_attr_double("min_pd", m_min_pd);
         check_attr_double("ref_ducy", m_ref_ducy);
         check_attr_double("target_snr", m_base_cfg.get_target_snr());
+        // Every chunk's capacity scales with the factor. A cache written
+        // before it existed was planned at 1.
+        if (file.hasAttribute("tree_capacity_factor")) {
+            check_attr_double("tree_capacity_factor",
+                              m_base_cfg.get_tree_capacity_factor());
+        } else if (m_base_cfg.get_tree_capacity_factor() != 1.0) {
+            throw std::invalid_argument(fmt::format(
+                "EPRegionPlanner: cache file '{}' was planned with "
+                "tree_capacity_factor 1, not {}",
+                filepath.string(), m_base_cfg.get_tree_capacity_factor()));
+        }
         int file_nthreads{};
         file.getAttribute("nthreads").read(file_nthreads);
         // The CPU thread count is part of a CPU plan (the workers and the
@@ -767,7 +780,10 @@ public:
                     "EPRegionPlanner: invalid cached batch size");
             }
             const auto required = detail::ep_tree_capacity(
-                predicted_live, batch_size, branch_max, m_memory.kind);
+                detail::ep_capacity_live(predicted_live,
+                                         m_base_cfg.get_tree_capacity_factor(),
+                                         m_memory.kind),
+                batch_size, branch_max, m_memory.kind);
             if (same_backend && max_sugg < required) {
                 throw std::invalid_argument(
                     "EPRegionPlanner: cached capacity below forecast");
