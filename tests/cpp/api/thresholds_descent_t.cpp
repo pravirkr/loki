@@ -98,6 +98,13 @@ TEST_CASE("descent: solve() delivers the target Pd", "[thresholds][descent]") {
     REQUIRE(free_sol.pd >= 0.97 * kMinPd);
     REQUIRE(free_sol.pd <= 1.0);
     REQUIRE(free_sol.cost <= 1.05 * sol.cost);
+    // A warm start at the free optimum is an interior point, not pinned back
+    // to min_pd: it gives a schedule no worse than the cold solve.
+    auto warm_opts          = free_opts;
+    warm_opts.descent_start = free_sol.thresholds;
+    const auto warm_sol     = make(backend, 7, warm_opts).solve();
+    REQUIRE(warm_sol.pd >= 0.97 * kMinPd);
+    REQUIRE(warm_sol.cost <= 1.01 * free_sol.cost);
 
     // Steep branching pattern (24 stages of 3): kPin holds Pd at the target
     // there too.

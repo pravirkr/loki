@@ -1051,7 +1051,17 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 g[s] = mean[s] - (options.start[s] * sd[s]);
             }
         }
-        pin(g);
+        if (free_pd) {
+            // Free Pd: a warm start above the target is a feasible interior
+            // point (often the previous optimum); pin it only below the
+            // target, and keep the last threshold on the floor.
+            g[nstages - 1] = std::max(g[nstages - 1], floor);
+            if (signal.pd(g, signal.size()) < target) {
+                pin(g);
+            }
+        } else {
+            pin(g);
+        }
     }
 
     // In free mode on short/flat starts, early stages often need to drop > 1
@@ -1303,28 +1313,34 @@ SchemeSolution descend_scheme(const ThresholdsEngine& engine,
                 }
             } else {
                 // The last threshold rests on the floor: shift the others over
-                // the trials that pass it.
-                g[nstages - 1]           = floor;
-                std::vector<float> probe = g;
-                probe[nstages - 1]       = std::numeric_limits<float>::lowest();
-                auto margins             = bank->margins(probe);
-                std::vector<float> last(nstages,
-                                        std::numeric_limits<float>::lowest());
-                last[nstages - 1] = floor;
-                const auto above  = bank->margins(last);
-                for (SizeType t = 0; t < n; ++t) {
-                    if (above[t] <= 0.0F) {
-                        margins[t] = std::numeric_limits<float>::lowest();
+                // the trials that pass it. pin_shift records the shift applied:
+                // none with one stage, or when too few trials pass the floor
+                // for any shift to reach the target.
+                g[nstages - 1] = floor;
+                pin_shift      = 0.0F;
+                if (nstages > 1) {
+                    std::vector<float> probe = g;
+                    probe[nstages - 1] = std::numeric_limits<float>::lowest();
+                    auto margins       = bank->margins(probe);
+                    std::vector<float> last(
+                        nstages, std::numeric_limits<float>::lowest());
+                    last[nstages - 1] = floor;
+                    const auto above  = bank->margins(last);
+                    for (SizeType t = 0; t < n; ++t) {
+                        if (above[t] <= 0.0F) {
+                            margins[t] = std::numeric_limits<float>::lowest();
+                        }
                     }
-                }
-                pin_shift = SignalSample::shift_of(margins, target);
-                if (interior) {
-                    pin_shift = std::min(0.0F, pin_shift);
-                }
-                if (utils::is_finite(pin_shift) &&
-                    pin_shift > std::numeric_limits<float>::lowest() / 2) {
-                    for (SizeType s = 0; s + 1 < nstages; ++s) {
-                        g[s] += pin_shift;
+                    float shift = SignalSample::shift_of(margins, target);
+                    if (interior) {
+                        shift = std::min(0.0F, shift);
+                    }
+                    if (utils::is_finite(shift) &&
+                        shift > std::numeric_limits<float>::lowest() / 2) {
+                        pin_shift = shift;
+                        for (SizeType s = 0; s + 1 < nstages; ++s) {
+                            g[s] += pin_shift;
+                        }
                     }
                 }
             }

@@ -54,7 +54,7 @@ def provenance() -> dict:
 def main(cmd: str, modes: tuple[str, ...]) -> None:
     if cmd == "record":
         cases = []
-        for mode in ("shared",):
+        for mode in modes:
             for case in QUICK:
                 for seed in SEEDS:
                     sol = run_case(mode, case, seed)

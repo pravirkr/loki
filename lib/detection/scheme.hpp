@@ -129,6 +129,14 @@ void validate_signal_inputs(const SchemeInputs& in,
                             SizeType min_stages,
                             std::string_view who);
 
+/// Checks a schedule handed to an engine's simulation: one finite threshold
+/// per stage (open bounds are lowest() / max(), never infinite) and
+/// @p ntrials in [1, 2^20]. Throws std::invalid_argument naming @p who.
+void check_schedule(std::span<const float> thresholds,
+                    SizeType nstages,
+                    SizeType ntrials,
+                    std::string_view who);
+
 /// Logs the first stage that ended with no state (nothing survived into it).
 void warn_empty_stages(std::span<const State> states,
                        SizeType nstages,
@@ -168,15 +176,6 @@ BeamBounds guided_beam(const BeamBounds& window,
                        std::span<const float> guess_path,
                        std::span<const float> sigma,
                        float width);
-
-/** Largest number of grid thresholds a guided_beam of half-width @p width
- * can hold at any stage, wherever its guess lies: the pool size that fits
- * every recentred beam.
- */
-SizeType guided_beam_capacity(std::span<const float> thresholds,
-                              const BeamBounds& window,
-                              std::span<const float> sigma,
-                              float width);
 
 /** A transition of the guided beam from threshold @p prev (guess
  * @p guess_prev) to @p cur (guess @p guess_cur) changes the offset from the
@@ -325,28 +324,6 @@ std::pair<SizeType, SizeType> tighten_schedule(std::vector<float>& thresholds,
 /** DynamicThresholdScheme::solve on a mode "shared" engine after run(). */
 SchemeSolution
 solve_scheme(ThresholdsEngine& engine, float min_pd, double w_terminal);
-
-/** Re-fits a schedule found at a smaller nbins to the folds of @p engine (an
- * evaluation-only engine at the true nbins; nothing else of it is used).
- *
- * The maximum over boxcar templates has a heavier noise tail at a larger
- * nbins (about nbins times more independent phase positions), so a schedule
- * searched at few bins is too permissive there, mostly by one common offset.
- * The refit scans a common upward shift of the schedule on fresh samples at
- * the true nbins and keeps the shift of lowest C / Pd among those that reach
- * the target Pd, then tightens, repairs and reports exactly as solve() does,
- * on further fresh samples. The result is honest at the true nbins; it is not
- * the schedule a native search would find (cost per detection typically
- * 1.0-1.1 times its, measured), and it never fails for lack of memory:
- * @p budget bounds the samples. @p searched is the solution at the small
- * nbins (kept in the diagnostics).
- */
-SchemeSolution refit_scheme(const ThresholdsEngine& engine,
-                            const SchemeSolution& searched,
-                            float min_pd,
-                            double w_terminal,
-                            uint64_t seed,
-                            const SolveBudget& budget);
 
 /// Settings of mode "descent" (the defaults are the validated ones).
 struct DescentOptions {

@@ -975,6 +975,16 @@ samples:
 | the same donor, as signal z-scores per stage | last 3 | 0.996 | 1.12 | |
 | the same donor, as signal z-scores | last 2 | 1.024 | 1.22 | |
 
+Free-Pd warm starts (`pd_policy = "free"`), measured 2026-11-26 (CUDA, the
+six quick suite cases, seed 1, warm starts at the cold free optimum shifted
+by 0, -0.3, -0.6 and +0.3 S/N, judged on fresh samples). Pinning the start
+to `min_pd` first, as before, threw the optimum away: L = C / Pd 6.38
+against 5.67 cold (seg16), 4.27 against 4.20 (seg4). Keeping a start above
+`min_pd`: 5.66-5.67 and 4.196-4.197, the cold optimum, from every shift;
+seg8 3.020 to 3.014; prod within its ±5 % scatter; seg32 0.6-2 % above the
+pinned result (39.6-40.2 against 39.4; cold 39.9). Every schedule judged at
+or above `min_pd`; `"pin"` schedules are bit-identical.
+
 The warm solves below 1 show that the full solve is about 2 % from
 converged. Two passes from a neighbour take 0.10 / 0.12 / 0.16 s at 16 / 64 /
 128 bins, within the time of `shared` (0.11 / 0.23 / 0.43 s). The converged

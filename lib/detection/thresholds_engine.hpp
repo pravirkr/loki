@@ -254,6 +254,7 @@ make_thresholds_gpu(std::span<const float> branching_pattern,
                     SizeType batch_size,
                     int device_id,
                     std::optional<uint64_t> seed,
+                    bool simulate          = true,
                     std::string_view guess = "analytic",
                     float min_pd           = 0.1F,
                     float w_terminal       = 0.0F,
@@ -261,7 +262,8 @@ make_thresholds_gpu(std::span<const float> branching_pattern,
                     float reach_sigma      = 1.0F);
 
 // The facade's backend dispatch, for internal callers that need the engine
-// itself (the EP planner checks run_memory_bytes() against its budget).
+// itself (the EP planner's threshold designs). @p simulate false builds an
+// evaluation-only engine (mode "improved"; no search pools or states).
 std::unique_ptr<ThresholdsEngine>
 make_thresholds_engine(std::span<const float> branching_pattern,
                        float ref_ducy,
@@ -279,6 +281,7 @@ make_thresholds_engine(std::span<const float> branching_pattern,
                        std::optional<uint64_t> seed,
                        SizeType batch_size,
                        std::string_view guess,
+                       bool simulate,
                        const SharedOptions& shared,
                        Exec exec);
 

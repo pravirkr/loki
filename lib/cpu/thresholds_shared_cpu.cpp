@@ -228,11 +228,6 @@ public:
             }
             m_max_beam = std::max(m_max_beam, n);
         }
-        // The pools fit any recentred guided beam (sized for the second pass
-        // of the removed mode robust; kept so the memory use is unchanged).
-        m_max_beam = std::max(m_max_beam, detail::guided_beam_capacity(
-                                              m_thresholds, m_window,
-                                              m_score_sigma, m_guide_width));
         const SizeType cells = m_max_beam * m_nprobs;
         if (cells * 2 > std::numeric_limits<uint32_t>::max() ||
             m_nthresholds * m_nprobs > std::numeric_limits<uint32_t>::max()) {

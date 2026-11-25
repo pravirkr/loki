@@ -68,6 +68,28 @@ def test_descent_delivers_the_target_pd(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_descent_takes_one_stage_and_a_high_snr(backend: str) -> None:
+    # An evaluation-only engine on every backend: no threshold beam has to
+    # fit the grid, so a one-stage pattern and a target S/N above the grid's
+    # beam are designed like any other.
+    one = libloki.thresholds.DynamicThresholdScheme(
+        np.array([2.0], dtype=np.float32),
+        mode="descent",
+        seed=7,
+        backend=backend,
+        nthreads=2,
+        **{"min_pd": MIN_PD, **KW, "descent_passes": PASSES, "descent_nsignal": 8192},
+    ).solve()
+    assert one["thresholds"].shape == (1,)
+    assert one["delivery"] in ("met", "within_tolerance")
+    # The planner's grid (100 thresholds, beam width 0.7): a search engine's
+    # beam of stage 0 is empty at this S/N.
+    bright = _scheme(backend, snr_final=400.0, nthresholds=100, beam_width=0.7).solve()
+    assert bright["delivery"] in ("met", "within_tolerance")
+    assert bright["thresholds"].shape == (len(BRANCHING),)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_descent_pd_policy_pin_vs_free(backend: str) -> None:
     pinned = _scheme(backend, pd_policy="pin").solve()
     assert 0.97 * MIN_PD <= pinned["pd"] <= 1.05 * MIN_PD
@@ -317,6 +339,33 @@ def test_descent_at_the_edges_of_min_pd(backend: str, min_pd: float) -> None:
     se = np.sqrt(min_pd * (1.0 - min_pd) / sol["pd_trials"])
     assert min_pd - 4.0 * se <= sol["pd"] <= min_pd + 8.0 * se
     assert np.all(np.isfinite(sol["thresholds"]))
+
+
+def test_descent_reports_the_pin_shift_it_applies() -> None:
+    # One stage with the floor just below its free threshold: the pin would
+    # cross the floor, so the threshold rests on it and nothing else can
+    # shift. The reported shift is the one applied (none), not a sentinel.
+    def one_stage(**opts):
+        return libloki.thresholds.DynamicThresholdScheme(
+            np.array([2.0], dtype=np.float32),
+            mode="descent",
+            seed=2,
+            backend="cpu",
+            nthreads=2,
+            **{
+                "min_pd": MIN_PD,
+                **KW,
+                "descent_passes": PASSES,
+                "descent_nsignal": 8192,
+                **opts,
+            },
+        ).solve()
+
+    floor = float(one_stage()["thresholds"][0]) - 0.001
+    sol = one_stage(final_threshold=floor)
+    assert sol["delivery"] == "met"
+    assert sol["thresholds"][0] == np.float32(floor)
+    assert sol["diagnostics"]["pin_shift"] == 0.0
 
 
 def test_descent_reports_an_unreachable_target() -> None:

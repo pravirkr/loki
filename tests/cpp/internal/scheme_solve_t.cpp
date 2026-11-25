@@ -194,29 +194,6 @@ TEST_CASE("window_scheme order statistics equal a full sort",
     }
 }
 
-namespace {
-
-using loki::detection::detail::make_thresholds_engine;
-
-std::unique_ptr<loki::detection::detail::ThresholdsEngine>
-shared_engine(const std::vector<float>& bp, SizeType nbins, float min_pd) {
-    return make_thresholds_engine(
-        bp, 0.1F, nbins, 1024, 40, 0.05F, 8.0F, 100, 0.2F, 1.5F, 0.7F, 1,
-        "shared", 5, 256, "window", {.min_pd = min_pd, .w_terminal = 1.0F},
-        loki::Exec::cpu(4));
-}
-
-double cost_per_detection(const loki::detection::detail::ThresholdsEngine& eng,
-                          const std::vector<float>& thresholds) {
-    const auto states = eng.evaluate(thresholds, 1U << 16U, 99, false);
-    const auto& last  = states.back();
-    return (static_cast<double>(last.complexity_cumul) +
-            static_cast<double>(last.complexity)) /
-           static_cast<double>(last.success_h1_cumul);
-}
-
-} // namespace
-
 TEST_CASE("resample_zscores carries z-scores to another stage count",
           "[thresholds][descent]") {
     const std::vector<float> z = {2.0F, 0.0F, 1.0F, 3.0F};
@@ -243,44 +220,4 @@ TEST_CASE("resample_zscores carries z-scores to another stage count",
     REQUIRE(detail::resample_zscores({}, 5).empty());
     REQUIRE(detail::resample_zscores(std::vector<float>{1.0F}, 5).empty());
     REQUIRE(detail::resample_zscores(z, 1).empty());
-}
-
-TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
-          "[thresholds][solve][slow][bigmem]") {
-    // The 8-segment pattern of issue #15. A schedule searched at 64 bins is too
-    // permissive at 256: the refit must deliver the target there and cost
-    // clearly less than the unshifted schedule.
-    const std::vector<float> bp = {1.0F,   3.0F,   3.143F, 1.0F,
-                                   1.606F, 5.604F, 1.0F};
-    constexpr float kMinPd      = 0.3F;
-    auto proxy                  = shared_engine(bp, 64, kMinPd);
-    proxy->run(10, /*show_progress=*/false);
-    const auto searched = detail::solve_scheme(*proxy, kMinPd, 1.0);
-    REQUIRE_FALSE(searched.thresholds.empty());
-    proxy.reset();
-
-    const auto evaluator = shared_engine(bp, 256, kMinPd);
-    const detail::SolveBudget budget{.nbank = 1U << 15U, .nnoise = 1U << 13U};
-    const auto refit =
-        detail::refit_scheme(*evaluator, searched, kMinPd, 1.0, 5, budget);
-    REQUIRE(refit.thresholds.size() == bp.size());
-    REQUIRE(refit.pd_trials == budget.nbank);
-    REQUIRE(refit.pd >= 0.9 * kMinPd);
-    // The shift raised the thresholds
-    for (SizeType s = 0; s < bp.size(); ++s) {
-        REQUIRE(refit.thresholds[s] >= searched.thresholds[s] - 0.5F);
-    }
-    const double unshifted =
-        cost_per_detection(*evaluator, searched.thresholds);
-    const double refitted = cost_per_detection(*evaluator, refit.thresholds);
-    CAPTURE(unshifted, refitted);
-    REQUIRE(refitted < unshifted);
-    // Close to a native search at the true nbins (the gate is loose at large
-    // nbins)
-    auto native = shared_engine(bp, 256, kMinPd);
-    native->run(10, /*show_progress=*/false);
-    const auto sol           = detail::solve_scheme(*native, kMinPd, 1.0);
-    const double native_cost = cost_per_detection(*native, sol.thresholds);
-    CAPTURE(native_cost);
-    REQUIRE(refitted < 1.5 * native_cost);
 }

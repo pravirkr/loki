@@ -231,7 +231,11 @@ cannot reach the target through the floor alone, the status is `short` and
 schedule solved for a neighbouring pattern. Measured with fixed passes on 43
 pairs of neighbouring patterns (same parameter count and bin count),
 relative to a six-pass solve from the flat start: C 0.980 with one pass per
-level, 0.986 with the last two levels only (0.11 s against 0.24 s).
+level, 0.986 with the last two levels only (0.11 s against 0.24 s). With
+`pd_policy = "pin"` the start is first shifted to Pd = `min_pd`. With
+`"free"` a start whose Pd is above `min_pd` is kept as it is (its last
+threshold raised to the floor, if any): it is a feasible interior point,
+often the previous optimum, and pinning it would discard that.
 
 The solution also reports the schedule as `zscores`, (mean - threshold) /
 standard deviation of the unpruned signal score per stage, and
@@ -320,7 +324,9 @@ genealogy: trials, margin below the current schedule, step, largest and
 smallest block), `descent_nsignal` (2^15; 2^14 costs 2-7 % in C),
 `descent_start` and `descent_start_zscores`. `run()` does nothing in this mode
 and the constructor's `ntrials`, `nprobs`, `nthresholds` and beam settings are
-not used. The constructor checks these settings and throws
+not used: on both backends the mode builds an evaluation-only engine, which
+allocates no search pools or states, accepts a one-stage pattern and any
+`snr_final` (no threshold beam has to fit the grid). The constructor checks these settings and throws
 `std::invalid_argument` (`ValueError` in Python) for any that describe no
 descent: `min_pd` outside (0, 1); a negative or non-finite `w_terminal`;
 `fap` outside [0, 1); a negative or
@@ -368,8 +374,8 @@ the production pattern.
 
 `solve()` returns a `SchemeSolution`: the thresholds, their reported Pd (with
 standard error and trial count), C and L, the noise evaluation per stage, the
-raw search selection with its in-run (optimistic) Pd and C, `shortlist`
-(always empty, kept from the removed `robust`), named diagnostics, and a delivery status (`met`,
+raw search selection with its in-run (optimistic) Pd and C, named
+diagnostics, and a delivery status (`met`,
 `within_tolerance`, `short`, `no_path`). `within_tolerance` means the reported
 Pd is below `min_pd` but at least 0.9 `min_pd`. In `descent` the pin aims 2
 standard errors above `min_pd` on one bank and the report counts on another,
@@ -439,8 +445,7 @@ Two modes were removed in 2026-11, after `descent` became the production mode.
   are heuristics. The descent stops at a schedule no block move improves,
   which need not be the global minimum.
 - `descent` has no search states: `save()`, `get_states()`,
-  `get_best_path_thresholds()` and `calibrate()` raise in this mode, and there
-  is no shortlist.
+  `get_best_path_thresholds()` and `calibrate()` raise in this mode.
 - `fap` and `final_threshold` are available from `DynamicThresholdScheme`'s API
   (`SharedOptions`); the EP planner leaves the last pruning threshold free and
   applies `snr_min` strictly to the post-`ascend` candidate scores.

@@ -44,13 +44,14 @@ make_thresholds_engine(std::span<const float> branching_pattern,
                        std::optional<uint64_t> seed,
                        SizeType batch_size,
                        std::string_view guess,
+                       bool simulate,
                        const SharedOptions& shared,
                        Exec exec) {
     if (exec.backend == Backend::kCPU) {
         return detail::make_thresholds_cpu(
             branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
             snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start,
-            mode, exec.nthreads, seed, /*simulate=*/true, guess, shared.min_pd,
+            mode, exec.nthreads, seed, simulate, guess, shared.min_pd,
             shared.w_terminal, shared.beam_sigma, shared.reach_sigma);
     }
 #ifdef LOKI_ENABLE_GPU
@@ -58,7 +59,7 @@ make_thresholds_engine(std::span<const float> branching_pattern,
         return detail::make_thresholds_gpu(
             branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
             snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start,
-            mode, batch_size, exec.device, seed, guess, shared.min_pd,
+            mode, batch_size, exec.device, seed, simulate, guess, shared.min_pd,
             shared.w_terminal, shared.beam_sigma, shared.reach_sigma);
     }
 #endif
@@ -256,47 +257,28 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     const SharedOptions& shared,
     Exec exec)
     : m_impl(std::make_unique<Impl>(
-          mode == "descent" && exec.backend == Backend::kCPU
-              // Mode "descent" only simulates samples: on the CPU an
-              // evaluation-only engine, without the pools of a search.
-              ? detail::make_thresholds_cpu(branching_pattern,
-                                            ref_ducy,
-                                            nbins,
-                                            ntrials,
-                                            nprobs,
-                                            prob_min,
-                                            snr_final,
-                                            nthresholds,
-                                            ducy_max,
-                                            wtsp,
-                                            beam_width,
-                                            trials_start,
-                                            "improved",
-                                            exec.nthreads,
-                                            seed,
-                                            /*simulate=*/false)
-              : detail::make_thresholds_engine(
-                    branching_pattern,
-                    ref_ducy,
-                    nbins,
-                    ntrials,
-                    nprobs,
-                    prob_min,
-                    snr_final,
-                    nthresholds,
-                    ducy_max,
-                    wtsp,
-                    beam_width,
-                    trials_start,
-                    // On a GPU, mode "descent" uses an engine without the
-                    // pilot simulation of the data-driven beams (its
-                    // pools are only allocated by run()).
-                    mode == "descent" ? "improved" : mode,
-                    seed,
-                    batch_size,
-                    mode == "descent" ? "analytic" : guess,
-                    shared,
-                    exec),
+          // Mode "descent" only simulates samples: an evaluation-only
+          // "improved" engine on every backend, with no pilot simulation, no
+          // search pools and no search states.
+          detail::make_thresholds_engine(branching_pattern,
+                                         ref_ducy,
+                                         nbins,
+                                         ntrials,
+                                         nprobs,
+                                         prob_min,
+                                         snr_final,
+                                         nthresholds,
+                                         ducy_max,
+                                         wtsp,
+                                         beam_width,
+                                         trials_start,
+                                         mode == "descent" ? "improved" : mode,
+                                         seed,
+                                         batch_size,
+                                         mode == "descent" ? "analytic" : guess,
+                                         /*simulate=*/mode != "descent",
+                                         shared,
+                                         exec),
           dynamic_threshold_mode_from_string(mode),
           shared,
           exec.nthreads,

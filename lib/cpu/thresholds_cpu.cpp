@@ -1278,16 +1278,8 @@ public:
                                         float min_margin,
                                         SizeType n,
                                         uint64_t seed) const override {
-        if (thresholds.size() != m_nstages) {
-            throw std::invalid_argument(
-                "DynamicThresholdScheme::h1_margins_above: need one threshold "
-                "per stage");
-        }
-        if (n == 0 || n > (SizeType{1} << 20U)) {
-            throw std::invalid_argument(
-                "DynamicThresholdScheme::h1_margins_above: ntrials must be in "
-                "[1, 2^20]");
-        }
+        detail::check_schedule(thresholds, m_nstages, n,
+                               "DynamicThresholdScheme::h1_margins_above");
         std::vector<float> margins(n, std::numeric_limits<float>::max());
         run_h1_trials(n, seed, nullptr, thresholds, min_margin, &margins);
         return margins;
@@ -1296,16 +1288,8 @@ public:
     SizeType count_h1_survivors(std::span<const float> thresholds,
                                 SizeType n,
                                 uint64_t seed) const override {
-        if (thresholds.size() != m_nstages) {
-            throw std::invalid_argument(
-                "DynamicThresholdScheme::count_h1_survivors: need one "
-                "threshold per stage");
-        }
-        if (n == 0 || n > (SizeType{1} << 20U)) {
-            throw std::invalid_argument(
-                "DynamicThresholdScheme::count_h1_survivors: ntrials must be "
-                "in [1, 2^20]");
-        }
+        detail::check_schedule(thresholds, m_nstages, n,
+                               "DynamicThresholdScheme::count_h1_survivors");
         return run_h1_trials(n, seed, nullptr, thresholds, 0.0F, nullptr);
     }
 
@@ -1485,16 +1469,8 @@ private:
                   uint64_t eval_seed,
                   bool h0_only,
                   detail::NoiseGenealogy* genealogy = nullptr) const {
-        if (thresholds.size() != m_nstages) {
-            throw std::invalid_argument(
-                "DynamicThresholdScheme::evaluate: need one threshold per "
-                "stage");
-        }
-        if (ntrials == 0 || ntrials > (SizeType{1} << 20U)) {
-            throw std::invalid_argument(
-                "DynamicThresholdScheme::evaluate: ntrials must be in "
-                "[1, 2^20]");
-        }
+        detail::check_schedule(thresholds, m_nstages, ntrials,
+                               "DynamicThresholdScheme::evaluate");
         const auto ntrials_u     = static_cast<uint32_t>(ntrials);
         const SizeType nbins     = m_nbins;
         const uint32_t branch_hi = h0_only ? 1U : 2U;

@@ -389,23 +389,23 @@ BeamBounds guided_beam(const BeamBounds& window,
     return beam;
 }
 
-SizeType guided_beam_capacity(std::span<const float> thresholds,
-                              const BeamBounds& window,
-                              std::span<const float> sigma,
-                              float width) {
-    error_check::check(thresholds.size() > 1,
-                       "guided_beam_capacity: needs a threshold grid");
-    const float step  = thresholds[1] - thresholds[0];
-    SizeType capacity = 0;
-    for (SizeType s = 0; s < sigma.size(); ++s) {
-        const auto band =
-            static_cast<SizeType>(std::ceil(2.0F * width * sigma[s] / step)) +
-            2;
-        const auto in_window =
-            beam_indices(thresholds, window.lo[s], window.hi[s]).size();
-        capacity = std::max(capacity, std::min(band, in_window));
+void check_schedule(std::span<const float> thresholds,
+                    SizeType nstages,
+                    SizeType ntrials,
+                    std::string_view who) {
+    if (thresholds.size() != nstages) {
+        throw std::invalid_argument(
+            fmt::format("{}: need one threshold per stage", who));
     }
-    return capacity;
+    if (ntrials == 0 || ntrials > (SizeType{1} << 20U)) {
+        throw std::invalid_argument(
+            fmt::format("{}: ntrials must be in [1, 2^20]", who));
+    }
+    if (!std::ranges::all_of(thresholds,
+                             [](float x) { return utils::is_finite(x); })) {
+        throw std::invalid_argument(
+            fmt::format("{}: thresholds must be finite", who));
+    }
 }
 
 std::vector<SizeType>

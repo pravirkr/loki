@@ -2,7 +2,9 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -71,6 +73,33 @@ TEST_CASE("evaluate(h0_only) reproduces the noise states", "[thresholds]") {
                     REQUIRE(h0[s].success_h1 == 1.0F);
                     REQUIRE(h0[s].success_h1_cumul == 1.0F);
                 }
+            }
+        }
+    }
+}
+
+// Every simulation of a schedule rejects a non-finite threshold, on both
+// backends and on both CUDA margin paths (host bank at nbins <= 128).
+TEST_CASE("simulations reject a non-finite threshold", "[thresholds]") {
+    const std::vector<float> bp(4, 2.0F);
+    std::vector<float> bad(bp.size(), 1.0F);
+    bad[2] = std::numeric_limits<float>::quiet_NaN();
+    for (const auto backend : {Backend::kCPU, Backend::kCUDA}) {
+        if (!loki::is_available(backend)) {
+            continue;
+        }
+        for (const SizeType nbins : {SizeType{32}, SizeType{256}}) {
+            DYNAMIC_SECTION("backend " << loki::to_string(backend) << " nbins "
+                                       << nbins) {
+                const auto engine = make_engine(backend, bp, nbins);
+                REQUIRE_THROWS_AS(engine->evaluate(bad, 64, 1, false),
+                                  std::invalid_argument);
+                REQUIRE_THROWS_AS(engine->simulate_h0_genealogy(bad, 64, 1),
+                                  std::invalid_argument);
+                REQUIRE_THROWS_AS(engine->h1_margins_above(bad, 0.0F, 64, 1),
+                                  std::invalid_argument);
+                REQUIRE_THROWS_AS(engine->count_h1_survivors(bad, 64, 1),
+                                  std::invalid_argument);
             }
         }
     }
@@ -242,4 +271,57 @@ TEST_CASE("simulate_h1_scores follows evaluate()'s H1 trials", "[thresholds]") {
             }
         }
     }
+}
+
+// Mode "descent" and the EP planner build evaluation-only engines: on the GPU
+// they simulate exactly as a search engine, take any pattern and target S/N
+// (no beam has to fit the grid), and refuse the search-only calls.
+TEST_CASE("a CUDA evaluation-only engine simulates as the full engine",
+          "[thresholds][cuda]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+#ifdef LOKI_ENABLE_GPU
+    // The planner's grid: 100 thresholds, beam width 0.7.
+    const auto make = [](const std::vector<float>& bp, float snr,
+                         bool simulate) {
+        return loki::detection::detail::make_thresholds_gpu(
+            bp, 0.1F, 64, 64, 6, 0.05F, snr, 100, 0.3F, 1.5F, 0.7F, 1,
+            "improved", 256, 0, 17, simulate);
+    };
+    const std::vector<float> bp(10, 2.0F);
+    std::vector<float> thresholds(bp.size());
+    for (SizeType s = 0; s < bp.size(); ++s) {
+        thresholds[s] = 1.0F + (0.2F * static_cast<float>(s));
+    }
+    const auto full = make(bp, 8.0F, true);
+    const auto eval = make(bp, 8.0F, false);
+    const auto a    = full->evaluate(thresholds, 300, 5, false);
+    const auto b    = eval->evaluate(thresholds, 300, 5, false);
+    REQUIRE(a.size() == b.size());
+    for (SizeType s = 0; s < a.size(); ++s) {
+        REQUIRE(bits(a[s].success_h0) == bits(b[s].success_h0));
+        REQUIRE(bits(a[s].success_h1) == bits(b[s].success_h1));
+        REQUIRE(bits(a[s].complexity_cumul) == bits(b[s].complexity_cumul));
+    }
+    const auto sa = full->simulate_h1_scores(256, 9);
+    const auto sb = eval->simulate_h1_scores(256, 9);
+    REQUIRE(std::ranges::equal(
+        sa, sb, [](float x, float y) { return bits(x) == bits(y); }));
+    REQUIRE(full->count_h1_survivors(thresholds, 512, 3) ==
+            eval->count_h1_survivors(thresholds, 512, 3));
+
+    REQUIRE_THROWS_AS(eval->run(6, false), std::logic_error);
+    REQUIRE_THROWS_AS(eval->get_states(), std::logic_error);
+    REQUIRE_THROWS_AS(eval->get_best_path_thresholds(0.1F), std::logic_error);
+    REQUIRE_THROWS_AS(eval->save("./"), std::logic_error);
+
+    // One stage, and a target S/N at which a search engine's beam is empty.
+    REQUIRE_THROWS_AS(make({2.0F}, 8.0F, true), std::invalid_argument);
+    const auto one = make({2.0F}, 8.0F, false);
+    REQUIRE(one->count_h1_survivors(std::vector<float>{1.0F}, 256, 4) > 0);
+    REQUIRE_THROWS_AS(make(bp, 400.0F, true), std::invalid_argument);
+    const auto bright = make(bp, 400.0F, false);
+    REQUIRE(bright->evaluate(thresholds, 64, 5, false).size() == bp.size());
+#endif
 }

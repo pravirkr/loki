@@ -39,11 +39,6 @@ py::dict solution_to_dict(detection::SchemeSolution sol) {
     out["zscores"]           = as_pyarray(std::move(sol.zscores));
     out["search_pd"]         = sol.search_pd;
     out["search_c"]          = sol.search_c;
-    py::list shortlist;
-    for (auto& path : sol.shortlist) {
-        shortlist.append(as_pyarray(std::move(path)));
-    }
-    out["shortlist"] = std::move(shortlist);
     py::dict diag;
     for (const auto& [name, value] : sol.diagnostics) {
         diag[py::str(name)] = value;

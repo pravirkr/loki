@@ -779,6 +779,7 @@ public:
                        SizeType batch_size,
                        int device_id,
                        std::optional<uint64_t> seed,
+                       bool simulate,
                        std::string_view guess,
                        float min_pd,
                        float w_terminal,
@@ -797,11 +798,37 @@ public:
           m_device_id(device_id),
           m_seed(seed.value_or(std::random_device{}())),
           m_nbins(nbins),
-          m_guess(guess) {
+          m_guess(guess),
+          m_simulate(simulate) {
         const auto beam_guess = detail::beam_guess_from_string(guess);
         const bool shared     = is_shared_family(m_mode);
-        validate_inputs(nprobs, shared ? 0.5F : prob_min, snr_final,
-                        nthresholds);
+        if (m_simulate) {
+            validate_inputs(nprobs, shared ? 0.5F : prob_min, snr_final,
+                            nthresholds);
+        } else {
+            // Evaluation only (mode "descent" and the EP planner): any grid
+            // and one stage are allowed, but the simulated signal and noise
+            // must still be well defined.
+            if (m_mode != DynamicThresholdMode::kImproved) {
+                throw std::logic_error(
+                    "ThresholdsCuda: an evaluation-only engine is mode "
+                    "'improved'");
+            }
+            detail::validate_signal_inputs(
+                {.branching_pattern = m_branching_pattern,
+                 .ref_ducy          = m_ref_ducy,
+                 .ducy_max          = m_ducy_max,
+                 .wtsp              = m_wtsp,
+                 .beam_width        = m_beam_width,
+                 .prob_min          = prob_min,
+                 .snr_final         = snr_final,
+                 .nbins             = m_nbins,
+                 .ntrials           = m_ntrials,
+                 .nprobs            = nprobs,
+                 .nthresholds       = nthresholds,
+                 .batch_size        = m_batch_size},
+                1, "ThresholdsCuda");
+        }
         if (shared) {
             // The grid is anchored at the target: nprobs is the number of
             // bins from min_pd to 1 (prob_min is unused). The terminal
@@ -906,6 +933,11 @@ public:
             m_beam = detail::centred_beam(m_guess_path, m_beam_width,
                                           m_thresholds.back());
         }
+        // An evaluation-only engine needs neither the beam's pools nor the
+        // search states.
+        if (!m_simulate) {
+            return;
+        }
         SizeType max_beam = 0;
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
             const auto beam_size = get_current_thresholds_idx(istage).size();
@@ -916,14 +948,6 @@ public:
                     istage, m_guess_path[istage], m_beam_width));
             }
             max_beam = std::max(max_beam, beam_size);
-        }
-        if (!m_score_sigma.empty()) {
-            // The pools fit any recentred guided beam (sized for the second
-            // pass of the removed mode robust; kept so the memory use is
-            // unchanged).
-            max_beam = std::max(max_beam, detail::guided_beam_capacity(
-                                              m_thresholds, m_window,
-                                              m_score_sigma, m_guide_width));
         }
 
         // Fold pools: one cell per (beam slot, prob bin), H0 + H1 rows each.
@@ -947,6 +971,7 @@ public:
     ThresholdsCudaCore& operator=(ThresholdsCudaCore&&)      = delete;
 
     void run(SizeType thres_neigh) {
+        check_simulate("run");
         if (thres_neigh == 0) {
             throw std::invalid_argument("thres_neigh must be positive");
         }
@@ -1039,7 +1064,10 @@ public:
                (m_states.size() * sizeof(State)) + shared_bytes;
     }
 
-    std::vector<State> get_states() const { return m_states; }
+    std::vector<State> get_states() const {
+        check_simulate("get_states");
+        return m_states;
+    }
     std::vector<float> get_thresholds() const { return m_thresholds; }
     std::vector<float> get_probs() const { return m_probs; }
 
@@ -1250,7 +1278,8 @@ public:
         uint32_t* h1_mask[2]   = {nullptr, nullptr};
         uint32_t* h1_pass      = nullptr;
         if (shared) {
-            // One simulation per run(): both passes count on the same trials.
+            // One simulation per run(): every stage counts on the same
+            // trials.
             if (!m_h1_bank_valid) {
                 simulate_h1_scores_device(
                     m_nh1, detail::derive_seed(m_seed, kSharedSalt), stream,
@@ -1409,6 +1438,7 @@ public:
     }
 
     std::string save(const std::string& outdir = "./") const {
+        check_simulate("save");
         const std::filesystem::path filebase = fmt::format(
             "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
@@ -1531,6 +1561,7 @@ public:
     }
 
     std::vector<float> get_best_path_thresholds(float min_pd) const {
+        check_simulate("get_best_path_thresholds");
         if (is_shared_family(m_mode)) {
             auto path = selected_path(m_states, min_pd);
             if (!path.thresholds.empty()) {
@@ -1550,23 +1581,8 @@ public:
                                 SizeType ntrials,
                                 std::optional<uint64_t> seed,
                                 bool h0_only) const {
-        if (thresholds.size() != m_nstages) {
-            throw std::invalid_argument(
-                "ThresholdsCuda::evaluate: need one threshold "
-                "per stage");
-        }
-        if (ntrials == 0 || ntrials > (1U << 20U)) {
-            throw std::invalid_argument(
-                "ThresholdsCuda::evaluate: ntrials must be in "
-                "[1, 2^20]");
-        }
-        for (const float t : thresholds) {
-            if (!is_finite(t)) {
-                throw std::invalid_argument(
-                    "ThresholdsCuda::evaluate: thresholds must "
-                    "be finite");
-            }
-        }
+        detail::check_schedule(thresholds, m_nstages, ntrials,
+                               "ThresholdsCuda::evaluate");
         const uint64_t eval_seed = seed.value_or(std::random_device{}());
         const auto ntrials_u     = static_cast<uint32_t>(ntrials);
         const auto padded        = static_cast<uint32_t>(m_nbins_padded);
@@ -1692,16 +1708,8 @@ public:
     simulate_h0_genealogy(std::span<const float> thresholds,
                           SizeType ntrials,
                           uint64_t seed) const {
-        if (thresholds.size() != m_nstages) {
-            throw std::invalid_argument(
-                "ThresholdsCuda::simulate_h0_genealogy: need one threshold "
-                "per stage");
-        }
-        if (ntrials == 0 || ntrials > (1U << 20U)) {
-            throw std::invalid_argument(
-                "ThresholdsCuda::simulate_h0_genealogy: ntrials must be in "
-                "[1, 2^20]");
-        }
+        detail::check_schedule(thresholds, m_nstages, ntrials,
+                               "ThresholdsCuda::simulate_h0_genealogy");
         const auto ntrials_u = static_cast<uint32_t>(ntrials);
         const auto padded    = static_cast<uint32_t>(m_nbins_padded);
         const SizeType rows  = ntrials * m_nbins_padded;
@@ -1927,23 +1935,6 @@ public:
         uint64_t seed,
         cudaStream_t stream,
         thrust::device_vector<float>& margins) const {
-        if (thresholds.size() != m_nstages) {
-            throw std::invalid_argument(
-                "ThresholdsCuda::h1_margins_above: need one threshold per "
-                "stage");
-        }
-        if (ntrials == 0 || ntrials > (1U << 20U)) {
-            throw std::invalid_argument(
-                "ThresholdsCuda::h1_margins_above: ntrials must be in "
-                "[1, 2^20]");
-        }
-        for (const float t : thresholds) {
-            if (!is_finite(t)) {
-                throw std::invalid_argument(
-                    "ThresholdsCuda::h1_margins_above: thresholds must be "
-                    "finite");
-            }
-        }
         const SizeType chunk = h1_chunk_trials(ntrials);
         const auto chunk_u   = static_cast<uint32_t>(chunk);
         const auto padded    = static_cast<uint32_t>(m_nbins_padded);
@@ -2058,6 +2049,8 @@ public:
                                         float min_margin,
                                         SizeType ntrials,
                                         uint64_t seed) const {
+        detail::check_schedule(thresholds, m_nstages, ntrials,
+                               "ThresholdsCuda::h1_margins_above");
         if (m_nbins <= 128) {
             return make_signal_bank(ntrials, seed)->margins(thresholds);
         }
@@ -2080,6 +2073,8 @@ public:
     SizeType count_h1_survivors(std::span<const float> thresholds,
                                 SizeType ntrials,
                                 uint64_t seed) const {
+        detail::check_schedule(thresholds, m_nstages, ntrials,
+                               "ThresholdsCuda::count_h1_survivors");
         if (m_nbins <= 128) {
             const auto margins =
                 make_signal_bank(ntrials, seed)->margins(thresholds);
@@ -2186,6 +2181,8 @@ private:
     uint64_t m_seed;
     SizeType m_nbins;
     std::string m_guess;
+    // False: an evaluation-only engine (no beam pools, no search states).
+    bool m_simulate;
     SizeType m_nbins_padded{};
     // Shared mode: shared H1 trials (8 x ntrials) and their 32-bit words
     SizeType m_nh1{};
@@ -2211,8 +2208,7 @@ private:
     bool m_all_transitions{false};
     // "window" beam guided by a guess (empty m_score_sigma: the whole
     // window): feasibility window, pilot guess, signal score std per stage,
-    // beam half-width and transition reach (both in sigma), and whether pass
-    // 2 recentres the guess on pass 1's path.
+    // beam half-width and transition reach (both in sigma).
     detail::BeamBounds m_window;
     std::vector<float> m_guess_pilot;
     std::vector<float> m_score_sigma;
@@ -2300,6 +2296,15 @@ private:
         return (std::bit_cast<uint32_t>(x) & 0x7F800000U) != 0x7F800000U;
     }
 
+    void check_simulate(std::string_view what) const {
+        if (!m_simulate) {
+            throw std::logic_error(
+                fmt::format("DynamicThresholdScheme::{}: engine was built for "
+                            "evaluate only",
+                            what));
+        }
+    }
+
     void validate_inputs(SizeType nprobs,
                          float prob_min,
                          float snr_final,
@@ -2344,6 +2349,7 @@ public:
                          SizeType batch_size,
                          int device_id,
                          std::optional<uint64_t> seed,
+                         bool simulate,
                          std::string_view guess,
                          float min_pd,
                          float w_terminal,
@@ -2365,6 +2371,7 @@ public:
                  batch_size,
                  device_id,
                  seed,
+                 simulate,
                  guess,
                  min_pd,
                  w_terminal,
@@ -2469,6 +2476,7 @@ make_thresholds_gpu(std::span<const float> branching_pattern,
                     SizeType batch_size,
                     int device_id,
                     std::optional<uint64_t> seed,
+                    bool simulate,
                     std::string_view guess,
                     float min_pd,
                     float w_terminal,
@@ -2477,8 +2485,8 @@ make_thresholds_gpu(std::span<const float> branching_pattern,
     return std::make_unique<ThresholdsCudaEngine>(
         branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
         snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start, mode,
-        batch_size, device_id, seed, guess, min_pd, w_terminal, beam_sigma,
-        reach_sigma);
+        batch_size, device_id, seed, simulate, guess, min_pd, w_terminal,
+        beam_sigma, reach_sigma);
 }
 } // namespace detail
 

@@ -86,8 +86,6 @@ TEST_CASE("solve: the Pd it reports is that of the returned thresholds",
     REQUIRE(scheme.solution() != nullptr);
     REQUIRE(sol.thresholds.size() == scheme.get_nstages());
     REQUIRE(sol.delivery != detection::Delivery::kNoPath);
-    // The field of the removed mode robust's shortlist stays, empty
-    REQUIRE(sol.shortlist.empty());
     REQUIRE(sol.min_pd == kMinPd);
     REQUIRE(sol.w_terminal == 1.0F);
     REQUIRE(sol.pd_trials == (SizeType{1} << 17U));

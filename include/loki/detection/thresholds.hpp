@@ -275,9 +275,6 @@ struct SchemeSolution {
     /// pattern (the signal side is 1). Not a forecast for another pattern:
     /// evaluate() those.
     std::vector<State> eval_states;
-    /// Always empty: it held the shortlist of the removed mode "robust" and
-    /// is kept so the result keeps its fields.
-    std::vector<std::vector<float>> shortlist;
     /// Raw search selection before tightening and repair, with
     /// its in-run Pd and C. Both are optimistic.
     std::vector<float> search_thresholds;
@@ -291,7 +288,7 @@ struct SchemeSolution {
     double search_pd{0.0};
     double search_c{0.0};
     /// Named counters and timings of the pipeline (shift applied, tightened
-    /// stages, block moves, shortlist sizes, ...).
+    /// stages, block moves, ...).
     std::vector<std::pair<std::string, double>> diagnostics;
     Delivery delivery{Delivery::kNoPath};
     float min_pd{0.0F};

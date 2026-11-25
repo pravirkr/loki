@@ -64,8 +64,9 @@ constexpr std::string_view kCacheVersion = "1.24.0";
 /// Threshold design of the planner: mode "descent" of DynamicThresholdScheme
 /// (docs/dts.md) at the true nbins of every region. The seed is fixed: the
 /// scheme sets the chunking, so plans of one configuration must not change
-/// from run to run. CUDA results are reproducible per (seed, batch_size), so
-/// the batch size is part of the cache key.
+/// from run to run. The CUDA batch size sets the random streams of a grid
+/// search only, which the descent never runs; it stays in the cache key so
+/// existing caches keep matching.
 constexpr std::string_view kDtsMode = "descent";
 constexpr uint64_t kDtsSeed         = 0x10C1;
 constexpr SizeType kDtsBatchSize    = 256;
@@ -1060,7 +1061,8 @@ private:
     }
 
     /// The engine of a design: it only simulates samples (the descent
-    /// searches no grid), so it allocates no search pools on either backend.
+    /// searches no grid), so it is evaluation-only on either backend: no
+    /// search pools or states, and any pattern the descent accepts.
     std::unique_ptr<detection::detail::ThresholdsEngine>
     make_threshold_engine(std::span<const float> branching_pattern,
                           SizeType nbins,
@@ -1075,15 +1077,12 @@ private:
                 kDtsBeamWidth, kDtsTrialsStart, "improved",
                 m_base_cfg.get_nthreads(), seed, /*simulate=*/false);
         }
-        detection::SharedOptions shared;
-        shared.min_pd     = scheme_target();
-        shared.w_terminal = kDtsWTerminal;
-        shared.pd_policy  = kDtsPdPolicy;
+        // Mode improved reads none of the SharedOptions.
         return detection::detail::make_thresholds_engine(
             branching_pattern, m_ref_ducy, nbins, kDtsNTrials, kDtsNProbs,
             kDtsProbMin, snr, kDtsNThresholds, ducy_max, wtsp, kDtsBeamWidth,
-            kDtsTrialsStart, "improved", seed, kDtsBatchSize, kDtsGuess, shared,
-            m_exec);
+            kDtsTrialsStart, "improved", seed, kDtsBatchSize, kDtsGuess,
+            /*simulate=*/false, detection::SharedOptions{}, m_exec);
     }
 
     /// Samples of a design, sized to the memory budget: the host or device

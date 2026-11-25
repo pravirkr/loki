@@ -58,8 +58,6 @@ def test_solve_reports_the_pd_of_its_thresholds(backend: str) -> None:
     thresholds = sol["thresholds"]
     assert thresholds.shape == (scheme.nstages,)
     assert sol["delivery"] != "no_path"
-    # the key of the removed mode robust's shortlist stays, empty
-    assert len(sol["shortlist"]) == 0
     assert sol["pd"] >= 0.9 * MIN_PD
     assert sol["pd_se"] > 0
     assert sol["pd_trials"] == 1 << 17
