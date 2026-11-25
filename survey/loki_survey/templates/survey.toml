@@ -1,0 +1,115 @@
+# survey.toml: the science of one loki-survey run.
+#
+# Every value here changes what the search finds, and `loki-survey check`
+# hashes this file's resolved content. Values marked "loki's default" may be
+# left out; resolved.json then records the value used.
+
+[survey]
+name = "my-survey"
+
+[data]
+# Dedispersed series, one per DM: PRESTO .dat (with its .inf) or SIGPROC .tim.
+# Globs are relative to the run directory.
+series = ["data/*.dat"]
+# "pow2" searches the first 2^k samples (the longest power of two); "none"
+# searches them all.
+truncate = "pow2"
+# Bad stretches to give zero weight, in seconds from the start of each file.
+# Data breaks marked in a PRESTO .inf are masked without listing them here.
+# [data.masks]
+# "obs_DM10.00.dat" = [[120.0, 135.5]]
+
+# loki's robust normalisation (docs/preprocessing.md in loki); any field of
+# libloki.io.PreprocessOptions. Leave the table empty for loki's defaults.
+[preprocess]
+# filter_window = 1.0  # baseline window in seconds (loki's default)
+
+[search]
+# Candidates below this folded S/N are not written.
+snr_min = 7.0
+# eta = 1.0     # loki's default (PulsarSearchConfig.eta)
+# min_pd = 0.1  # loki's default: requested detection probability of the EP thresholds
+
+# Frequency regions: each with its own bin count and sampling. A region with
+# downsample = 2 is searched on a series summed in pairs of samples.
+[[search.region]]
+name = "high"
+f_hz = [100.0, 1000.0]
+nbins = 32
+# downsample = 1   # default
+# ducy_max = 0.2   # loki's default: widest pulse searched, as a duty cycle
+# bands = 1        # split the region into this many log-uniform bands
+
+# Search boxes. kind "ffa" or "ep"; order is the highest derivative searched
+# ("freq", "accel", "jerk", "snap" or, for EP, "crackle": loki's circular-orbit
+# search). Give the derivative limits directly...
+[[search.box]]
+name = "accel"
+kind = "ffa"
+order = "accel"
+limits = { accel = [-50.0, 50.0] }   # m/s^2
+# regions = ["high"]   # the regions this box searches; default: all of them
+# use_fourier = true   # loki's default (PulsarSearchConfig.use_fourier)
+
+# EP boxes may also set the pruning segments (loki's defaults otherwise):
+# segments = 8        # FFA segments the tree prunes over (loki's nsegments),
+#                     # a power of two; loki's default is 128
+# bseg_brute = 1024   # samples per brute-force segment
+# ref_segs = [4]      # reference segments the tree grows from
+
+# ...or as circular-orbit priors, from which loki derives the limits per band.
+# With order "crackle", EP propagates each leaf as an orbit where its terms are
+# significant.
+# [[search.box]]
+# name = "binary"
+# kind = "ep"
+# order = "crackle"
+# orbit = { p_orb_min_s = 10800.0, m_c_max = 0.5, m_p_min = 1.2 }
+
+# loki's candidate step in each unit (docs/candidates.md in loki): any field
+# of libloki.configs.CandidateOptions, except memory_gb ([unit] in site.toml).
+# A search can leave millions of trials above snr_min, too many for loki to
+# group: max_per_cell keeps only the strongest trials of each frequency cell.
+# Units start from loki's own options for their kind: FFA units keep every
+# trial, EP units reduce their final leaves per run
+# (CandidateOptions.ep_defaults()). Keys set here apply to both kinds;
+# resolved.json records the options each kind runs.
+[candidates]
+# max_per_cell = 0         # strongest trials kept per cell; 0: every trial
+# cell_bins = <width in Fourier bins 1/T_obs>    # one of the two widths is
+# cell_log_width = <width in ln(frequency)>      # required with max_per_cell;
+#                          # with cell_log_width, set cell_bins = 0 for EP
+# grouping = "transitive"  # loki's default; or "anchored"
+
+[output]
+# Fraction of units that keep loki's full result file (a fixed sample).
+raw_fraction = 0.0
+
+# How collect groups the units' candidates and what it removes. These tables
+# change no search: they have their own hash and may change at any time.
+[collect]
+# radius_bins = 2.0       # one source: frequencies within this many 1/T_obs
+# harmonic_max = 16       # label harmonics p/q with p, q up to this; 0: off
+# dm_zero_max = 0.0       # strongest at the lowest DM, at most this: undispersed
+# Removal rules, all off by default; every removal goes to collect/ledger.jsonl.
+# snr_min = 0.0           # remove groups below this S/N
+# drop_undispersed = false
+# remove_harmonics = false
+# max_candidates = 0      # keep only this many of the strongest; 0: all
+
+# How evaluate labels the candidates.
+[evaluate]
+# catalogue = "catalogue.csv"  # name, f0 or p0, and optional dm, pb (d), a1 (lt-s)
+# harmonic_max = 16       # match p/q times a catalogued frequency
+# doppler = 1e-4          # fractional window: the Earth's orbit, plus the orbit's
+# dm_tol = 0.0            # DMs must agree this closely; 0: not checked
+# line_fap = 1e-3         # false-alarm probability of a spectral line
+# line_tol_bins = 1.0     # a group within this many 1/T_obs of a line is on it
+# observation = ""        # regex naming a series' observation (group "obs");
+#                         # "": the series id without its _DM<dm> token
+
+# How fold checks the strongest candidates, with loki's own model of each leaf.
+[fold]
+# candidates = 20         # fold this many of the strongest selected groups
+# control_factor = 1.002  # control fold at this times the frequency
+# dm_curve = true         # also fold every series (DM) of the region

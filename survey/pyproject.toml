@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loki-survey"
+version = "0.1.0"
+description = "Run a loki pulsar survey end to end, on a laptop, a server or a cluster"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+# loki itself is not listed: it is built from https://github.com/pravirkr/loki,
+# and the package named "loki" on PyPI is a different project, which pip would
+# install in its place. loki-survey reports a missing loki when it runs.
+dependencies = ["numpy>=2.0", "h5py>=3.11"]
+
+[project.optional-dependencies]
+tests = ["pytest>=9.0"]
+
+[project.scripts]
+loki-survey = "loki_survey.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["loki_survey*"]
+
+[tool.setuptools.package-data]
+loki_survey = ["templates/*.toml"]
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D1",
+    "ANN003",
+    "CPY001",
+    "PLR2004",
+    "G004",
+    "E712",
+    "FBT001",
+    "FBT002",
+    "TD",
+    "FIX",
+    "S603",
+    "T201",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "INP001"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.ruff.lint.pylint]
+max-args = 20
+max-statements = 100
+max-branches = 20
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.isort]
+known-first-party = ["loki", "loki_survey"]
