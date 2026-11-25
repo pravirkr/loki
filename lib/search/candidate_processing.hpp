@@ -62,8 +62,8 @@ private:
     std::uint64_t m_max;
     std::uint64_t m_cap; ///< Current per-cell keep, at most m_max.
     bool m_log;
-    double m_scale;
-    double m_memory_gb;
+    double m_scale{};
+    double m_memory_gb{};
     // Each cell is a heap whose front is its weakest kept trial.
     std::unordered_map<Key, std::vector<Candidate>, KeyHash> m_cells;
     std::uint64_t m_kept{};
@@ -93,7 +93,7 @@ private:
     double m_tobs;
     CandidateOptions m_options;
     bool m_bins;
-    double m_reach; ///< Hz with cell_bins, else a fraction of frequency.
+    double m_reach{}; ///< Hz with cell_bins, else a fraction of frequency.
 };
 
 /// The trial of an EP final leaf: @p leaf is its spool row of

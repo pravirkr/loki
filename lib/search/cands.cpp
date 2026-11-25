@@ -1071,9 +1071,12 @@ void PruneResultWriter::write_run_results(
             leaves_view.first.size() / stride +
                 leaves_view.second.size() / stride,
             n_leaves, "write_run_results: circular view size mismatch");
-        reduced = detail::reduce_run_leaves(
-            *reduction, n_leaves, n_params, leaf,
-            [&](std::size_t i) { return pick(scores_view, i); }, widths);
+        {
+            const std::scoped_lock lock(m_reduce_mutex);
+            reduced = detail::reduce_run_leaves(
+                *reduction, n_leaves, n_params, leaf,
+                [&](std::size_t i) { return pick(scores_view, i); }, widths);
+        }
         const auto n = reduced->retained.size();
         kept_leaves.reserve(n * stride);
         kept_scores.reserve(n);
@@ -1175,17 +1178,20 @@ void PruneResultWriter::write_run_results(
         }
         // Pass 1: the reduction, streamed. Pass 2: the retained rows, in
         // ascending leaf order, as the in-memory path writes them.
-        detail::RunLeafReducer reducer(*reduction, n_params);
-        for_each_batch([&](SizeType begin, SizeType n) {
-            for (SizeType k = 0; k < n; ++k) {
-                reducer.add(
-                    begin + k,
-                    std::span<const double>(leaves).subspan(k * stride, stride),
-                    scores[k], widths[k]);
-            }
-        });
-        const auto reduced = reducer.finish(n_total);
-        const auto n_kept  = reduced.retained.size();
+        const auto reduced = [&] {
+            const std::scoped_lock lock(m_reduce_mutex);
+            detail::RunLeafReducer reducer(*reduction, n_params);
+            for_each_batch([&](SizeType begin, SizeType n) {
+                for (SizeType k = 0; k < n; ++k) {
+                    reducer.add(begin + k,
+                                std::span<const double>(leaves).subspan(
+                                    k * stride, stride),
+                                scores[k], widths[k]);
+                }
+            });
+            return reducer.finish(n_total);
+        }();
+        const auto n_kept = reduced.retained.size();
         std::vector<double> kept_leaves;
         std::vector<float> kept_scores;
         std::vector<float> kept_scores_ep;

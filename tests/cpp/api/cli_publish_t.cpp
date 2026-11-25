@@ -124,6 +124,28 @@ void check_same(const Product& published, const Product& searched) {
           std::string::npos);
 }
 
+/// The runs of an EP result file, and how many the search reduced.
+std::pair<std::size_t, std::size_t>
+runs_reduced_by_search(const std::filesystem::path& path) {
+    const HighFive::File file(path.string(), HighFive::File::ReadOnly);
+    std::size_t n_runs    = 0;
+    std::size_t n_reduced = 0;
+    const auto chunks     = file.getGroup("chunks");
+    for (const auto& chunk : chunks.listObjectNames()) {
+        const auto runs = chunks.getGroup(chunk).getGroup("runs");
+        for (const auto& name : runs.listObjectNames()) {
+            const auto run = runs.getGroup(name);
+            ++n_runs;
+            if (run.hasAttribute("reduced_at") &&
+                run.getAttribute("reduced_at").read<std::string>() ==
+                    "search") {
+                ++n_reduced;
+            }
+        }
+    }
+    return {n_runs, n_reduced};
+}
+
 } // namespace
 
 TEST_CASE("publish CLI publishes a kept spool as the search would", "[cli]") {
@@ -167,6 +189,27 @@ TEST_CASE("publish CLI publishes a kept spool as the search would", "[cli]") {
             run_cli(fmt::format(R"(publish "{}")", spool.string()), log);
         CHECK(again != 0);
         CHECK(std::filesystem::exists(spool));
+        // A failed publish leaves neither an output nor its staging file.
+        const auto output = dir / "kept" / "run_ffa_results.h5";
+        const std::filesystem::path staging(output.string() + ".publishing");
+        CHECK_FALSE(std::filesystem::exists(output));
+        CHECK_FALSE(std::filesystem::exists(staging));
+        // A publish that fails after writing its staging file (here, the
+        // rename onto a non-empty directory) removes it and keeps the spool.
+        const auto occupied = dir / "kept" / "occupied";
+        std::filesystem::create_directories(occupied);
+        std::ofstream(occupied / "x") << "x";
+        const auto [blocked, blocked_log] = run_cli(
+            fmt::format(
+                R"(publish "{}" --candidate-tempdir "{}" -o "{}" --force)",
+                spool.string(), dir.path().string(), occupied.string()),
+            log);
+        INFO(blocked_log);
+        CHECK(blocked != 0);
+        CHECK(std::filesystem::exists(spool));
+        CHECK(std::filesystem::is_directory(occupied));
+        CHECK_FALSE(std::filesystem::exists(
+            std::filesystem::path(occupied.string() + ".publishing")));
         const auto [status, text] =
             run_cli(fmt::format(R"(publish "{}" --candidate-tempdir "{}")",
                                 spool.string(), dir.path().string()),
@@ -174,7 +217,7 @@ TEST_CASE("publish CLI publishes a kept spool as the search would", "[cli]") {
         INFO(text);
         REQUIRE(status == 0);
         CHECK_FALSE(std::filesystem::exists(spool));
-        const auto output = dir / "kept" / "run_ffa_results.h5";
+        CHECK_FALSE(std::filesystem::exists(staging));
         check_same(read_product(output),
                    read_product(dir / "ok" / "run_ffa_results.h5"));
         // A published file is refused.
@@ -310,6 +353,49 @@ TEST_CASE("publish CLI publishes a kept spool as the search would", "[cli]") {
         const auto published = read_product(dir / "kept" / "run_ep_results.h5");
         check_candidates(published, expected);
         CHECK(published.input_path == (dir / "moved.tim").string());
+    }
+
+    SECTION("EP: a --no-candidates result publishes as the search would") {
+        // The runs are written reduced, as the search's spool holds them.
+        const auto config = write_case(dir, "ep");
+        const auto [ok, ok_log] =
+            run_cli(fmt::format(R"(search ep -c "{}" -o "{}" -p run)",
+                                config.string(), (dir / "ok").string()),
+                    log);
+        INFO(ok_log);
+        REQUIRE(ok == 0);
+        const auto [raw, raw_log] = run_cli(
+            fmt::format(R"(search ep -c "{}" -o "{}" -p run --no-candidates)",
+                        config.string(), (dir / "raw").string()),
+            log);
+        INFO(raw_log);
+        REQUIRE(raw == 0);
+        const auto file = dir / "raw" / "run_ep_results.h5";
+        // Every run was reduced by the search itself.
+        const auto [n_runs, n_reduced] = runs_reduced_by_search(file);
+        CHECK(n_runs > 0);
+        CHECK(n_reduced == n_runs);
+        // max_per_cell = 0 keeps every final leaf: no run is reduced.
+        const auto [full, full_log] = run_cli(
+            fmt::format(R"(search ep -c "{}" -o "{}" -p run --no-candidates )"
+                        R"(--max-per-cell 0)",
+                        config.string(), (dir / "full").string()),
+            log);
+        INFO(full_log);
+        REQUIRE(full == 0);
+        const auto [n_full, n_full_reduced] =
+            runs_reduced_by_search(dir / "full" / "run_ep_results.h5");
+        CHECK(n_full == n_runs);
+        CHECK(n_full_reduced == 0);
+        const auto output = dir / "published.h5";
+        const auto [status, text] =
+            run_cli(fmt::format(R"(publish "{}" -o "{}")", file.string(),
+                                output.string()),
+                    log);
+        INFO(text);
+        REQUIRE(status == 0);
+        check_same(read_product(output),
+                   read_product(dir / "ok" / "run_ep_results.h5"));
     }
 
     SECTION("a --no-candidates result needs -o and is kept") {

@@ -368,10 +368,8 @@ CellCap::CellCap(const CandidateOptions& options,
                  std::size_t reserved_bytes)
     : m_max(options.max_per_cell),
       m_cap(options.max_per_cell),
-      m_log(options.cell_log_width > 0),
-      m_scale(m_log ? 1 / options.cell_log_width : tobs / options.cell_bins),
-      m_memory_gb(options.memory_gb -
-                  static_cast<double>(reserved_bytes) / utils::kBytesPerGB) {
+      m_log(options.cell_log_width > 0) {
+    // Validate before dividing by the cell width or the observation length.
     options.validate();
     if (m_max == 0) {
         throw std::invalid_argument("candidate cell cap needs max_per_cell");
@@ -380,6 +378,9 @@ CellCap::CellCap(const CandidateOptions& options,
         throw std::invalid_argument(
             "candidate cell_bins needs a positive observation length");
     }
+    m_scale     = m_log ? 1 / options.cell_log_width : tobs / options.cell_bins;
+    m_memory_gb = options.memory_gb -
+                  (static_cast<double>(reserved_bytes) / utils::kBytesPerGB);
     if (m_memory_gb <= 0) {
         throw std::runtime_error(
             "candidate source index exhausts the host memory budget");
@@ -456,9 +457,8 @@ void CellCap::add_to_full(std::vector<Candidate>& kept, const Candidate& c) {
 DominanceReducer::DominanceReducer(double tobs, const CandidateOptions& options)
     : m_tobs(tobs),
       m_options(options),
-      m_bins(options.cell_bins > 0),
-      m_reach(m_bins ? 2 * options.cell_bins / tobs
-                     : 2 * options.cell_log_width) {
+      m_bins(options.cell_bins > 0) {
+    // Validate before dividing by the observation length.
     options.validate();
     if (options.dominance_kappa <= 0 || options.max_per_cell == 0) {
         throw std::invalid_argument(
@@ -468,6 +468,8 @@ DominanceReducer::DominanceReducer(double tobs, const CandidateOptions& options)
         throw std::invalid_argument(
             "candidate dominance needs a positive observation length");
     }
+    m_reach =
+        m_bins ? 2 * options.cell_bins / tobs : 2 * options.cell_log_width;
 }
 
 bool DominanceReducer::explains(const Candidate& strong,
@@ -475,6 +477,9 @@ bool DominanceReducer::explains(const Candidate& strong,
     if (weak.snr > m_options.dominance_kappa * strong.snr) {
         return false; // the ratio never exceeds one
     }
+    // The narrower duty cycle, also in the boxcar model below: the stronger
+    // trial's own absorbs more per-run detections of the same source
+    // (docs/candidates.md, "Absorbing trials a stronger trial explains").
     const double w     = std::min(strong.duty_cycle(), weak.duty_cycle());
     const double limit = std::max(m_options.phase_radius, m_options.radius * w);
     if (phase_span(weak, strong, m_tobs, 1.0, limit) <= limit) {
@@ -596,6 +601,11 @@ Candidate ep_leaf_candidate(std::span<const double> leaf,
     return c;
 }
 
+// The search's cap reserves nothing from memory_gb: it holds no source index,
+// which publication's cap sets aside from the same budget. When the budget
+// binds, publication can therefore keep fewer leaves per cell than the search
+// did, never more; below it both keep the same leaves. The search reduces one
+// run at a time (PruneResultWriter), so one memory_gb covers every worker.
 RunLeafReducer::RunLeafReducer(const LeafReductionSpec& spec,
                                std::size_t nparams)
     : m_spec(&spec),

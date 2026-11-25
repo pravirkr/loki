@@ -839,6 +839,14 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
                              cache_path ? cache_path->string() : "none");
 }
 
+/// Whether an EP search of @p config sets the candidate memory aside, as
+/// EPFreqSweep decides: a polynomial Taylor search that publishes candidates
+/// or reduces its runs (with or without candidates).
+bool ep_candidate_memory(const loki::search::EPTomlConfig& config) {
+    return config.poly_basis == "taylor" &&
+           config.candidates.ep_reserves_memory();
+}
+
 /// Candidate processing runs after merge, while the shared engine buffers
 /// remain resident. Use exactly the facade's reservation for cache/dry runs.
 loki::search::PulsarSearchConfig
@@ -846,7 +854,7 @@ ep_candidate_planning_config(const loki::search::EPTomlConfig& config,
                              const loki::search::PulsarSearchConfig& input,
                              loki::Exec exec) {
     auto cfg = input;
-    if (config.candidates.enabled && config.poly_basis == "taylor") {
+    if (ep_candidate_memory(config)) {
         config.candidates.validate();
         if (exec.backend == loki::Backend::kCPU) {
             const auto remaining =
@@ -888,9 +896,8 @@ EPHostForecast ep_cuda_host_forecast(const loki::search::EPTomlConfig& cfg,
         cfg.preprocess && cfg.to_preprocess_options().method !=
                               loki::io::PreprocessMethod::kRobust;
     const double bytes_per_sample = host_preprocess ? 16.0 : 8.0;
-    const auto host = loki::algorithms::ep_cuda_host_memory(nparams);
-    const bool candidates =
-        cfg.candidates.enabled && cfg.poly_basis == "taylor";
+    const auto host       = loki::algorithms::ep_cuda_host_memory(nparams);
+    const bool candidates = ep_candidate_memory(cfg);
     // Candidate processing starts once the sweep has written every run.
     const double search_data_gb =
         std::max(static_cast<double>(host.sweep_bytes()) / kBytesPerGb,
@@ -1395,9 +1402,10 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
 
     const auto plan_start = SteadyClock::now();
     const auto cache      = prepare_ep_plan_cache(toml_cfg, ep_cfg, exec);
-    const bool common_candidates =
-        toml_cfg.candidates.enabled && toml_cfg.poly_basis == "taylor";
-    const auto rfi_config = toml_cfg.prune_rfi_config();
+    // With candidate options: to publish candidates, or to reduce the runs of
+    // a search without them.
+    const bool common_candidates = ep_candidate_memory(toml_cfg);
+    const auto rfi_config        = toml_cfg.prune_rfi_config();
     auto sweep =
         common_candidates
             ? loki::pipelines::EPFreqSweep(
@@ -1408,7 +1416,7 @@ int run_search_ep(loki::search::EPTomlConfig toml_cfg,
                   ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
                   toml_cfg.ref_ducy, rfi_config, cache, toml_cfg.n_runs,
                   toml_cfg.ref_segs, exec);
-    if (toml_cfg.candidates.enabled && !common_candidates) {
+    if (toml_cfg.candidates.enabled && toml_cfg.poly_basis != "taylor") {
         SPDLOG_WARN("Common EP candidates currently support polynomial Taylor "
                     "only; writing run diagnostics");
     }
@@ -2458,6 +2466,27 @@ loki::io::ObservationMetadata publish_observation(const PublishCli& cli,
     return observation;
 }
 
+/// Removes a file when it goes out of scope, unless released.
+class RemoveOnExit {
+public:
+    explicit RemoveOnExit(std::filesystem::path path)
+        : m_path(std::move(path)) {}
+    RemoveOnExit(const RemoveOnExit&)            = delete;
+    RemoveOnExit& operator=(const RemoveOnExit&) = delete;
+    RemoveOnExit(RemoveOnExit&&)                 = delete;
+    RemoveOnExit& operator=(RemoveOnExit&&)      = delete;
+    ~RemoveOnExit() {
+        if (!m_path.empty()) {
+            std::error_code error;
+            std::filesystem::remove(m_path, error);
+        }
+    }
+    void release() noexcept { m_path.clear(); }
+
+private:
+    std::filesystem::path m_path;
+};
+
 template <typename TomlConfig>
 int publish_as(const PublishCli& cli, const PublishSource& src) {
     constexpr bool kEp = std::is_same_v<TomlConfig, loki::search::EPTomlConfig>;
@@ -2533,12 +2562,20 @@ int publish_as(const PublishCli& cli, const PublishSource& src) {
     bool series_found      = false;
     const auto observation = publish_observation(cli, src, cfg, series_found);
 
+    // The product is written under a staging name next to the output, gets
+    // its provenance and run statistics, is read back, and only then renamed
+    // to the output: a reader never sees a product without them, and a
+    // failed or interrupted publish leaves no output (the spool is kept).
+    const auto staging =
+        output.parent_path() / (output.filename().string() + ".publishing");
+    RemoveOnExit remove_staging(staging);
+
     const auto start = SteadyClock::now();
     if constexpr (kEp) {
         loki::pipelines::EPFreqSweep::publish_candidates(
-            cli.file, output, options, observation, snr_min);
+            cli.file, staging, options, observation, snr_min);
     } else {
-        loki::pipelines::FFAFreqSweep::publish_candidates(cli.file, output,
+        loki::pipelines::FFAFreqSweep::publish_candidates(cli.file, staging,
                                                           options, observation);
     }
     const double publish_s = seconds_since(start);
@@ -2556,28 +2593,30 @@ int publish_as(const PublishCli& cli, const PublishSource& src) {
         effective  = cfg.to_toml_string();
     }
     loki::search::write_run_provenance(
-        output, {.config_effective     = effective,
-                 .command_line         = src.command_line.value_or(""),
-                 .loki_version         = LOKI_VERSION,
-                 .config_toml          = src.config_toml.value_or(""),
-                 .publish_command_line = run_command_line()});
+        staging, {.config_effective     = effective,
+                  .command_line         = src.command_line.value_or(""),
+                  .loki_version         = LOKI_VERSION,
+                  .config_toml          = src.config_toml.value_or(""),
+                  .publish_command_line = run_command_line()});
 
     // Run statistics: the search's timings, if it recorded any, and this
     // publish; the counts (overloads, harvests) come from the copied runs.
     // Not the peak RSS: this process only published.
     auto timings = recorded_timings(cli.file);
     timings.emplace_back("publish", publish_s);
-    record_run_stats(output,
+    record_run_stats(staging,
                      {.timing_s = std::move(timings), .peak_rss_gb = {}},
                      /*measure_rss=*/false);
 
-    // Read the product back before the spool goes.
-    const auto summary = loki::io::read_candidate_file_summary(output, 0);
+    // Read the product back before it replaces the output and the spool goes.
+    const auto summary = loki::io::read_candidate_file_summary(staging, 0);
     if (!summary.complete || summary.schema_version.empty()) {
         throw std::runtime_error(fmt::format(
             "the published '{}' did not read back complete; '{}' is kept",
             output.string(), cli.file.string()));
     }
+    std::filesystem::rename(staging, output);
+    remove_staging.release();
     SPDLOG_INFO("Published {} candidates from '{}' to '{}' in {:.1f} s",
                 summary.n_rows, cli.file.string(), output.string(), publish_s);
     if (kEp) {
@@ -3257,8 +3296,9 @@ int main(int argc, char** argv) {
     auto* ep_grp_candidates = ep->add_option_group("Candidate processing");
     ep_grp_candidates->add_flag(
         "--candidates,!--no-candidates", ep_cfg.candidates.enabled,
-        "Enable/disable candidate processing; disabled writes only the run "
-        "diagnostics of earlier versions (default: enabled)");
+        "Enable/disable candidate processing; disabled writes only the runs, "
+        "reduced unless --max-per-cell 0, for loki publish (default: "
+        "enabled)");
     ep_grp_candidates->add_flag(
         "--cluster,!--no-cluster", ep_cfg.candidates.cluster,
         "Enable/disable phase-track clustering (default: enabled)");

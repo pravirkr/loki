@@ -111,20 +111,19 @@ EPFreqSweep::EPFreqSweep(
     std::optional<std::vector<SizeType>> ref_segs,
     Exec exec) {
     candidates.validate();
-    if (!candidates.enabled) {
-        // Run diagnostics only, as the constructor without candidates.
-        m_impl       = std::make_unique<Impl>(make_ep_freq_sweep_engine(
-            cfg, show_progress, min_pd, poly_basis, ref_ducy, rfi_config,
-            plan_cache_file, n_runs, std::move(ref_segs), exec));
-        m_impl->exec = exec;
-        return;
-    }
-    if (poly_basis != "taylor" || cfg.get_nparams() < 2 ||
-        cfg.get_nparams() > kParamNames.size()) {
+    const bool taylor = poly_basis == "taylor" && cfg.get_nparams() >= 2 &&
+                        cfg.get_nparams() <= kParamNames.size();
+    if (candidates.enabled && !taylor) {
         throw std::invalid_argument("EP candidates require polynomial Taylor");
     }
-    auto search_cfg = cfg;
-    if (exec.backend == Backend::kCPU) {
+    // The search reduces each run as it writes it, exactly as publication
+    // would (CandidateOptions::ep_reduces_runs): the spool, and without
+    // candidates the raw result, then hold only the retained leaves, and
+    // `loki publish` of that raw result gives the search's product.
+    const bool reduce = taylor && candidates.ep_reduces_runs();
+    auto search_cfg   = cfg;
+    if (exec.backend == Backend::kCPU && taylor &&
+        candidates.ep_reserves_memory()) {
         const auto remaining =
             cfg.get_max_process_memory_gb() - candidates.memory_gb;
         if (remaining <= 0) {
@@ -134,14 +133,14 @@ EPFreqSweep::EPFreqSweep(
         }
         search_cfg.set_max_process_memory_gb(remaining);
     }
-    m_impl             = std::make_unique<Impl>(make_ep_freq_sweep_engine(
+    m_impl       = std::make_unique<Impl>(make_ep_freq_sweep_engine(
         search_cfg, show_progress, min_pd, poly_basis, ref_ducy, rfi_config,
-        plan_cache_file, n_runs, ref_segs, exec));
-    m_impl->exec       = exec;
-    m_impl->candidates = candidates;
-    // The search reduces each run as it writes it, exactly as publication
-    // would: the spool then holds only the retained leaves.
-    if (candidates.max_per_cell != 0) {
+        plan_cache_file, n_runs, std::move(ref_segs), exec));
+    m_impl->exec = exec;
+    if (candidates.enabled) {
+        m_impl->candidates = candidates;
+    }
+    if (reduce) {
         m_impl->m_engine->set_leaf_reduction(search::detail::LeafReductionSpec{
             .options = candidates,
             .snr_min = cfg.get_snr_min(),

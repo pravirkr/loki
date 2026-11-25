@@ -14,17 +14,20 @@ earlier versions:
 - CLI: `loki search ffa --no-candidates` or `loki search ep --no-candidates`;
 - Python/C++: `CandidateOptions.enabled = False` (`enabled = false`).
 
-With processing off, nothing is grouped, selected or sorted, and no host
-memory is reserved for it: the whole `max_process_memory_gb` goes to the
+With processing off, nothing is grouped, selected or sorted. FFA reserves
+no host memory for it: the whole `max_process_memory_gb` goes to the
 search. FFA writes the flat detection file `<prefix>_ffa_results.h5` of
 earlier versions, one root row per passing trial with the search attributes
 at the root. It also carries two additive items, `detection_id` and
 `/regions`. This flat file is also the spool candidate processing starts
 from, so `loki publish` (or `FFAFreqSweep.publish_candidates`) can
 publish it later. EP writes
-only its run diagnostics, as the constructor without candidates does; Taylor
-runs still save their winning `width`. `publish_candidates` refuses options
-with processing off.
+its run groups; Taylor runs still save their winning `width`. A Taylor EP
+search reduces each run as it writes it, as with processing on (below), and
+reserves `memory_gb` for that on the CPU: `loki publish` of the result then
+gives the product the search with candidates would have written. Add
+`max_per_cell = 0` (`--max-per-cell 0`) to keep every final leaf, as earlier
+versions did. `publish_candidates` refuses options with processing off.
 
 ## EP candidates
 
@@ -80,10 +83,11 @@ spool again (`publish_candidates`, for example after an interrupted
 postprocessing), or republishing a reduced product, requires the same
 options and `snr_min`, and gives the same product; other options raise an
 error, since the dropped leaves are gone. To
-keep every final leaf, search with `max_per_cell = 0`, or without candidates
-(`--no-candidates`), which never reduces. Publishing a full spool, such as
-one written with `--no-candidates`, reduces it then: a 10 GB spool of 83
-million leaves gave a 1.5 MB result. With `max_per_cell = 0` the run groups
+keep every final leaf, search with `max_per_cell = 0`, with or without
+candidates. A search without candidates (`--no-candidates`) reduces its runs
+too, unless `max_per_cell = 0`. Publishing a full spool, such as one written
+with `--no-candidates --max-per-cell 0`, reduces it then: a 10 GB spool of
+83 million leaves gave a 1.5 MB result. With `max_per_cell = 0` the run groups
 are copied whole, as before.
 
 EP limits on acceleration, jerk and higher derivatives (from `[search]` or
@@ -536,8 +540,10 @@ keeps every trial.
 in Python), which keeps 32 leaves per cell of 64 Fourier bins (`max_per_cell
 = 32`, `cell_bins = 64`) and absorbs dominated leaves (`dominance_kappa =
 1.5`, below). `max_per_cell = 0` in `[candidates]` (or `--max-per-cell 0`)
-keeps every leaf and gives the full, unreduced product. FFA searches and a
-default-constructed `CandidateOptions` keep every trial.
+keeps every leaf and gives the full, unreduced product. A Taylor search
+without candidates (`--no-candidates`) reduces its runs with the same
+options. FFA searches and a default-constructed `CandidateOptions` keep
+every trial.
 
 On searches with known pulsars and injections, these defaults kept every
 source's best S/N and every run that detected it, while publishing 2
@@ -567,7 +573,11 @@ FFA) would exceed it, every cell keeps half as many, as often as needed, and the
 is still independent of the order the trials arrive in, and the same as a
 smaller `max_per_cell` from the start. Only when one trial per cell does not
 fit does the cap fail. The cap applies to EP and FFA alike, and to
-`publish_candidates`.
+`publish_candidates`. An EP search that reduces its runs as it writes them
+reduces one run at a time, whatever the number of CPU workers, so one
+`memory_gb` covers them all; publication also sets aside its source index
+from `memory_gb`, so when the budget binds it can keep fewer leaves per cell
+than the search did, never more.
 
 ### Absorbing trials a stronger trial explains
 
@@ -586,6 +596,13 @@ run that explains it:
   observation, and a boxcar of width W (from w to a duty cycle of 0.3, in
   steps of 1.5) that holds a fraction q of the samples recovers
   `q * sqrt(w / W)` of the stronger S/N.
+
+Both tests use w, the narrower of the two duty cycles, not the stronger
+trial's own. With the stronger trial's duty cycle the model absorbs more of
+a run's weaker responses to the same source: measured on three searches with
+known pulsars and injections (2026-11), 1 to 38 percent fewer candidates,
+every source still published at its best S/N, but fewer of the runs that
+detected it.
 
 Only kept trials within two cell widths in frequency are compared. Absorbed
 trials are not detections of the product; the root attribute `n_dominated`
@@ -826,9 +843,12 @@ loki publish out/raw_ffa_results.h5 -o out/run.h5   # a --no-candidates result
 ```
 
 - **Output.** A spool publishes beside itself as `<prefix>_ffa_results.h5`
-  or `<prefix>_ep_results.h5`; any other file needs `-o`. An existing file
-  is replaced only with `--force` (atomically, once the new product is
-  written), and a published result file is refused.
+  or `<prefix>_ep_results.h5`; any other file needs `-o`. The product is
+  written as `<output>.publishing` next to the output, gets its provenance
+  and `/run_stats`, is read back, and only then renamed to the output, so a
+  failed or interrupted publish leaves no output (and keeps the spool). An
+  existing file is replaced only with `--force`, and a published result file
+  is refused.
 - **Candidate options.** From `-c`, else the configuration the file stores
   (`loki search`, when it keeps a spool, records its effective configuration and
   command line there), else the defaults, with a warning. `--memory-gb`,
@@ -972,6 +992,7 @@ are rejected rather than silently truncated.
   `[search] snr_min = 6.0`. Candidate-enabled Taylor EP applies `snr_min`
   to final reintegrated scores after all runs finish. Its pruning uses the
   independent `target_snr`, which is unchanged. Diagnostic-only EP output
+  (the constructor without candidate options, or `max_per_cell = 0`)
   retains all final leaves without this candidate filter.
 - **Root datasets now mean the selected candidates.** `snr`, `param_sets`,
   `width` and `nbins` are hard links to `/candidates`: one row per selected
@@ -987,8 +1008,9 @@ are rejected rather than silently truncated.
 - **CPU memory.** The candidate budget `candidates.memory_gb` (default 1 GB) is
   reserved inside `max_process_memory_gb`. A CPU search with
   `max_process_memory_gb <= memory_gb` now fails at construction; lower
-  `[candidates] memory_gb` or raise the search cap. Candidate-enabled Taylor
-  EP uses the same reservation. CUDA keeps its device search cap and a
+  `[candidates] memory_gb` or raise the search cap. Taylor EP uses the same
+  reservation, also without candidates unless `max_per_cell = 0` (it reduces
+  its runs as it writes them). CUDA keeps its device search cap and a
   separate host candidate budget.
 
 ### Reading old files

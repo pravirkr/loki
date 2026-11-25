@@ -214,6 +214,29 @@ wrote. With `max_per_cell = 0` it took 79 s at `memory_gb = 4` against
 both fail at `memory_gb = 1`. The cost is in grouping every leaf, not in
 publishing a spool.
 
+A Taylor search without candidates (`--no-candidates`) now reduces its runs
+as the search with candidates does (`max_per_cell = 0` keeps every leaf).
+Measured 2026-11-25 on an EDGAR L40 node (injected accelerated pulse,
+acceleration, 2^24 samples, 16 runs in 2 chunks, CUDA): 9.77 M final leaves
+became 1,202; the raw result went from 743 MB to 495 kB and the run from
+6.8 to 3.8 s (search 5.7 to 3.2 s, the time spent writing leaves). `loki
+publish` of the reduced raw result took 0.2 s and gave the product of the
+search with candidates: the same 490 candidates and 1,202 detections, with
+scores within the CUDA run-to-run jitter (at most 8e-7 relative, against
+1e-6 between two searches with candidates). Publishing the full 743 MB raw
+result at the default `memory_gb = 1` failed after 124 s (the transitive
+track index exceeded the host memory budget).
+
+A CPU search reduces one run at a time (its workers take turns), so one
+`memory_gb` covers them all. Measured 2026-11-25 on an EDGAR L40 node (CPU,
+4 threads, 8 runs, bright accelerated pulse, 0.17 M final leaves): 3.22,
+2.84 and 3.25 s against 3.23, 3.24 and 3.26 s without the turn-taking. A
+bound for heavier runs: reducing costs at most 0.63 us per leaf (19.3 M
+leaves above `snr_min` read and reduced in 12.1 s by `loki publish`), while
+CPU pruning spends about 30 us of thread time per final leaf (1.3 s x 4
+threads for those 0.17 M), so a serialised reduction is a few percent of a
+run's work at most.
+
 Measured and rejected: pooling every run's leaves into the same frequency
 cells (as first proposed). The strongest runs of a source fill its cell, so
 its detections in weaker runs are dropped: with 32 leaves per cell, sources
@@ -574,7 +597,7 @@ The planner now chooses slices (docs/memory.md, "Seed slices"): a chunk that
 does not fit takes the fewest slices that fit, before the width search
 narrows it; on CUDA a smaller batch replaces slices only where the search-time
 model says it is cheaper. On the same chunk (CUDA, limit set with
-`--memory-gb`, search with `--no-candidates`):
+`--memory-gb`, search with `--no-candidates`, which then kept every leaf):
 
 | Limit | Before: chunks, CUDA batch | After: chunks, slices, CUDA batch | Search after |
 |---|---|---|---|

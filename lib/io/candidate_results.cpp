@@ -149,13 +149,14 @@ void copy_attributes(const Source& source,
         const auto attr  = source.getAttribute(name);
         const auto type  = attr.getDataType();
         const auto space = attr.getSpace();
+        // Allocate first: nothing between H5Acreate2 and H5Aclose throws, so
+        // the raw handle cannot leak.
+        std::vector<std::byte> data(type.getSize() * space.getElementCount());
         const hid_t dst = H5Acreate2(target.getId(), name.c_str(), type.getId(),
                                      space.getId(), H5P_DEFAULT, H5P_DEFAULT);
         if (dst < 0) {
             throw std::runtime_error("cannot create search attribute");
         }
-        const auto bytes = type.getSize() * space.getElementCount();
-        std::vector<std::byte> data(bytes);
         const herr_t rd = H5Aread(attr.getId(), type.getId(), data.data());
         const herr_t wr =
             rd < 0 ? -1 : H5Awrite(dst, type.getId(), data.data());

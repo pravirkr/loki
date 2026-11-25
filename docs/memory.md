@@ -34,7 +34,8 @@ FFA and candidate-enabled Taylor EP searches, default 7.0. It is defined in
 `[search].snr_min`, CLI `--snr-min`, Python `snr_min`). FFA applies it to
 candidate extraction. Taylor EP applies it to the final reintegrated scores
 after independent runs finish and merge;
-diagnostic-only EP output retains all final leaves.
+diagnostic-only EP output (the constructor without candidate options, or
+`max_per_cell = 0`) retains all final leaves.
 
 `EPSearchConfig::target_snr` is an entropic information limit used only for EP
 multipass and pipeline threshold design, independent of `snr_min` (TOML
@@ -69,7 +70,7 @@ thresholds. The last pruning threshold is chosen freely by cost (`w_terminal =
 1`, weighing the leaves that go on to `ascend`): `snr_min` is applied strictly
 to the reintegrated post-`ascend` scores when writing candidates, so marginal
 leaves whose reintegrated score clears `snr_min` are not lost before `ascend`,
-diagnostic `--no-candidates` spools keep all surviving leaves, and changing
+`--no-candidates --max-per-cell 0` results keep all surviving leaves, and changing
 `snr_min` (`loki publish` or re-running) reuses the cached plan without
 invalidation.
 
@@ -786,7 +787,9 @@ is a science choice: it loses pulses narrower than the grid.
 ## Candidate postprocessing
 
 EP candidate publication also reserves `candidates.memory_gb` before CPU
-planning when the candidate-enabled sweep overload is used. CLI dry runs,
+planning when the candidate-enabled sweep overload is used, and so does a
+Taylor search without candidates that reduces its runs (`max_per_cell` not
+0, as by default). CLI dry runs,
 plan-only runs, cache preparation and execution use this same reservation.
 The legacy diagnostic-only API does not reserve a candidate index. Its CPU
 memory model now additionally covers a uint32 winning-width result per final

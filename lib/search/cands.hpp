@@ -481,6 +481,11 @@ private:
     Mode m_mode;
     std::string m_group_path;
     inline static std::mutex m_hdf5_mutex;
+    // One run is reduced at a time: a reduction may use the whole candidate
+    // memory_gb, which the CPU search budget sets aside once, not once per
+    // worker. Its result depends on that budget (the cell cap halves when
+    // over it), so the workers take turns rather than share it.
+    inline static std::mutex m_reduce_mutex;
 
     HighFive::File open_file() const;
     HighFive::Group open_runs_group(HighFive::File& file) const;

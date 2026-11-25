@@ -562,6 +562,10 @@ TEST_CASE("Dominance absorbs trials a stronger trial of the run explains",
     REQUIRE_NOTHROW(options.validate());
     REQUIRE_THROWS_AS(loki::search::detail::DominanceReducer(tobs, options),
                       std::invalid_argument);
+    // The observation length is checked before the reach divides by it.
+    options.max_per_cell = 4;
+    REQUIRE_THROWS_AS(loki::search::detail::DominanceReducer(0.0, options),
+                      std::invalid_argument);
 }
 
 TEST_CASE("Dominance publishes one detection per explained group",

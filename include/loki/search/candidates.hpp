@@ -21,8 +21,9 @@ struct FrequencyWindow {
 
 struct CandidateOptions {
     /// false skips candidate processing: FFA writes the search's flat
-    /// detection file and EP its run diagnostics, as before candidate
-    /// products, and no host memory is reserved.
+    /// detection file, as before candidate products, and reserves no host
+    /// memory; EP writes its runs, reduced unless max_per_cell = 0 (see
+    /// ep_reduces_runs()).
     bool enabled{true};
     bool cluster{true};
     std::string grouping{"transitive"}; ///< "transitive" or "anchored".
@@ -76,6 +77,20 @@ struct CandidateOptions {
     double memory_gb{1.0};           ///< Additional host memory, GB (2^30).
     std::filesystem::path temporary_directory;
     void validate() const;
+    /// Whether a polynomial Taylor EP search with these options reduces each
+    /// run as it writes it (cell cap and dominance): with candidates, and
+    /// without them too, so that the raw result of a search without
+    /// candidates holds only the leaves publication keeps. max_per_cell = 0
+    /// keeps every final leaf.
+    [[nodiscard]] bool ep_reduces_runs() const noexcept {
+        return max_per_cell != 0;
+    }
+    /// Whether such a search sets memory_gb of host memory aside (inside a
+    /// CPU search's max_process_memory_gb): to publish candidates, or to
+    /// reduce its runs.
+    [[nodiscard]] bool ep_reserves_memory() const noexcept {
+        return enabled || ep_reduces_runs();
+    }
     /// Defaults of EP searches: their final leaves are reduced per run, with
     /// max_per_cell 32 in cells of 64 Fourier bins and dominance_kappa 1.5.
     /// max_per_cell = 0 keeps every leaf.
