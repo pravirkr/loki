@@ -363,6 +363,18 @@ inline EPRingForecast ep_ring_forecast(SizeType ncoords,
     return out;
 }
 
+/// The forecast @p live ring times the search's tree_capacity_factor
+/// (@p factor, at least 1), rounded up: the population the world tree is
+/// sized for. A factor of 1 returns @p live. A product at or above the index
+/// limit returns the limit, which ep_tree_capacity rejects.
+inline SizeType
+ep_capacity_live(SizeType live, double factor, EPMemoryKind kind) {
+    const auto limit    = ep_tree_index_limit(kind);
+    const double scaled = std::ceil(static_cast<double>(live) * factor);
+    return scaled >= static_cast<double>(limit) ? limit
+                                                : static_cast<SizeType>(scaled);
+}
+
 /// World-tree capacity for a forecast @p live ring: room for one branched
 /// batch on top, rounded up to kEPRingGranularity leaves.
 inline SizeType ep_tree_capacity(SizeType live,

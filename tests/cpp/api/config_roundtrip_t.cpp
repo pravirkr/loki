@@ -206,6 +206,7 @@ void check_same_ep(const EPTomlConfig& a, const EPTomlConfig& b) {
     CHECK(a.validation_significance == b.validation_significance);
     CHECK(a.use_conservative_tile == b.use_conservative_tile);
     CHECK(a.overflow_keep_fraction == b.overflow_keep_fraction);
+    CHECK(a.tree_capacity_factor == b.tree_capacity_factor);
     REQUIRE(a.rfi.has_value() == b.rfi.has_value());
     if (a.rfi) {
         CHECK(a.rfi->pulsar_mask == b.rfi->pulsar_mask);
@@ -279,6 +280,7 @@ TEST_CASE("EPTomlConfig to_toml_string gives back every setting",
     cfg.validation_significance = 4.5;
     cfg.use_conservative_tile   = true;
     cfg.overflow_keep_fraction  = 0.25;
+    cfg.tree_capacity_factor    = 2.5;
     cfg.rfi                     = loki::search::EPRFIOptions{
         .pulsar_mask          = {{50.0, 50.2}, {100.0, 100.5}},
         .n_harmonics          = 4,

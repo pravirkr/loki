@@ -192,7 +192,8 @@ void bind_configs(py::module_& m) {
                     double validation_significance, bool use_conservative_tile,
                     bool use_boxcar_kadane, std::optional<double> target_snr,
                     double overflow_keep_fraction,
-                    std::optional<double> p_orb_max) {
+                    std::optional<double> p_orb_max,
+                    double tree_capacity_factor) {
                      if (param_limits.ndim() != 2 ||
                          param_limits.shape(1) != 2) {
                          throw std::invalid_argument(
@@ -221,7 +222,8 @@ void bind_configs(py::module_& m) {
                              propagator_significance, validation_significance,
                              use_conservative_tile, use_boxcar_kadane,
                              target_snr, overflow_keep_fraction)
-                             .with_p_orb_max(p_orb_max));
+                             .with_p_orb_max(p_orb_max)
+                             .with_tree_capacity_factor(tree_capacity_factor));
                  }),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
@@ -240,7 +242,8 @@ void bind_configs(py::module_& m) {
              py::arg("use_boxcar_kadane")       = false, py::kw_only(),
              py::arg("target_snr")              = std::nullopt,
              py::arg("overflow_keep_fraction")  = 0.5,
-             py::arg("p_orb_max")               = std::nullopt)
+             py::arg("p_orb_max")               = std::nullopt,
+             py::arg("tree_capacity_factor")    = 1.0)
         .def_property_readonly(
             "target_snr", &PulsarSearchConfig::get_target_snr,
             "EP entropic information limit; None selects the parameter-count "
@@ -265,6 +268,13 @@ void bind_configs(py::module_& m) {
             &PulsarSearchConfig::get_overflow_keep_fraction,
             "Fraction of the pool (the stage's survivors so far and the batch) "
             "a full world tree keeps when a batch overflows it, in (0, 1].")
+        .def_property_readonly(
+            "tree_capacity_factor",
+            &PulsarSearchConfig::get_tree_capacity_factor,
+            "Factor (>= 1) on the forecast population the world tree is sized "
+            "for; the planner narrows chunks to keep the memory limit.")
+        .def("with_tree_capacity_factor",
+             &PulsarSearchConfig::with_tree_capacity_factor, py::arg("factor"))
         .def("with_ep_default_nsegments",
              &PulsarSearchConfig::with_ep_default_nsegments,
              py::arg("target_n_segs") = PulsarSearchConfig::kDefaultEPSegments)
@@ -388,6 +398,7 @@ void bind_configs(py::module_& m) {
         .def_readwrite("validation_significance", &ETC::validation_significance)
         .def_readwrite("use_conservative_tile", &ETC::use_conservative_tile)
         .def_readwrite("overflow_keep_fraction", &ETC::overflow_keep_fraction)
+        .def_readwrite("tree_capacity_factor", &ETC::tree_capacity_factor)
         .def_readwrite("plan_cache", &ETC::plan_cache)
         .def_readwrite("use_plan_cache", &ETC::use_plan_cache)
         .def_readwrite("rfi", &ETC::rfi)

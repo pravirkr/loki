@@ -335,6 +335,13 @@ public:
     /// the upper half; 1 keeps every leaf that fits, at the cost of a trim
     /// for nearly every later batch of the stage.
     double get_overflow_keep_fraction() const noexcept;
+    /// Factor, at least 1, on the forecast population the world tree is sized
+    /// for (EPRegionPlanner). 1, the default, sizes the tree for the noise
+    /// forecast and its margin. A larger factor leaves room for data that
+    /// departs from the noise model (RFI, a bright source); the planner then
+    /// narrows the chunks so that the memory limit still holds. See
+    /// with_tree_capacity_factor().
+    double get_tree_capacity_factor() const noexcept;
 
     /// Same as FFASearchConfig::get_updated_config, but keeps the EP fields.
     /// A distinct name, so it never hides the base overloads: through an
@@ -364,6 +371,10 @@ public:
     /// period not above p_orb_min.
     [[nodiscard]] EPSearchConfig
     with_p_orb_max(std::optional<double> p_orb_max) const;
+
+    /// This configuration with get_tree_capacity_factor() = @p factor. Throws
+    /// std::invalid_argument unless @p factor is finite and at least 1.
+    [[nodiscard]] EPSearchConfig with_tree_capacity_factor(double factor) const;
 
     // --- TOML Helpers ---
     static EPSearchConfig
@@ -460,6 +471,8 @@ struct EPTomlConfig : FFATomlConfig {
     bool use_conservative_tile{false};
     /// Share of the pool a full world tree keeps on overflow, in (0, 1]
     double overflow_keep_fraction{0.5};
+    /// Factor (>= 1) on the forecast population the world tree is sized for
+    double tree_capacity_factor{1.0};
     /// [ep.rfi]; absent = no RFI control.
     std::optional<EPRFIOptions> rfi;
 
