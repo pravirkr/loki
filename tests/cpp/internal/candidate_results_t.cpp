@@ -556,6 +556,23 @@ TEST_CASE("Dominance absorbs trials a stronger trial of the run explains",
                                              trial(50.1, 0, 1.5F, 0, 1)};
     REQUIRE(loki::search::detail::DominanceReducer(tobs, options).reduce(far) ==
             0);
+    // Log cells reach two cells either side in ln(f): 50.1 Hz is within
+    // 50 exp(2w) for 2w = 0.001999, although beyond the linearised
+    // 50 (1 + 2w); with 2w = 0.0019 it is out of reach.
+    options.cell_bins      = 0;
+    options.cell_log_width = 0.001999 / 2;
+    std::vector<loki::search::Candidate> log_near{trial(50.0, 0, 100, 0, 0),
+                                                  trial(50.1, 0, 1.5F, 0, 1)};
+    REQUIRE(loki::search::detail::DominanceReducer(tobs, options)
+                .reduce(log_near) == 1);
+    options.cell_log_width = 0.0019 / 2;
+    std::vector<loki::search::Candidate> log_far{trial(50.0, 0, 100, 0, 0),
+                                                 trial(50.1, 0, 1.5F, 0, 1)};
+    REQUIRE(
+        loki::search::detail::DominanceReducer(tobs, options).reduce(log_far) ==
+        0);
+    options.cell_log_width = 0;
+    options.cell_bins      = 1;
     // Dominance runs only within the cell cap: without it, kappa is valid
     // but has no effect.
     options.max_per_cell = 0;

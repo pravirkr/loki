@@ -798,7 +798,9 @@ loki refold series.dat --f 141.0 --acc 30 --jerk 0.2 --snap -1e-4 --crackle 1e-6
 
 With `--result`, the series is preprocessed as the search did (the file's
 `config_effective`, or `-c`), cut to the searched samples, and folded at
-the file's reference time. An EP candidate is folded with the phase model
+the file's reference time. Without either, it is preprocessed with the
+defaults, and the baseline window is raised to 10 periods of the lowest
+`--f`, as a search raises it for `f_min`. An EP candidate is folded with the phase model
 the search propagated its leaf with (`psr_utils::leaf_phase`, from the
 leaf and its errors that the run keeps): in a five-parameter search, a
 circular orbit where its terms are significant. An FFA candidate, and a
@@ -936,7 +938,8 @@ The catalogue is a CSV with `name`, `f0` (Hz) or `p0_ms`, and optionally
 `dm` and `doppler` (a binary's largest fractional orbital Doppler shift,
 added to `--match-tol`). The Doppler correction uses astropy, an optional
 dependency; without `--ra`, `--dec` and `--site` the frequencies are matched
-as observed. In Python: `libloki.io.sift(files, options)`,
+as observed. A file whose `/observation` records barycentric sample times is
+never shifted: its frequencies are barycentric already. In Python: `libloki.io.sift(files, options)`,
 `loki.sift.match_groups(result, catalog, doppler=...)` and
 `loki.sift.astropy_doppler(ra, dec, lat, lon, height)`.
 

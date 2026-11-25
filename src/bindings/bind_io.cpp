@@ -261,6 +261,7 @@ void bind_io(py::module_& m) {
         .def_readonly("dm", &io::SiftFile::dm)
         .def_readonly("start_mjd", &io::SiftFile::start_mjd)
         .def_readonly("reference_mjd", &io::SiftFile::reference_mjd)
+        .def_readonly("barycentric", &io::SiftFile::barycentric)
         .def_readonly("tobs", &io::SiftFile::tobs)
         .def_readonly("segment", &io::SiftFile::segment);
     py::class_<io::SiftMember>(m_io, "SiftMember")

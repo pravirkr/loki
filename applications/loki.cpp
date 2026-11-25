@@ -2201,6 +2201,21 @@ int run_refold(RefoldCli cli) {
         throw std::invalid_argument(
             "nothing to refold: give --f, or --result with --id or --top");
     }
+    // Without a search configuration, keep the searches' baseline floor of
+    // min_window_periods periods of the lowest target frequency, so a slow
+    // pulsar is not subtracted with the baseline.
+    if (setup.preprocess && !config_text && !cli.freqs.empty() &&
+        setup.options.filter_window > 0.0) {
+        const double f_low   = std::ranges::min(cli.freqs);
+        const double periods = loki::search::FFATomlConfig{}.min_window_periods;
+        const double floor   = periods / f_low;
+        if (f_low > 0.0 && floor > setup.options.filter_window) {
+            SPDLOG_INFO("Preprocessing: baseline window raised from {:.3g} s "
+                        "to {:.3g} s ({} periods of {} Hz)",
+                        setup.options.filter_window, floor, periods, f_low);
+            setup.options.filter_window = floor;
+        }
+    }
 
     // The series, preprocessed as the search did, over the searched span.
     loki::io::ReadOptions read_opts;
@@ -2239,6 +2254,15 @@ int run_refold(RefoldCli cli) {
     for (const auto& item : items) {
         results.push_back(
             loki::search::refold(e, v, tsamp, t_ref, item.target, cli.options));
+        // A circular target is folded as the search would propagate it: as a
+        // polynomial when its derivatives describe no circular orbit.
+        if (cli.circular && !item.candidate &&
+            results.back().model == "taylor") {
+            SPDLOG_WARN("{}: --circular folded with the Taylor model; the "
+                        "derivatives describe no circular orbit (-snap/acc "
+                        "or -crackle/jerk positive and significant)",
+                        item.label);
+        }
     }
     loki::cli::Console::print(
         cli.json ? refold_json(cli, nsamps, tsamp, t_ref, setup, items, results)

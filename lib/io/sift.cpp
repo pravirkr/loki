@@ -75,6 +75,7 @@ std::pair<SiftFile, std::string> read_file(const std::filesystem::path& path,
         out.dm            = optional_attribute<double>(obs, "dm");
         out.start_mjd     = optional_attribute<double>(obs, "start_mjd");
         out.reference_mjd = optional_attribute<double>(obs, "reference_mjd");
+        out.barycentric   = optional_attribute<bool>(obs, "barycentric");
         out.tobs = optional_attribute<double>(obs, "tobs").value_or(0.0);
         if (out.dm && !utils::is_finite(*out.dm)) {
             out.dm.reset();
@@ -254,7 +255,8 @@ SiftResult sift(std::span<const std::filesystem::path> files,
         }
         group.dm_curve.assign(curve.begin(), curve.end());
         const float best_snr = group.members.front().snr;
-        if (dm_lo && !curve.empty() && best_snr > 0) {
+        // One DM trial has no edge to compare with.
+        if (dm_lo && *dm_hi > *dm_lo && !curve.empty() && best_snr > 0) {
             const auto at = [&](double dm) -> float {
                 const auto it = curve.find(dm);
                 return it == curve.end() ? 0.0F : it->second;

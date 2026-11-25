@@ -521,11 +521,13 @@ std::uint64_t DominanceReducer::reduce(std::vector<Candidate>& trials) const {
         if (i > 0 && c.source_region != trials[i - 1].source_region) {
             by_freq.clear();
         }
-        const double f     = c.derivatives[0];
-        const double reach = m_bins ? m_reach : m_reach * f;
-        bool explained     = false;
-        for (auto it = by_freq.lower_bound(f - reach);
-             it != by_freq.end() && it->first <= f + reach; ++it) {
+        const double f = c.derivatives[0];
+        // Two cells either side: in Fourier bins, or in ln(f) for log cells.
+        const double lo = m_bins ? f - m_reach : f * std::exp(-m_reach);
+        const double hi = m_bins ? f + m_reach : f * std::exp(m_reach);
+        bool explained  = false;
+        for (auto it = by_freq.lower_bound(lo);
+             it != by_freq.end() && it->first <= hi; ++it) {
             if (explains(kept[it->second], c)) {
                 explained = true;
                 break;

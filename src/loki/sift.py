@@ -125,16 +125,18 @@ def match_groups(
     """Match each group's best frequency to ``n/m`` times a catalogue frequency.
 
     With ``doppler`` the frequency is divided by ``1 + doppler(reference_mjd)``
-    of the best member's file first. The simplest ratio wins; a binary's
-    ``doppler`` widens its tolerance.
+    of the best member's file first, unless that file's sample times were
+    already barycentric. The simplest ratio wins; a binary's ``doppler``
+    widens its tolerance.
     """
     ratios = _ratios(nmax, mmax)
     out: list[Match | None] = []
     for group in result.groups:
         best = group.members[0]
         freq = best.freq
-        mjd = result.files[best.file].reference_mjd
-        if doppler is not None and mjd is not None:
+        file = result.files[best.file]
+        mjd = file.reference_mjd
+        if doppler is not None and mjd is not None and not file.barycentric:
             freq /= 1.0 + doppler(mjd)
         found = None
         for q in ratios:

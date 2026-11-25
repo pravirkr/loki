@@ -48,6 +48,9 @@ struct SiftFile {
     std::optional<double> dm;
     std::optional<double> start_mjd;
     std::optional<double> reference_mjd;
+    /// Whether the searched sample times were barycentric (unset: not
+    /// recorded).
+    std::optional<bool> barycentric;
     double tobs{};
     /// Index of its time segment: files with the same start MJD (or, without
     /// one, the same input series) share a segment. Segments are numbered by
@@ -74,7 +77,7 @@ struct SiftGroup {
     std::vector<SizeType> segments;
     /// Best S/N at the lowest and highest DM of all files over the group's
     /// best S/N: near 1 for interference flat in DM, small for a pulsar that
-    /// peaks inside the trials. Empty without DMs.
+    /// peaks inside the trials. Empty without DMs, or with one DM trial.
     std::optional<double> edge_ratio;
     /// Largest |f_b - f_a - fdot_a (t_b - t_a)| * T_b over consecutive
     /// segments' best members, from their reference MJDs: how far, in

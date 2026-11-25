@@ -7,10 +7,12 @@ from loki import libloki
 io = libloki.io
 
 
-def _write(path, dm, start_mjd, rows):
+def _write(path, dm, start_mjd, rows, barycentric=None):
     with h5py.File(path, "w") as h:
         h.attrs["schema_version"] = "1.0"
         obs = h.create_group("observation")
+        if barycentric is not None:
+            obs.attrs["barycentric"] = np.bool_(barycentric)
         obs.attrs["dm"] = dm
         obs.attrs["start_mjd"] = start_mjd
         obs.attrs["reference_mjd"] = start_mjd + 500.0 / 86400.0
@@ -73,3 +75,25 @@ def test_sift_matches_a_catalogue(tmp_path) -> None:
     assert shifted[0] is not None
     assert shifted[0].name == "A"
     assert loki_sift.main([*files, "--catalog", str(catalog), "--top", "2"]) == 0
+
+
+def test_sift_match_leaves_barycentric_files_unshifted(tmp_path) -> None:
+    from loki import sift as loki_sift  # noqa: PLC0415
+
+    topo = tmp_path / "topo.h5"
+    bary = tmp_path / "bary.h5"
+    _write(topo, 10.0, 60000.0, [(100.001, 12.0)], barycentric=False)
+    _write(bary, 10.0, 60000.0, [(100.001, 12.0)], barycentric=True)
+    unknown = tmp_path / "unknown.h5"
+    _write(unknown, 10.0, 60000.0, [(100.001, 12.0)])
+    isolated = [loki_sift.KnownPulsar("A", 100.0)]
+    shift = 1e-5
+    for path, barycentric in ((topo, False), (bary, True), (unknown, None)):
+        result = io.sift([str(path)])
+        assert result.files[0].barycentric is barycentric
+        # A Doppler shift of 1e-5 divided out matches A; a barycentric file's
+        # frequencies are already barycentric and are left as they are.
+        match = loki_sift.match_groups(
+            result, isolated, doppler=lambda _mjd: shift, tolerance=1e-7
+        )[0]
+        assert (match is None) == (barycentric is True)

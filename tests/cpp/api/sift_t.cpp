@@ -153,6 +153,19 @@ TEST_CASE("sift groups candidates over DM trials and segments", "[sift]") {
         CHECK(res.groups[1].harmonic_numerator == 2);
         CHECK(res.groups[1].harmonic_denominator == 1);
     }
+
+    SECTION("one DM trial has no edge ratio") {
+        const std::vector<std::filesystem::path> one{
+            write_result(dir, "dm1_0.h5", 10.0, 60000.0, {{100.0, 12.0F}}),
+            write_result(dir, "dm1_1.h5", 10.0, 60000.1,
+                         {{100.0 + 1e-6, 11.0F}}),
+        };
+        const auto res = loki::io::sift(one);
+        REQUIRE(res.groups.size() == 1);
+        CHECK(res.groups[0].dm_curve.size() == 1);
+        CHECK_FALSE(res.groups[0].edge_ratio.has_value());
+    }
+
     SECTION("a raw file is refused") {
         const auto raw = dir / "raw.h5";
         {

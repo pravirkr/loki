@@ -68,7 +68,11 @@ public:
 
     T norm_isf(T minus_logsf) const {
         if (minus_logsf < 0) {
-            throw std::out_of_range("minus_logsf must be non-negative");
+            // Below the table: continue its first segment downwards, so the
+            // result stays monotonic.
+            return m_norm_isf_table[0] +
+                   ((minus_logsf / kMinusLogSfRes) *
+                    (m_norm_isf_table[1] - m_norm_isf_table[0]));
         }
         const auto pos      = minus_logsf / kMinusLogSfRes;
         const auto pos_int  = static_cast<SizeType>(pos);
@@ -92,19 +96,20 @@ public:
         const auto tab_pos_int = static_cast<SizeType>(tab_pos);
         const auto frac_pos    = tab_pos - static_cast<T>(tab_pos_int);
         if (chi_sq_score < kChiSqMax) {
-            return std::lerp(m_chi_sq_minus_logsf_table[df][tab_pos_int],
-                             m_chi_sq_minus_logsf_table[df][tab_pos_int + 1],
-                             frac_pos);
+            return std::lerp(
+                m_chi_sq_minus_logsf_table[df - 1][tab_pos_int],
+                m_chi_sq_minus_logsf_table[df - 1][tab_pos_int + 1], frac_pos);
         }
         return m_chi_sq_minus_logsf_table[df - 1].back() * chi_sq_score /
                kChiSqMax;
     }
 
-    // Exact normal inverse survival function using Boost
+    // Exact normal inverse survival function using Boost, evaluated in
+    // double: exp(-400) underflows in float.
     static T exact_norm_isf(T minus_logsf) {
-        const boost::math::normal_distribution<T> norm_dist;
-        return boost::math::quantile(
-            boost::math::complement(norm_dist, std::exp(-minus_logsf)));
+        const boost::math::normal_distribution<double> norm_dist;
+        return static_cast<T>(boost::math::quantile(boost::math::complement(
+            norm_dist, std::exp(-static_cast<double>(minus_logsf)))));
     }
 
     // Exact chi-squared minus log survival function using Boost
@@ -113,19 +118,25 @@ public:
             throw std::out_of_range(
                 "Degrees of freedom must be greater than 0");
         }
-        const boost::math::chi_squared_distribution<T> chi_sq_dist(
-            static_cast<T>(df));
-        return -std::log(boost::math::cdf(
-            boost::math::complement(chi_sq_dist, chi_sq_score)));
+        // In double: the survival function underflows in float.
+        const boost::math::chi_squared_distribution<double> chi_sq_dist(
+            static_cast<double>(df));
+        return static_cast<T>(
+            -std::log(boost::math::cdf(boost::math::complement(
+                chi_sq_dist, static_cast<double>(chi_sq_score)))));
     }
 
 private:
     void initialize_tables() {
-        // Initialize m_norm_isf_table
-        for (SizeType i = 0; i < kNormTableSize; ++i) {
+        // Initialize m_norm_isf_table. The exact value at 0 is -inf (the
+        // quantile of probability 1); extrapolate the next two entries so
+        // interpolation in [0, kMinusLogSfRes) stays finite.
+        for (SizeType i = 1; i < kNormTableSize; ++i) {
             T minus_logsf       = static_cast<T>(i) * kMinusLogSfRes;
             m_norm_isf_table[i] = exact_norm_isf(minus_logsf);
         }
+        m_norm_isf_table[0] =
+            (T(2) * m_norm_isf_table[1]) - m_norm_isf_table[2];
 
         // Initialize m_chi_sq_minus_logsf_table
         for (SizeType df = 1; df <= kChiSqMaxDf; ++df) {

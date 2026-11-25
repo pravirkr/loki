@@ -88,10 +88,44 @@ TEST_CASE("refold CLI folds parameters given as accel or fdot", "[cli]") {
     INFO(circ);
     REQUIRE(circ_status == 0);
     CHECK(json_field(circ, "model") == "\"taylor\"");
+    // ... and says so, which a Taylor request does not.
+    CHECK(circ.find("--circular folded with the Taylor model") !=
+          std::string::npos);
+    CHECK(by_acc.find("--circular") == std::string::npos);
 
     // Candidates need a result file.
     const auto [bad_status, bad] =
         run_cli(fmt::format(R"(refold "{}" --id 3)", series.string()), log);
     CHECK(bad_status != 0);
     CHECK(bad.find("--id and --top need --result") != std::string::npos);
+}
+
+TEST_CASE("refold CLI keeps a slow pulse out of the baseline", "[cli]") {
+    if (std::string(LOKI_APP_PATH).empty()) {
+        SKIP("loki_app was not built (LOKI_APP_PATH undefined)");
+    }
+    const loki::test::TempDir base("loki-cli-refold-slow");
+    // A wide 0.25 Hz pulse (duty cycle 0.3, 1.2 s): the default 1 s baseline
+    // window would subtract most of it (S/N 12 of 35); without a search
+    // configuration the window is raised to 10 periods, as in the searches.
+    auto ts           = loki::simulation::PulseSignalConfig(
+                            4.0, 4e-3, loki::SizeType{1} << 16U, 30.0, 0.3, "derivative",
+                            loki::simulation::ModulatorParams{}, std::nullopt, 5)
+                            .generate("gaussian");
+    const auto series = base / "slow.tim";
+    ts.write(series);
+    const auto log            = base / "refold.log";
+    const auto [status, text] = run_cli(
+        fmt::format(R"(refold "{}" --f 0.25 -t 1 --json)", series.string()),
+        log);
+    INFO(text);
+    REQUIRE(status == 0);
+    const auto [raw_status, raw] = run_cli(
+        fmt::format(R"(refold "{}" --f 0.25 -t 1 --json --no-preprocess)",
+                    series.string()),
+        log);
+    INFO(raw);
+    REQUIRE(raw_status == 0);
+    CHECK(std::stod(json_field(text, "snr")) >
+          0.6 * std::stod(json_field(raw, "snr")));
 }

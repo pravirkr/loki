@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -63,6 +64,42 @@ TEST_CASE("StatLookupTables exact reference", "[math]") {
             loki::math::StatTables::exact_chi_sq_minus_logsf(1.0F, 0),
             std::out_of_range);
     }
+}
+
+namespace {
+template <typename T> void check_stat_tables() {
+    using Tables = loki::math::StatLookupTables<T>;
+    const Tables tables; // builds every entry, also in float
+    // Chi-squared: the table row of df, at every df including the last.
+    for (const loki::SizeType df : {1U, 2U, 16U, 63U, 64U}) {
+        for (const double x : {1.0, 3.0, 40.25, 150.0}) {
+            const double exact =
+                Tables::exact_chi_sq_minus_logsf(static_cast<T>(x), df);
+            const double table =
+                tables.chi_sq_minus_logsf(static_cast<T>(x), df);
+            INFO("df " << df << " chi_sq " << x);
+            REQUIRE(loki::utils::is_finite(table));
+            CHECK(std::abs(table - exact) <= 0.02 * std::abs(exact) + 1e-3);
+        }
+    }
+    // Normal ISF: finite and increasing in minus_logsf, also below 0, in the
+    // first table cell and beyond the table.
+    double previous = std::numeric_limits<double>::lowest();
+    for (const double m : {-5.0, -0.05, 0.0, 0.05, 0.1, 10.0, 400.0, 800.0}) {
+        const double value = tables.norm_isf(static_cast<T>(m));
+        INFO("minus_logsf " << m);
+        REQUIRE(loki::utils::is_finite(value));
+        CHECK(value > previous);
+        previous = value;
+    }
+    CHECK(std::abs(tables.norm_isf(T(10)) - Tables::exact_norm_isf(T(10))) <
+          1e-3);
+}
+} // namespace
+
+TEST_CASE("StatLookupTables builds and interpolates its tables", "[math]") {
+    check_stat_tables<float>();
+    check_stat_tables<double>();
 }
 
 TEST_CASE("PCG32", "[math]") {

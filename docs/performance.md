@@ -116,6 +116,11 @@ the FFA and EP workloads and the comparison tools).
   `--no-candidates` file 26.2 instead of 29.1 MB. Writing the 512 tables
   costs about 66 ms more (104 to 170 ms); the search took 34 s. Values are
   identical.
+- Baseline floor for standalone `loki refold` (no search configuration):
+  the default 1 s baseline window subtracted most of a slow, wide pulse.
+  A 0.25 Hz pulse with duty cycle 0.3 (2^16 samples of 4 ms) refolded at
+  S/N 11.7 against 35.1 without preprocessing; with the window raised to 10
+  periods of the lowest `--f`, as the searches raise it, S/N 28.7.
 
 ## Deferred, with the reason
 
@@ -125,6 +130,7 @@ the FFA and EP workloads and the comparison tools).
 | Exact K-th trimming on world-tree overflow | Science change on overflow; needs a recovery study |
 | FP16 / BF16 tree folds | Science change; needs a recovery study |
 | CPU intra-run threading | Workers are `min(nthreads, n_runs)`; with 16 runs a large node idles in the pruning stage. Medium effort, exact numerics required. Measure the pruning share of a CPU production run first. |
+| CUDA seed index list in the memory model (4 B per FFA coordinate, allocated by sliced or masked runs; counted only with RFI control) | About 100 kB per chunk at 25k coordinates, inside the 0.5 GiB unmodelled reserve. Counting it moves chunk edges wherever the limit binds (2026-11-26, 8 CUDA configs: identical at 30 GB; at 4 GB 8 and 11 of 27 chunks of two wide searches moved, edges by up to 3.7 Hz). Add it with the next memory-model version bump. |
 | S/N lost to grid snapping in the FFA tree (issue #9, issue #39, "long brute segments bias accelerated signals by about 2.5 bins") | One mechanism, three reports. Needs an injection and refold harness before any kernel-math change; the 2.5-bin figure has no recorded reproduction. |
 
 ## Measured production profile (2026-11, L40, 2^25 samples, jerk, 16 runs)
@@ -1266,6 +1272,12 @@ trials at the true bin count):
     factor 2.0): plan `5.8 -> 1.4 s` (4.1×), search `295.2 -> 181.7 s` (-38 %,
     saving 113 s), total `302.3 -> 185.8 s`; all 3 known pulsars recovered
     (strongest improves by +0.78 S/N, other two identical).
+  - Planning only, on the CPU backend (2026-11-27, EDGAR CPU node,
+    `search ep --plan-only`, no plan cache): a 2-parameter acceleration
+    search (`5-720 Hz`, `|a| <= 35`, `16-1024` bins, growth factor 2.0, 8
+    chunks, 2^24 samples, 32 runs) plans in 100.6 s at 4 threads (448.9 s
+    with the previous planner, 4.5x) and 65.3 s at 8 (307.0 s, 4.7x). A plan
+    cache pays this once per configuration and observation length.
   - What the designs predict for the marginal losses: Pd per run of each
     plan's own thresholds on the search's signal model, region by region (the
     jerk plans of growth factor 2.0 and 1.5). At S/N 7.0 the previous design
